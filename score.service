@@ -1,0 +1,17 @@
+[Unit]
+Description=SN44 Score Image Labeler
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/workspace/score/web
+ExecStart=/root/workspace/score/web/.venv/bin/python -m uvicorn backend.main:app --app-dir /root/workspace/score/web --host 0.0.0.0 --port 8765
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/root/workspace/score/web/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply h-full antialiased;
+  }
+
+  body,
+  #root {
+    @apply m-0 h-full;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-ink-950 dark:text-slate-100;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .filmstrip-scroll {
+    scroll-behavior: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgb(148 163 184 / 0.45) transparent;
+  }
+  .filmstrip-scroll::-webkit-scrollbar {
+    height: 6px;
+  }
+  .filmstrip-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .filmstrip-scroll::-webkit-scrollbar-thumb {
+    border-radius: 9999px;
+    background: rgb(148 163 184 / 0.45);
+  }
+  .dark .filmstrip-scroll {
+    scrollbar-color: rgb(100 116 139 / 0.55) transparent;
+  }
+  .dark .filmstrip-scroll::-webkit-scrollbar-thumb {
+    background: rgb(100 116 139 / 0.55);
+  }
+
+  @keyframes chutes-toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .chutes-toast-enter {
+    animation: chutes-toast-in 220ms ease-out;
+  }
+
+  @keyframes upload-fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes upload-slide-left {
+    from {
+      opacity: 0;
+      transform: translateX(28px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes upload-slide-right {
+    from {
+      opacity: 0;
+      transform: translateX(-28px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes upload-bar {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(250%);
+    }
+  }
+
+  .upload-fade-up {
+    animation: upload-fade-up 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .upload-slide-left {
+    animation: upload-slide-left 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .upload-slide-right {
+    animation: upload-slide-right 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  @keyframes metricGradeIn {
+    from {
+      opacity: 0.35;
+      transform: translateY(2px) scale(0.92);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+}
