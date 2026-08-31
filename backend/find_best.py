@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCORE_ROOT = Path(__file__).resolve().parent.parent.parent
+SCORE_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = SCORE_ROOT / "find_best_model.py"
 HISTORY_ROOT = SCORE_ROOT / "review_datasets" / "merged_models"
 GT_STAGING_ROOT = SCORE_ROOT / "review_datasets" / "find_best_gt"
@@ -979,7 +979,7 @@ class FindBestManager:
         out_dir: Path,
         python_exe: str | None,
     ) -> None:
-        py = python_exe or str(SCORE_ROOT / "web" / ".venv" / "bin" / "python")
+        py = python_exe or str(SCORE_ROOT / ".venv" / "bin" / "python")
         if not Path(py).is_file():
             py = "python3"
         cmd = [

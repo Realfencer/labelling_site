@@ -17,6 +17,8 @@ data/
 
 # Runtime data — images, labels, caches, downloaded models
 review_datasets/
+runs/
+_hf_probe/
 *.onnx
 
 # OS

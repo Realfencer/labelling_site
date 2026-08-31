@@ -2418,7 +2418,7 @@ def validate_miner_folder(folder: Path) -> str | None:
         return f"Not a directory: {resolved}"
     if not (resolved / "weights.onnx").is_file():
         return f"Missing weights.onnx in {resolved}"
-    parent_miner = Path(__file__).resolve().parent.parent.parent / "miner.py"
+    parent_miner = Path(__file__).resolve().parent.parent / "miner.py"
     if not (resolved / "miner.py").is_file() and not parent_miner.is_file():
         return f"Missing miner.py in {resolved} and no local miner.py fallback."
     return None
@@ -2428,7 +2428,7 @@ def load_miner_from_folder(folder: Path):
     resolved = folder.expanduser().resolve()
     miner_py = resolved / "miner.py"
     if not miner_py.is_file():
-        miner_py = Path(__file__).resolve().parent.parent.parent / "miner.py"
+        miner_py = Path(__file__).resolve().parent.parent / "miner.py"
     module_name = f"submission_miner_{abs(hash(str(resolved))) & 0xFFFF}"
     spec = importlib.util.spec_from_file_location(module_name, miner_py)
     if spec is None or spec.loader is None:

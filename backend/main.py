@@ -58,7 +58,7 @@ def _ultra_http_error(exc: ultra.UltralyticsApiError) -> HTTPException:
         status = 400
     return HTTPException(status_code=status, detail=str(exc))
 
-SCORE_ROOT = Path(__file__).resolve().parent.parent.parent
+SCORE_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 REVIEW_DIR = SCORE_ROOT / "review_datasets"
 
