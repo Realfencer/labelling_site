@@ -177,6 +177,16 @@ def start_analyze(dataset: str | None = None, workers: int = 8, mode: str | None
                 camera_meta = {"skipped": str(e)}
             except Exception as e:  # noqa: BLE001 — prompts just lack the CAMERA LOCK line
                 camera_meta = {"error": str(e)[:300]}
+            try:  # the eval frames' look (texture / edge crispness) — target of the source-matched post-process
+                from app.look import CACHE_NAME as LOOK_CACHE
+                from app.look import measure_many as measure_looks
+
+                gt_imgs = sorted(p for p in (Path(ds) / "images").iterdir()
+                                 if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+                measure_looks(gt_imgs, Path(out_dir) / LOOK_CACHE,
+                              progress_cb=lambda d, n: cb(d, n, f"Measuring each frame's look {d}/{n}…"))
+            except Exception:  # noqa: BLE001 — the post-process then measures each source on the fly
+                pass
             cb(summary.get("count", 0), summary.get("count", 0), "Preparing generation package…")
             meta = {}
             try:
@@ -352,21 +362,21 @@ def start_generation(
                 except Exception as e:  # noqa: BLE001 — a missing copy only affects the Results view
                     base_msg += f" · keeping source copies failed: {e}"
 
-            # CCTV look (blur → saturation → 224-colour palette) for this mode, when switched on — before the camera
-            # check / auto-labels / upload so they all see the frames that are trained on.
+            # Source-matched CCTV look for this mode, when switched on: each image's texture / edge crispness brought
+            # to its own source frame, then the platform's 224-colour palette — before the camera check / auto-labels /
+            # upload so they all see the frames that are trained on.
             settings = get_settings()
             if run_dir and int(result.get("count") or 0) > 0 and getattr(settings, f"use_post_{gen_mode}"):
                 try:
-                    from app.gen_common import cctv_postprocess_run
+                    from app.look import match_run
 
-                    pp = cctv_postprocess_run(
-                        Path(run_dir), gen_mode,
-                        progress_cb=lambda d, n: cb(d, n, f"{base_msg} · CCTV look {d}/{n}…"),
+                    pp = match_run(
+                        Path(run_dir), out_dir,
+                        progress_cb=lambda d, n: cb(d, n, f"{base_msg} · matching each source's look {d}/{n}…"),
                     )
-                    base_msg += (f" · CCTV look (sat ×{pp['saturation']}, blur {pp['blur']},"
-                                 f" {pp['colors']} colours)")
+                    base_msg += f" · source-matched look ({pp['processed']} imgs, 224 colours)"
                 except Exception as e:  # noqa: BLE001 — images stay as generated
-                    base_msg += f" · CCTV look failed: {e}"
+                    base_msg += f" · look matching failed: {e}"
 
             # Camera drift vs the source (height / tilt / people distance) — flagged, never deleted
             if run_dir and int(result.get("count") or 0) > 0 and settings.use_person_detector:

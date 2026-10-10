@@ -218,54 +218,12 @@ def square_frame(im, size: int = 1024):
 def as_png(image_bytes: bytes) -> bytes:
     """The generator's pixels unchanged, stored as PNG (runs keep *.png). No resize / blur / tone / grain:
     all post-processing was removed (2026-10-06) — it cost ~60% of the sharpness vs the GT frames.
-    The optional, much lighter CCTV look is applied later to the stretched run (cctv_postprocess_run)."""
+    The source-matched CCTV look is applied later to the stretched run (app.look.match_run)."""
     if image_bytes[:4] == b"\x89PNG":
         return image_bytes
     buf = BytesIO()
     Image.open(BytesIO(image_bytes)).convert("RGB").save(buf, format="PNG")
     return buf.getvalue()
-
-
-def cctv_postprocess_image(img: Image.Image, *, blur: float, saturation: float, colors: int) -> Image.Image:
-    """Blur (sigma, 0 = off) → saturation ×factor → adaptive palette of `colors` colours (median cut, like the GT
-    224-colour palette PNGs). Returns a palette ("P") image."""
-    import cv2
-    from PIL import ImageEnhance
-
-    rgb = img.convert("RGB")
-    if blur > 0:
-        rgb = Image.fromarray(cv2.GaussianBlur(np.asarray(rgb), (0, 0), blur))
-    if saturation != 1.0:
-        rgb = ImageEnhance.Color(rgb).enhance(saturation)
-    return rgb.quantize(colors, method=Image.Quantize.MEDIANCUT)
-
-
-def cctv_postprocess_run(run_dir: Path, mode: str, progress_cb: Callable[[int, int], None] | None = None) -> dict:
-    """Apply the mode's CCTV look to every image in <run>/images (in place) and write <run>/postprocess.json.
-
-    Images already saved as palette PNGs are skipped, so a re-run after an interruption only finishes the rest.
-    """
-    from app.config import get_settings
-
-    s = get_settings()
-    params = {"blur": float(getattr(s, f"post_{mode}_blur")), "saturation": float(getattr(s, f"post_{mode}_saturation")),
-              "colors": int(s.post_palette_colors)}
-    paths = sorted(p for p in (Path(run_dir) / "images").glob("*.png"))
-    done = skipped = 0
-    for i, p in enumerate(paths, 1):
-        with Image.open(p) as im:
-            if im.mode == "P":
-                skipped += 1
-            else:
-                out = cctv_postprocess_image(im, **params)
-                out.save(p, format="PNG")
-                done += 1
-        if progress_cb:
-            progress_cb(i, len(paths))
-    meta = {"mode": mode, **params, "images": len(paths), "processed": done, "already_done": skipped,
-            "at": datetime.now(timezone.utc).isoformat()}
-    (Path(run_dir) / "postprocess.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    return meta
 
 
 def _resolve_source_path(row: dict, dataset_root: Path | None) -> Path:

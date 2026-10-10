@@ -319,8 +319,8 @@ function FolderUpload() {
 
 const ADVANCED: { name: SwitchName; label: string; hint: string }[] = [
   { name: "person_detector", label: "Camera lock (person detector)", hint: "Keeps camera height / tilt like the source and flags drift" },
-  { name: "post_openai", label: "CCTV look on OpenAI runs", hint: "Blur + saturation + 224-colour palette, like the challenge frames" },
-  { name: "post_gemini", label: "CCTV look on Gemini runs", hint: "224-colour palette" },
+  { name: "post_openai", label: "Source-matched look on OpenAI runs", hint: "Texture + edge softness matched to each image's source, then the 224-colour palette" },
+  { name: "post_gemini", label: "Source-matched look on Gemini runs", hint: "Texture + edge softness matched to each image's source, then the 224-colour palette" },
 ];
 
 export function AnalyzeCard({ analyzeRef }: { analyzeRef: React.MutableRefObject<((mode?: GenMode) => void) | null> }) {

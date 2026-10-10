@@ -68,20 +68,12 @@ class Settings(BaseSettings):
     use_detector_gemini: bool = True
     use_person_detector: bool = False
 
-    # CCTV look post-process, per generation mode (on / off: Analyze page switches POST_OPENAI / POST_GEMINI).
-    # Runs right after the 1024² stretch, before the camera check / auto-labels / HF upload / send, so every later
-    # step sees the frames that are trained on: blur (sigma, 0 = off) → saturation ×factor → adaptive palette of
-    # post_palette_colors colours saved as a palette PNG (every GT frame is a 224-colour palette PNG).
-    # OpenAI values tuned 2026-10-09 on gpt-image-2 vs its 2 GT sources: ×1.7 matched saturation / colourfulness,
-    # sigma 0.5 matched one source's sharpness exactly and left the other 31% softer; 0.4 is not "in between"
-    # (cv2 drops to a 3-px kernel) and left them 59% / 9% too sharp → 0.5. Gemini: palette only until tuned.
+    # Source-matched CCTV look, per generation mode (on / off: Analyze page switches POST_OPENAI / POST_GEMINI).
+    # Runs right after the 1024² stretch, before the camera check / auto-labels / HF upload / send: each image's
+    # texture and edge crispness are brought to its own source frame, then the platform's 224-colour palette
+    # (app/look.py; parameters and before/after numbers per image in <run>/postprocess.json).
     use_post_openai: bool = True
     use_post_gemini: bool = True
-    post_palette_colors: int = 224
-    post_openai_saturation: float = 1.7
-    post_openai_blur: float = 0.5
-    post_gemini_saturation: float = 1.0
-    post_gemini_blur: float = 0.0
 
     # Hugging Face — one dataset repo + dated runs/ folder
     hf_token: str = ""
