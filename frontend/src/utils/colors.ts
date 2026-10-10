@@ -53,6 +53,12 @@ export function boxFromDict(raw: Record<string, unknown>): {
   };
 }
 
+/** Box label with the network's own confidence (not the miner's gated / calibrated value). */
+export function boxConfLabel(name: string, box: { conf?: number | null; raw_conf?: number | null }): string {
+  const v = box.raw_conf ?? box.conf;
+  return v != null ? `${name} ${Math.round(v * 100)}%` : name;
+}
+
 export {
   challengeImageUrl,
   challengePreviewUrl,

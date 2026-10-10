@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlaskConical, ImagePlus, Loader2, X } from "lucide-react";
 import { api, type FindBestEvalResult, type FindBestEvalImage, type FindBestEvalClassCount } from "../api";
 import type { DetectionBox } from "../types";
-import { colorForClass } from "../utils/colors";
+import { colorForClass, boxConfLabel } from "../utils/colors";
 import { cn } from "../lib/utils";
 
 const IMAGE_RE = /\.(jpe?g|png|webp|bmp)$/i;
@@ -15,6 +15,7 @@ function boxesFor(image: FindBestEvalImage): DetectionBox[] {
     x2: b.x2,
     y2: b.y2,
     conf: b.conf,
+    raw_conf: b.raw_conf,
   }));
 }
 
@@ -110,7 +111,7 @@ function OverlayPreview({
           ctx.lineWidth = Math.max(2, Math.round(w / 400));
           ctx.strokeRect(x1, y1, bw, bh);
           const name = classNames[box.cls] ?? `cls ${box.cls}`;
-          const label = (box.raw_conf ?? box.conf) != null ? `${name} ${Math.round(((box.raw_conf ?? box.conf) as number) * 100)}%` : name;
+          const label = boxConfLabel(name, box);
           const fontPx = Math.max(11, Math.round(w / 70));
           ctx.font = `600 ${fontPx}px Inter, Segoe UI, sans-serif`;
           const tw = ctx.measureText(label).width;

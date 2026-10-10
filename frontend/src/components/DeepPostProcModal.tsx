@@ -25,7 +25,7 @@ import {
 import EvaluateMergedModal from "./EvaluateMergedModal";
 import type { ChallengeItem, DetectionBox } from "../types";
 import { checksFailComplete, checksPassComplete } from "../labelChecks";
-import { colorForClass } from "../utils/colors";
+import { colorForClass, boxConfLabel } from "../utils/colors";
 import { cn } from "../lib/utils";
 import ImageSelectionField from "./ImageSelectionField";
 
@@ -126,7 +126,7 @@ function OverlaySide({
           ctx.lineWidth = Math.max(2, Math.round(w / 380));
           ctx.strokeRect(x1, y1, bw, bh);
           const name = classNames[box.cls] ?? `cls ${box.cls}`;
-          const label = (box.raw_conf ?? box.conf) != null ? `${name} ${Math.round(((box.raw_conf ?? box.conf) as number) * 100)}%` : name;
+          const label = boxConfLabel(name, box);
           const fontPx = Math.max(10, Math.round(w / 72));
           ctx.font = `600 ${fontPx}px Inter, Segoe UI, sans-serif`;
           const tw = ctx.measureText(label).width;

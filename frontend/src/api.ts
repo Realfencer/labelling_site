@@ -1218,6 +1218,8 @@ export type FindBestEvalBox = {
   x2: number;
   y2: number;
   conf?: number | null;
+  /** The network's own confidence before the miner's gate / cluster boost. */
+  raw_conf?: number | null;
 };
 
 export type FindBestEvalClassCount = {
