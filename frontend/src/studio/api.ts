@@ -65,6 +65,7 @@ export const img = {
     `${BASE}/model-errors/${encodeURIComponent(fn)}/overlay?v=${encodeURIComponent(version)}${w ? `&w=${w}` : ""}`,
   gen: (run: string, fn: string, w?: number) => `${BASE}/gen/image/${encodeURIComponent(fn)}?run=${encodeURIComponent(run)}${w ? `&w=${w}` : ""}`,
   raw: (run: string, fn: string, w?: number) => `${BASE}/gen/raw/${encodeURIComponent(fn)}?run=${encodeURIComponent(run)}${w ? `&w=${w}` : ""}`,
+  labels: (run: string, fn: string) => `${BASE}/gen/labels/${encodeURIComponent(fn)}?run=${encodeURIComponent(run)}`,
   source: (run: string, fn: string, w?: number) =>
     `${BASE}/gen/source/${encodeURIComponent(fn)}?run=${encodeURIComponent(run)}${w ? `&w=${w}` : ""}`,
 };

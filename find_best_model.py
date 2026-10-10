@@ -3718,21 +3718,39 @@ def deep_postproc(
     restored) and the result says so. Every deep post-process in the site and the collector sandbox
     goes through here.
     """
+    import robust_postproc
+
     miner_path = (Path(pack_dir) / "miner.py") if pack_dir else None
-    can_guard = bool(miner_path and miner_path.is_file() and items)
+    # Latency is timed on a few images; the robust search streams the whole GT set from disk, so callers may
+    # pass items=None instead of holding every image in RAM.
+    timing_items = items if items else (robust_postproc.load_items_sample(Path(data_dir), 16) if pack_dir else None)
+    can_guard = bool(miner_path and miner_path.is_file() and timing_items)
     backup = miner_path.read_bytes() if can_guard else None
     base: dict | None = None
     if can_guard:
         try:
-            base = _p95_best_of(Path(pack_dir), items)
+            base = _p95_best_of(Path(pack_dir), timing_items)
         except Exception as exc:  # noqa: BLE001 - cannot time the pack: run unguarded, say so
             print(f"  latency rule: baseline timing failed ({exc}); search runs unguarded", flush=True)
             can_guard = False
     try:
-        result = _deep_postproc_search(
-            onnx_path, data_dir, n_classes, class_names, passes=passes, random_n=random_n,
-            pack_dir=pack_dir, items=items, progress_cb=progress_cb, cancel_cb=cancel_cb,
-        )
+        result = None
+        if pack_dir is not None and detect_miner_style(miner_path) in {"array", "unknown"}:
+            # Exact replay + held-out check + gate re-calibration (see robust_postproc.py).
+            try:
+                result = robust_postproc.run(
+                    Path(pack_dir), Path(data_dir), n_classes, class_names,
+                    progress_cb=progress_cb, cancel_cb=cancel_cb,
+                )
+            except robust_postproc.ReplayUnsupported as exc:
+                print(f"  robust post-process unavailable ({exc}); using the legacy search", flush=True)
+        if result is None:
+            if items is None and pack_dir is not None:
+                items = load_items(Path(data_dir))
+            result = _deep_postproc_search(
+                onnx_path, data_dir, n_classes, class_names, passes=passes, random_n=random_n,
+                pack_dir=pack_dir, items=items, progress_cb=progress_cb, cancel_cb=cancel_cb,
+            )
     except BaseException:
         if can_guard and backup is not None:
             miner_path.write_bytes(backup)
@@ -3740,11 +3758,11 @@ def deep_postproc(
     rule: dict = {"limit_ms": GATE_MS, "checked": can_guard, "baseline_p95_ms": (base or {}).get("p95_ms")}
     if can_guard and result.get("postproc_applied"):
         try:
-            after = _p95_best_of(Path(pack_dir), items, runs=3)
+            after = _p95_best_of(Path(pack_dir), timing_items, runs=3)
             if after.get("p95_ms", 0.0) > GATE_MS:
                 # same hardening every caller applies afterwards (flip off, ORT thread pins): judge the final pack
                 harden_miner_for_latency(miner_path, onnx_path=onnx_path, force_flip_off=True)
-                after = _p95_best_of(Path(pack_dir), items, runs=3)
+                after = _p95_best_of(Path(pack_dir), timing_items, runs=3)
             p_after = float(after.get("p95_ms", 0.0))
             p_base = float(base["p95_ms"]) if base else None
             rule.update(after_p95_ms=p_after, ok=p_after <= GATE_MS)
@@ -3771,6 +3789,8 @@ def deep_postproc(
 
 def apply_postproc_to_miner(miner_path: Path, P: dict) -> None:
     """Patch common SN44 miner.py postproc arrays/scalars in place."""
+    if str(P.get("style") or "") == "robust":
+        return  # robust_postproc already wrote these exact miner attributes into miner.py and verified the file
     if str(P.get("style") or "") == "c2" or (
         "ladder" in P and detect_miner_style(miner_path) == "c2"
     ):

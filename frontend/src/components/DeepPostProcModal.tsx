@@ -665,9 +665,15 @@ export default function DeepPostProcModal({
               <p className="text-[11px] text-slate-500">
                 {picked ? `${picked.length} hand-picked images` : `${ownMode ? inRange.length : count} Done images in range`} · need ≥{minGt} for deep post-process
               </p>
+              {(picked ? picked.length : ownMode ? inRange.length : count) < 150 && (
+                <p className="rounded-lg border border-amber-300/80 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                  Few images: settings tuned on a small set rarely hold up on other images. Use the whole Done range
+                  (hundreds of images) — 30% of them are held out to check the gain is real.
+                </p>
+              )}
 
               {(job?.baseline_score || job?.postproc) && (
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
                   <MetricPill label="Before" value={job.baseline_score?.score != null ? Number(job.baseline_score.score).toFixed(4) : "—"} />
                   <MetricPill
                     label="After"
@@ -684,6 +690,21 @@ export default function DeepPostProcModal({
                     label="Δ score"
                     value={delta != null ? `${delta >= 0 ? "+" : ""}${delta.toFixed(4)}` : "—"}
                     tone={delta != null && delta >= 0 ? "emerald" : "rose"}
+                  />
+                  <MetricPill
+                    label="Held-out Δ"
+                    value={
+                      job.postproc?.holdout
+                        ? `${job.postproc.holdout.delta >= 0 ? "+" : ""}${Number(job.postproc.holdout.delta).toFixed(4)}`
+                        : "—"
+                    }
+                    hint={
+                      job.postproc?.holdout
+                        ? `${Number(job.postproc.holdout.before).toFixed(4)} → ${Number(job.postproc.holdout.after).toFixed(4)} on ${job.postproc.holdout.n_holdout} images the search never tuned on` +
+                          (job.postproc.reverted ? ` · tuned settings lost there (${Number(job.postproc.holdout.candidate_delta).toFixed(4)}), original kept` : "")
+                        : "Only shown for the robust search (array / gated miners)"
+                    }
+                    tone={job.postproc?.holdout ? (job.postproc.holdout.delta > 0 ? "emerald" : "amber") : "slate"}
                   />
                   <MetricPill label="mAP50" value={job.postproc?.map50 != null ? Number(job.postproc.map50).toFixed(4) : "—"} tone="sky" />
                   <MetricPill

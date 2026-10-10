@@ -132,6 +132,32 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+def _base_model_info() -> dict[str, Any]:
+    from app import base_detector
+
+    b = base_detector.current()
+    return {"name": b["name"], "custom": b["custom"], "applied_at": b["applied_at"], "exists": (Path(b["path"]) / "miner.py").is_file(),
+            "key": base_detector.key(Path(b["path"])) if (Path(b["path"]) / "miner.py").is_file() else None}
+
+
+def _analysis_info() -> dict[str, Any]:
+    """When the current analysis was made, and with which detector (so the UI can tell when it is outdated)."""
+    summ = ANALYSIS / "score_summary.json"
+    errs = ANALYSIS / "model_errors.json"
+    info: dict[str, Any] = {"at": summ.stat().st_mtime if summ.is_file() else None, "detector_key": None, "detector": None}
+    if errs.is_file():
+        try:
+            rep = json.loads(errs.read_text(encoding="utf-8"))
+            info["detector_key"] = rep.get("weights_key")
+            info["detector"] = rep.get("detector")
+            info["errors_at"] = errs.stat().st_mtime
+        except (OSError, ValueError):
+            pass
+    pkg = ANALYSIS / "gen_package" / "manifest.csv"
+    info["package_at"] = pkg.stat().st_mtime if pkg.is_file() else None
+    return info
+
+
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     s = sess.load_session()
@@ -167,6 +193,8 @@ def health() -> dict[str, Any]:
                 "gt_images": d.get("gt_images"), "uploaded_at": d.get("uploaded_at")}
             for m in ("openai", "gemini") for d in [detector(m)]
         },
+        "base_model": _base_model_info(),
+        "analysis": _analysis_info(),
         "checkpoint_switches": {k: bool(getattr(settings, f"use_{k}")) for k in SWITCHES},
         "has_openai_key": bool(settings.openai_api_key),
         "has_gemini_key": bool((settings.gemini_api_key or "").strip()),
@@ -863,6 +891,24 @@ def api_gen_image(request: Request, filename: str, run: str = Query(...), w: int
     if not path.exists():
         raise HTTPException(404, "Not found")
     return file_response(request, path, clamp_width(w))
+
+
+@app.get("/api/gen/labels/{filename}")
+def api_gen_labels(filename: str, run: str = Query(...)) -> dict:
+    """The run's label boxes for one image (normalised xyxy, 0..1) — drawn over the gallery and viewer."""
+    run_dir = GENERATED_ROOT / Path(run).name
+    lab = run_dir / "labels" / f"{Path(filename).stem}.txt"
+    names = ["cup", "can", "bottle"]
+    boxes = []
+    if lab.is_file():
+        for line in lab.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            c, cx, cy, w, h = int(float(parts[0])), *map(float, parts[1:5])
+            boxes.append({"cls": c, "name": names[c] if 0 <= c < 3 else str(c), "x1": cx - w / 2, "y1": cy - h / 2, "x2": cx + w / 2, "y2": cy + h / 2})
+    auto = (run_dir / "autolabel.json").is_file()
+    return {"boxes": boxes, "source": "detector" if auto else "copied_from_source"}
 
 
 @app.get("/api/gen/raw/{filename}")

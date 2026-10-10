@@ -32,6 +32,8 @@ export type Health = {
   gen_mode: GenMode;
   detectors: Partial<Record<GenMode, DetectorInfo>>;
   checkpoint_switches: Record<SwitchName, boolean>;
+  base_model?: { name: string; custom: boolean; applied_at: string | null; exists: boolean; key: string | null };
+  analysis?: { at: number | null; detector_key: string | null; detector: string | null; errors_at?: number; package_at: number | null };
   has_openai_key: boolean;
   has_gemini_key: boolean;
   has_openrouter_key: boolean;

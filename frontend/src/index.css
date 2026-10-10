@@ -618,3 +618,14 @@
 .score-flash {
   animation: score-flash 1.8s ease-out;
 }
+
+/* Studio: running step shimmer */
+.studio-shimmer {
+  background: linear-gradient(90deg, transparent, #38bdf8, #a78bfa, transparent);
+  background-size: 200% 100%;
+  animation: studio-shimmer 1.4s linear infinite;
+}
+@keyframes studio-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}

@@ -1,158 +1,44 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, DatabaseZap, FolderUp, ScanSearch, Search, Upload, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, ChevronDown, ChevronRight, Search, X } from "lucide-react";
 import { cn } from "../lib/utils";
 import { img, studio } from "./api";
-import type { AnalyzeJob, CkptJob, DeError, DeSource, Gallery, GenMode, Health, MiningReport, ModelErrors, RecordRow, StudioStatus, Summary, SwitchName } from "./types";
-import { timeAgo } from "../store/useTeam";
-import { Banner, Btn, Card, Chip, CLASS_COLORS, Empty, errText, Lightbox, Progress, pct, useJob } from "./ui";
+import type { DeError, DeSource, Gallery, MiningReport, ModelErrors, RecordRow, Summary } from "./types";
+import { Card, Chip, CLASS_COLORS, Empty, Lightbox, pct } from "./ui";
 
-const MODE_LABEL: Record<GenMode, string> = { openai: "OpenAI", gemini: "Gemini" };
-const GENERIC = new Set(["best", "final", "last", "weights", "train", "exp"]);
-
-function ckptName(weights: string): string {
-  const base = (weights.split("/").pop() || weights).replace(/\.pt$/, "");
-  const [proj, model] = base.includes("__") ? base.split("__", 2) : ["", base];
-  return GENERIC.has(model) && proj ? `${proj}/${model}` : model;
-}
-
-type Analysis = {
-  summary: Summary | null;
-  galleries: Gallery[];
-  overlaps: Gallery[];
-  mining: MiningReport | null;
-  errors: ModelErrors | null;
-};
-
-export default function AnalyzeTab({
-  health,
-  status,
-  reloadHealth,
-  onAnalyzed,
-}: {
-  health: Health | null;
-  status: StudioStatus | null;
-  reloadHealth: () => void;
-  onAnalyzed: () => void;
-}) {
-  const [mode, setMode] = useState<GenMode>("openai");
-  const [dirty, setDirty] = useState<Record<GenMode, boolean>>({ openai: false, gemini: false });
-  const [data, setData] = useState<Analysis>({ summary: null, galleries: [], overlaps: [], mining: null, errors: null });
-  const [error, setError] = useState("");
+/** Insights tab: what the analysis found — numbers, regimes, the base model's misses, recommendations, samples. */
+export default function Insights() {
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [galleries, setGalleries] = useState<Gallery[]>([]);
+  const [overlaps, setOverlaps] = useState<Gallery[]>([]);
+  const [mining, setMining] = useState<MiningReport | null>(null);
+  const [errors, setErrors] = useState<ModelErrors | null>(null);
   const [regime, setRegime] = useState<string | null>(null);
-
   useEffect(() => {
-    if (health?.gen_mode) setMode(health.gen_mode);
-  }, [health?.gen_mode]);
-
-  const loadAnalysis = useCallback(async () => {
-    try {
-      const [summary, g, o, mining, errors] = await Promise.all([
-        studio.summary(),
-        studio.galleries(),
-        studio.overlaps(),
-        studio.mining().catch(() => null),
-        studio.modelErrors().catch(() => null),
-      ]);
-      setData({
-        summary,
-        galleries: Object.values(g || {}).filter((x) => x && x.group !== "overlap"),
-        overlaps: Object.values(o || {}).filter((x) => x && x.group === "overlap"),
-        mining,
-        errors,
-      });
-    } catch (e) {
-      setError(errText(e));
-    }
+    void Promise.all([
+      studio.summary().catch(() => null),
+      studio.galleries().catch(() => ({}) as Record<string, Gallery>),
+      studio.overlaps().catch(() => ({}) as Record<string, Gallery>),
+      studio.mining().catch(() => null),
+      studio.modelErrors().catch(() => null),
+    ]).then(([s, g, o, m, e]) => {
+      setSummary(s);
+      setGalleries(Object.values(g || {}).filter((x) => x && x.group !== "overlap"));
+      setOverlaps(Object.values(o || {}).filter((x) => x && x.group === "overlap"));
+      setMining(m);
+      setErrors(e);
+    });
   }, []);
-
-  useEffect(() => {
-    void loadAnalysis();
-  }, [loadAnalysis]);
-
-  const analyzeJob = useJob<AnalyzeJob>(studio.analyzeJob, 800, (j) => {
-    if (j.status === "done") {
-      setDirty({ openai: false, gemini: false });
-      reloadHealth();
-      void loadAnalysis();
-      onAnalyzed();
-    }
-  });
-  const running = analyzeJob.job?.status === "running";
-
-  const startAnalyze = async () => {
-    setError("");
-    try {
-      analyzeJob.setJob(await studio.analyze(mode));
-      analyzeJob.kick();
-    } catch (e) {
-      setError(errText(e));
-    }
-  };
-
-  const stale = Boolean(health && (mode !== health.gen_mode || dirty[mode]));
-
   return (
     <div className="space-y-4">
-      {error && <Banner kind="error">{error}</Banner>}
-      <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
-        <DatasetCard health={health} status={status} onStarted={() => (analyzeJob.kick(), onAnalyzed())} busy={running} />
-        <Card
-          title="Detector & analysis"
-          right={
-            <Btn kind="primary" busy={running} onClick={() => void startAnalyze()} className={cn(stale && !running && "animate-pulse")}>
-              <ScanSearch className="h-3.5 w-3.5" /> Analyze &amp; cluster
-            </Btn>
-          }
-        >
-          <ModePicker health={health} mode={mode} setMode={setMode} />
-          {stale && !running && (
-            <div className="mt-2 text-[11px] font-semibold text-amber-600 dark:text-amber-300">
-              {mode !== health?.gen_mode ? `Analysis was made in ${MODE_LABEL[health!.gen_mode]} mode — re-analyze to switch.` : "New checkpoint — re-analyze to use it."}
-            </div>
-          )}
-          {analyzeJob.job && analyzeJob.job.status !== "idle" && (
-            <div className="mt-3 space-y-1">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className={cn("font-semibold", analyzeJob.job.status === "error" ? "text-rose-600" : "text-slate-600 dark:text-slate-300")}>
-                  {analyzeJob.job.status === "error" ? analyzeJob.job.error || analyzeJob.job.message : analyzeJob.job.message}
-                </span>
-                {running && <span className="tabular-nums text-slate-400">{Math.round(analyzeJob.job.progress * 100)}%</span>}
-              </div>
-              {running && <Progress value={analyzeJob.job.progress} tone="violet" />}
-            </div>
-          )}
-          <CheckpointRow
-            health={health}
-            mode={mode}
-            onChanged={() => {
-              setDirty((d) => ({ ...d, [mode]: true }));
-              reloadHealth();
-            }}
-          />
-          <Switches
-            health={health}
-            onChanged={(name) => {
-              if (name === "person_detector") setDirty({ openai: true, gemini: true });
-              else if (name === "detector_openai") setDirty((d) => ({ ...d, openai: true }));
-              else if (name === "detector_gemini") setDirty((d) => ({ ...d, gemini: true }));
-              reloadHealth();
-            }}
-          />
-        </Card>
-      </div>
-
-      <Kpis summary={data.summary} />
-
-      <RegimeSection title="Scene regimes" items={data.galleries.filter((g) => g.group === "scene")} selected={regime} onSelect={setRegime} />
-      <RegimeSection title="Class-hard regimes" items={data.galleries.filter((g) => g.group === "class_hard")} selected={regime} onSelect={setRegime} />
-      <RegimeSection title="Overlap gates" items={data.overlaps} selected={regime} onSelect={setRegime} />
-
-      <DetectorErrors report={data.errors} />
-
-      <Card title="Mining recommendations">
-        {data.mining?.recommendations?.length ? (
+      <Kpis summary={summary} />
+      <DetectorErrors report={errors} />
+      <RegimeSection title="Scene regimes" items={galleries.filter((g) => g.group === "scene")} selected={regime} onSelect={setRegime} />
+      <RegimeSection title="Class-hard regimes" items={galleries.filter((g) => g.group === "class_hard")} selected={regime} onSelect={setRegime} />
+      <RegimeSection title="Overlap gates" items={overlaps} selected={regime} onSelect={setRegime} />
+      <Card title="Recommendations">
+        {mining?.recommendations?.length ? (
           <div className="grid gap-2 md:grid-cols-2">
-            {data.mining.recommendations.map((r, i) => (
+            {mining.recommendations.map((r, i) => (
               <div
                 key={i}
                 className={cn(
@@ -169,339 +55,10 @@ export default function AnalyzeTab({
             ))}
           </div>
         ) : (
-          <Empty>Run Analyze &amp; cluster to get recommendations.</Empty>
+          <Empty>Analyze to get recommendations.</Empty>
         )}
       </Card>
-
       <Samples regime={regime} clearRegime={() => setRegime(null)} />
-    </div>
-  );
-}
-
-function DatasetCard({ health, status, onStarted, busy }: { health: Health | null; status: StudioStatus | null; onStarted: () => void; busy: boolean }) {
-  const [reanalyze, setReanalyze] = useState(true);
-  const [latest, setLatest] = useState(() => status?.gt_images || 110);
-  const [syncing, setSyncing] = useState(false);
-  const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-  const n = status?.gt_images ?? health?.images ?? 0;
-  const updated = status?.gt_updated_at ? timeAgo(status.gt_updated_at) : null;
-
-  const sync = async () => {
-    setSyncing(true);
-    setNote(null);
-    try {
-      const r = await studio.syncGt(reanalyze, latest);
-      if (r.analyze?.error) setNote({ kind: "error", text: `Copied ${r.n_images} images, but the analysis did not start: ${r.analyze.error}` });
-      else setNote({ kind: "ok", text: `Copied the latest ${r.n_images} Done Platform images${reanalyze ? " — analysis started." : "."}` });
-      if (reanalyze) onStarted();
-    } catch (e) {
-      setNote({ kind: "error", text: errText(e) });
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  return (
-    <Card
-      title="Eval set"
-      right={
-        <span className="text-[11px] text-slate-500">
-          <b className="text-slate-800 dark:text-slate-100">{n}</b> images
-          {status?.gt_block_min ? ` · blocks ${status.gt_block_min}–${status.gt_block_max}` : ""}
-          {updated ? ` · updated ${updated}` : ""}
-        </span>
-      }
-    >
-      <div className="space-y-3 text-[12px] text-slate-600 dark:text-slate-300">
-        <p>
-          The Studio studies these challenge images (your Done Platform labels) and makes new images that look like them. Use a recent slice: the newest
-          challenges show the look the validator uses now, and every image here becomes a source in a final run.
-        </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <Btn kind="success" busy={syncing} disabled={busy} onClick={() => void sync()}>
-            <DatabaseZap className="h-3.5 w-3.5" /> Update from labeler
-          </Btn>
-          <label className="flex items-center gap-1.5 text-[11px]">
-            latest
-            <input
-              type="number"
-              min={10}
-              max={2000}
-              step={10}
-              value={latest}
-              onChange={(e) => setLatest(Math.max(10, Math.min(2000, Number(e.target.value) || 10)))}
-              className="w-16 rounded-md border border-slate-300 bg-white px-1.5 py-0.5 text-right tabular-nums dark:border-slate-600 dark:bg-ink-800"
-            />
-            Done images
-          </label>
-          <label className="flex items-center gap-1.5 text-[11px]">
-            <input type="checkbox" checked={reanalyze} onChange={(e) => setReanalyze(e.target.checked)} />
-            then re-analyze
-          </label>
-        </div>
-        {note && <Banner kind={note.kind}>{note.text}</Banner>}
-        <details className="group rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-          <summary className="cursor-pointer select-none text-[11px] font-semibold text-slate-500">Upload a YOLO folder instead</summary>
-          <FolderUpload onUploaded={onStarted} busy={busy} />
-        </details>
-      </div>
-    </Card>
-  );
-}
-
-function FolderUpload({ onUploaded, busy }: { onUploaded: () => void; busy: boolean }) {
-  const input = useRef<HTMLInputElement>(null);
-  const [staged, setStaged] = useState<{ file: File; rel: string }[]>([]);
-  const [phase, setPhase] = useState<"idle" | "uploading" | "done" | "error">("idle");
-  const [msg, setMsg] = useState("");
-  const [progress, setProgress] = useState(0);
-
-  const counts = useMemo(() => {
-    const imgs = staged.filter((f) => /\.(jpe?g|png|bmp|webp)$/i.test(f.rel)).length;
-    const labels = staged.filter((f) => /\.txt$/i.test(f.rel)).length;
-    return { imgs, labels };
-  }, [staged]);
-
-  const pick = (files: FileList | null) => {
-    if (!files) return;
-    const out: { file: File; rel: string }[] = [];
-    for (const f of Array.from(files)) {
-      const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
-      if (/\.(jpe?g|png|bmp|webp|txt)$/i.test(rel) || /data\.ya?ml$/i.test(rel)) out.push({ file: f, rel });
-    }
-    setStaged(out);
-    setPhase("idle");
-    setMsg("");
-  };
-
-  const upload = async () => {
-    setPhase("uploading");
-    setMsg("");
-    try {
-      const CH = 40;
-      for (let i = 0; i < staged.length; i += CH) {
-        await studio.importChunk(staged.slice(i, i + CH), { replace: i === 0 });
-        setProgress(Math.min(0.9, ((i + CH) / staged.length) * 0.9));
-      }
-      const r = await studio.importFinalize();
-      setProgress(1);
-      setPhase("done");
-      setMsg(`Uploaded ${r.images} images + ${r.labels} labels — analysis started.`);
-      setStaged([]);
-      onUploaded();
-    } catch (e) {
-      setPhase("error");
-      setMsg(errText(e));
-    }
-  };
-
-  return (
-    <div className="mt-2 space-y-2">
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => input.current?.click()}
-        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && input.current?.click()}
-        className="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed border-slate-300 px-4 py-3 hover:border-sky-400 hover:bg-sky-50/50 dark:border-slate-700 dark:hover:bg-sky-950/20"
-      >
-        <FolderUp className="h-6 w-6 shrink-0 text-sky-500" />
-        <div className="min-w-0 text-[11px]">
-          {staged.length ? `${counts.imgs} images · ${counts.labels} labels selected` : "Choose a folder with images/ and labels/. It replaces the eval set."}
-        </div>
-        {staged.length > 0 && (
-          <button type="button" onClick={(e) => (e.stopPropagation(), setStaged([]))} className="ml-auto rounded p-1 hover:bg-slate-200 dark:hover:bg-slate-700">
-            <X className="h-4 w-4" />
-          </button>
-        )}
-      </div>
-      <input
-        ref={input}
-        type="file"
-        className="hidden"
-        multiple
-        // @ts-expect-error non-standard attribute for folder picking
-        webkitdirectory=""
-        onChange={(e) => pick(e.target.files)}
-      />
-      {staged.length > 0 && (
-        <div className="flex items-center gap-2">
-          <Btn kind="primary" busy={phase === "uploading"} disabled={busy || counts.imgs === 0} onClick={() => void upload()}>
-            <Upload className="h-3.5 w-3.5" /> Replace with {counts.imgs} images
-          </Btn>
-          {counts.labels === 0 && <span className="text-[11px] text-amber-600">No labels found in that folder.</span>}
-        </div>
-      )}
-      {phase === "uploading" && <Progress value={progress} />}
-      {msg && <Banner kind={phase === "error" ? "error" : "ok"}>{msg}</Banner>}
-    </div>
-  );
-}
-
-function ModePicker({ health, mode, setMode }: { health: Health | null; mode: GenMode; setMode: (m: GenMode) => void }) {
-  return (
-    <div role="radiogroup" className="grid grid-cols-2 gap-2">
-      {(["openai", "gemini"] as GenMode[]).map((m) => {
-        const d = health?.detectors?.[m];
-        const on = mode === m;
-        const bad = d && (!d.exists || !d.enabled);
-        return (
-          <button
-            key={m}
-            type="button"
-            role="radio"
-            aria-checked={on}
-            onClick={() => setMode(m)}
-            title={
-              d?.sv
-                ? `SV ${d.sv.composite.toFixed(3)} · mAP50 ${d.sv.map50.toFixed(3)} · FP/img ${d.sv.fp_per_image.toFixed(2)}${d.gt_images ? ` · ${d.gt_images} GT` : ""}${d.uploaded_at ? ` · uploaded ${d.uploaded_at}` : ""}`
-                : undefined
-            }
-            className={cn(
-              "rounded-xl border px-3 py-2 text-left transition",
-              on ? "border-violet-500 bg-violet-500/10 ring-1 ring-violet-500" : "border-slate-200 hover:border-violet-300 dark:border-slate-700",
-            )}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-[13px] font-extrabold">{MODE_LABEL[m]}</span>
-              {health?.gen_mode === m && <Chip tone="green">analyzed</Chip>}
-              {d?.source === "uploaded" && <Chip tone="violet">uploaded</Chip>}
-            </div>
-            <div className={cn("mt-0.5 truncate text-[11px]", bad ? "text-amber-600 dark:text-amber-300" : "text-slate-500")}>
-              {d ? `${ckptName(d.weights)} · conf ${d.conf}${!d.exists ? " · missing" : !d.enabled ? " · off" : ""}` : "—"}
-            </div>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function CheckpointRow({ health, mode, onChanged }: { health: Health | null; mode: GenMode; onChanged: () => void }) {
-  const input = useRef<HTMLInputElement>(null);
-  const [msg, setMsg] = useState<{ kind: "info" | "ok" | "error"; text: string } | null>(null);
-  const ckpt = useJob<CkptJob>(studio.ckptJob, 1000, (j) => {
-    if (j.status === "done") {
-      setMsg({ kind: "ok", text: j.message || "Checkpoint ready" });
-      onChanged();
-    } else if (j.status === "error") setMsg({ kind: "error", text: j.error || j.message });
-  });
-  const tuning = ckpt.job?.status === "running";
-  const d = health?.detectors?.[mode];
-
-  const upload = async (f: File) => {
-    setMsg({ kind: "info", text: `Uploading ${f.name} (${(f.size / 1e6).toFixed(1)} MB)…` });
-    try {
-      ckpt.setJob(await studio.uploadCkpt(mode, f));
-      ckpt.kick();
-    } catch (e) {
-      setMsg({ kind: "error", text: errText(e) });
-    }
-  };
-
-  return (
-    <div className="mt-3 rounded-xl bg-slate-50 p-3 dark:bg-slate-800/40">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Checkpoint</span>
-        <Btn kind="secondary" busy={tuning} onClick={() => input.current?.click()}>
-          <Upload className="h-3.5 w-3.5" /> Upload .pt for {MODE_LABEL[mode]}
-        </Btn>
-        {d?.source === "uploaded" && (
-          <Btn
-            kind="ghost"
-            onClick={async () => {
-              if (!window.confirm(`Use the default ${MODE_LABEL[mode]} checkpoint again (drops the uploaded one)?`)) return;
-              try {
-                await studio.resetCkpt(mode);
-                onChanged();
-              } catch (e) {
-                setMsg({ kind: "error", text: errText(e) });
-              }
-            }}
-          >
-            reset to default
-          </Btn>
-        )}
-        <input
-          ref={input}
-          type="file"
-          accept=".pt"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void upload(f);
-            e.target.value = "";
-          }}
-        />
-      </div>
-      {tuning && ckpt.job && (
-        <div className="mt-2 space-y-1">
-          <div className="text-[11px] text-slate-500">{ckpt.job.message}</div>
-          <Progress value={ckpt.job.progress} tone="emerald" />
-        </div>
-      )}
-      {msg && !tuning && <div className={cn("mt-2 text-[11px]", msg.kind === "error" ? "text-rose-600" : msg.kind === "ok" ? "text-emerald-600" : "text-slate-500")}>{msg.text}</div>}
-    </div>
-  );
-}
-
-const SWITCH_GROUPS: { title: string; items: { name: SwitchName; label: string; hint: string }[] }[] = [
-  {
-    title: "Use checkpoints",
-    items: [
-      { name: "detector_openai", label: "OpenAI-mode detector", hint: "Mines its errors for the prompts and auto-labels OpenAI runs" },
-      { name: "detector_gemini", label: "Gemini-mode detector", hint: "Mines its errors for the prompts and auto-labels Gemini runs" },
-      { name: "person_detector", label: "Person detector", hint: "Camera height / tilt lock and camera-drift check" },
-    ],
-  },
-  {
-    title: "CCTV look",
-    items: [
-      { name: "post_openai", label: "OpenAI runs", hint: "Blur + saturation + 224-colour palette PNG, like the challenge frames" },
-      { name: "post_gemini", label: "Gemini runs", hint: "224-colour palette PNG" },
-    ],
-  },
-];
-
-function Switches({ health, onChanged }: { health: Health | null; onChanged: (name: SwitchName) => void }) {
-  const [busy, setBusy] = useState<SwitchName | null>(null);
-  const [err, setErr] = useState("");
-  return (
-    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-      {SWITCH_GROUPS.map((g) => (
-        <div key={g.title}>
-          <div className="mb-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">{g.title}</div>
-          {g.items.map((it) => {
-            const on = Boolean(health?.checkpoint_switches?.[it.name]);
-            return (
-              <label key={it.name} title={it.hint} className="flex cursor-pointer items-center gap-2 py-0.5 text-[12px]">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={on}
-                  disabled={busy === it.name || !health}
-                  onClick={async () => {
-                    setBusy(it.name);
-                    setErr("");
-                    try {
-                      await studio.setSwitch(it.name, !on);
-                      onChanged(it.name);
-                    } catch (e) {
-                      setErr(errText(e));
-                    } finally {
-                      setBusy(null);
-                    }
-                  }}
-                  className={cn("relative h-4 w-7 shrink-0 rounded-full transition", on ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600")}
-                >
-                  <span className={cn("absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition", on ? "left-3.5" : "left-0.5")} />
-                </button>
-                {it.label}
-              </label>
-            );
-          })}
-        </div>
-      ))}
-      {err && <div className="text-[11px] text-rose-600 sm:col-span-2">{err}</div>}
     </div>
   );
 }
@@ -593,8 +150,8 @@ function DetectorErrors({ report }: { report: ModelErrors | null }) {
 
   if (!report || !report.ready) {
     return (
-      <Card title="Detector errors">
-        <Empty>Run Analyze &amp; cluster with a detector switched on to mine which beverages it misses.</Empty>
+      <Card title="What the base model misses">
+        <Empty>Analyze with the base-model detector on to see which drinks it misses.</Empty>
       </Card>
     );
   }
@@ -620,7 +177,7 @@ function DetectorErrors({ report }: { report: ModelErrors | null }) {
 
   return (
     <Card
-      title="Detector errors"
+      title="What the base model misses"
       right={
         <span className="text-[11px] text-slate-400">
           {report.mode} mode · {report.detector.replace(/\.pt$/, "")} · conf {report.conf}

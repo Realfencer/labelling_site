@@ -433,6 +433,7 @@ class DeepPostProcManager:
                 shutil.copytree(gt_dir, job_gt)
 
                 import find_best_model as fbm
+                import robust_postproc
                 from eval_leaderboard_gt300 import load_items
 
                 pack = job.root / "pack"
@@ -444,11 +445,18 @@ class DeepPostProcManager:
                     onnx_path=pack / "weights.onnx",
                     force_flip_off=True,
                 )
-                job.message = "Scoring baseline (before post-process)…"
-                items = load_items(job_gt)
-                baseline = fbm.score_pack(pack, items, n_classes, quiet=True)
-                job.baseline_score = baseline
-                job.message = "Deep post-process search (live, any miner style)…"
+                # Array / gated miners: the robust search streams every GT image from disk and returns the exact
+                # before/after scores itself — never hold 1500 decoded images in RAM. Other styles keep the
+                # legacy flow (in-memory items, baseline scored up front).
+                style = fbm.detect_miner_style(pack / "miner.py")
+                items = None
+                baseline = None
+                if style not in {"array", "unknown"}:
+                    job.message = "Scoring baseline (before post-process)…"
+                    items = load_items(job_gt)
+                    baseline = fbm.score_pack(pack, items, n_classes, quiet=True)
+                    job.baseline_score = baseline
+                job.message = "Deep post-process search (exact replay, held-out check)…"
                 job.progress = {
                     "phase": "starting",
                     "trial": 0,
@@ -495,17 +503,32 @@ class DeepPostProcManager:
                     job.error = "Cancelled"
                     job.message = "Cancelled"
                     return
+                robust = result.get("style") == "robust"
                 # deep_postproc already patched miner.py when successful; re-apply is idempotent
-                # and style-aware (c2 ELEMENT_CONFIG / CONF_BY_COUNT or array miners).
-                if result.get("postproc_applied") and isinstance(result.get("params"), dict):
+                # and style-aware (c2 ELEMENT_CONFIG / CONF_BY_COUNT or array miners). The robust search writes
+                # and verifies miner.py itself (its params are miner attributes, not the legacy P dict).
+                if not robust and result.get("postproc_applied") and isinstance(result.get("params"), dict):
                     fbm.apply_postproc_to_miner(pack / "miner.py", result["params"])
+                if baseline is None:
+                    if isinstance(result.get("baseline"), dict):
+                        baseline = result["baseline"]
+                    else:  # legacy fallback inside deep_postproc: it recorded the live score before patching
+                        baseline = {"score": result.get("baseline_score"), "n_images": result.get("n_images")}
+                    job.baseline_score = baseline
                 # Enforce CPU latency gate on the final ship (flip off + ORT thread pins).
                 job.message = "Checking latency gate…"
-                gate = fbm.ensure_pack_passes_latency(pack, items, n_sample=min(16, len(items)))
+                timing = items if items else robust_postproc.load_items_sample(job_gt, 16)
+                gate = fbm.ensure_pack_passes_latency(pack, timing, n_sample=min(16, len(timing)))
                 result["latency"] = gate.get("latency") or result.get("latency") or {}
                 result["latency_harden"] = gate.get("harden") or result.get("latency_harden") or {}
                 # Final live score (after latency harden)
-                final = fbm.score_pack(pack, items, n_classes, quiet=True)
+                if robust and isinstance(result.get("final"), dict) and not (gate.get("harden") or {}).get("changed") \
+                        and not result.get("latency_reverted"):
+                    final = result["final"]  # exact: replay was checked against the live miner and the written file
+                else:
+                    if items is None:
+                        items = load_items(job_gt)
+                    final = fbm.score_pack(pack, items, n_classes, quiet=True)
                 result["final_live"] = final
                 job.postproc = result
                 lat = result.get("latency") or {}
@@ -519,6 +542,16 @@ class DeepPostProcManager:
                     )
                     if lat.get("normalized"):
                         lat_bit += f" · measured {float(lat['p95_raw_ms']):.0f}ms while the server was busy (winner {float(lat['ref_ms']):.0f}ms)"
+                ho = result.get("holdout") if isinstance(result.get("holdout"), dict) else None
+                if ho and result.get("postproc_applied"):
+                    lat_bit += f" · held-out {ho['before']:.4f} → {ho['after']:.4f} ({ho['delta']:+.4f} on {ho['n_holdout']} unseen images)"
+                elif ho and result.get("reverted"):
+                    lat_bit += (
+                        f" · kept the original settings: the tuned ones lost on {ho['n_holdout']} held-out images "
+                        f"({ho['candidate_delta']:+.4f})"
+                    )
+                if result.get("warning"):
+                    lat_bit += f" · ⚠ {result['warning']}"
                 job.progress = {
                     "phase": "done",
                     "trial": int(result.get("n_trials") or 0),

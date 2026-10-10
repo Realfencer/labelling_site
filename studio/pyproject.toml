@@ -24,6 +24,7 @@ dependencies = [
   "ultralytics>=8.4",
   "torch>=2.4",
   "torchvision>=0.19",
+  "onnxruntime==1.28.0",
 ]
 
 [[tool.uv.index]]

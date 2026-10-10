@@ -1691,6 +1691,19 @@ export type DppJob = {
     mode?: string;
     n_trials?: number;
     final_live?: { score?: number; map50?: number; ffpi?: number };
+    /** Robust search: scores on images the search never tuned on (the honest gain). */
+    holdout?: {
+      n_train: number;
+      n_holdout: number;
+      before: number;
+      after: number;
+      delta: number;
+      delta_se?: number | null;
+      candidate_delta: number;
+    };
+    warning?: string | null;
+    postproc_applied?: boolean;
+    reverted?: boolean;
     latency?: {
       p95_ms?: number;
       p50_ms?: number;

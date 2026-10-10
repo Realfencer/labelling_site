@@ -16,6 +16,7 @@ Gemini failures are non-fatal: errors keep their measured fields and prompts fal
 import hashlib
 import io
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -57,12 +58,19 @@ def _overrides() -> dict:
 
 
 def detector(mode: str) -> dict:
-    """Checkpoint + ScoreVision operating conf for a generation mode (OpenAI and Gemini runs use different models).
+    """The detector for a generation mode: the labeler's current BASE MODEL (a miner pack), for both modes.
 
-    An uploaded checkpoint (Analyze page) overrides the .env / config default for its mode.
+    Its miner reports boxes after its own post-processing, exactly what the validator receives, so the operating
+    confidence is 0 (every reported box counts). Set STUDIO_DETECTOR=checkpoint to use the old per-mode .pt files.
     """
     if mode not in MODES:
         raise ValueError(f"Unknown generation mode {mode!r} (expected one of {MODES})")
+    if (os.environ.get("STUDIO_DETECTOR") or "base").strip().lower() != "checkpoint":
+        from app import base_detector
+
+        b = base_detector.current()
+        return {"mode": mode, "path": Path(b["path"]), "conf": 0.0, "imgsz": 0, "source": "base_model", "name": b["name"],
+                "custom": b["custom"], "applied_at": b["applied_at"]}
     s = get_settings()
     o = _overrides().get(mode)
     if o and Path(o["path"]).exists():
@@ -118,6 +126,10 @@ def tune_checkpoint(path: Path, imgsz: int, dataset_root: Path,
 
 
 def weights_key(path: Path) -> str:
+    if Path(path).is_dir():
+        from app import base_detector
+
+        return base_detector.key(Path(path))
     h = hashlib.sha1()
     with path.open("rb") as f:
         h.update(f.read(1 << 20))
@@ -150,6 +162,10 @@ def _load_detector(path: Path):
 def predict(paths: list[Path], weights: Path, imgsz: int, *, conf: float = 0.001,
             progress_cb: Callable[[int, int], None] | None = None) -> dict[str, list[dict]]:
     """{filename: [{cls, conf, xyxy(px)}]} from one checkpoint, classes remapped by name."""
+    if Path(weights).is_dir():  # a miner pack (the base model): its own pipeline, its own thresholds
+        from app import base_detector
+
+        return base_detector.predict(list(paths), progress_cb=progress_cb)
     model = _load_detector(weights)
     remap = {int(k): CLASS_IDS[str(v).lower()] for k, v in model.names.items() if str(v).lower() in CLASS_IDS}
     out: dict[str, list[dict]] = {}
@@ -200,7 +216,7 @@ def autolabel_run(run_dir: Path, mode: str, progress_cb: Callable[[int, int], No
             counts[CLASSES[d["cls"]]] += 1
     meta = {
         "mode": mode,
-        "labelled_by": det["path"].name,
+        "labelled_by": det.get("name") or det["path"].name,
         "weights_key": weights_key(det["path"]),
         "conf": det["conf"],
         "imgsz": det["imgsz"],
@@ -532,7 +548,7 @@ def mine_errors(
 
     report = {
         "mode": mode,
-        "detector": wpath.name,
+        "detector": det.get("name") or wpath.name,
         "weights_key": wkey,
         "imgsz": det["imgsz"],
         "conf": conf,
