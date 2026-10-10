@@ -25,6 +25,7 @@ from .app_state import ReviewAppState
 from . import vault
 from .envfile import load_dotenv as _load_dotenv
 from .keys_api import router as keys_router
+from .studio_proxy import router as studio_router
 from .find_best import (
     MIN_REVIEWED_IMAGES,
     elements_match,
@@ -128,6 +129,7 @@ class SelectiveGZipMiddleware(StarletteGZipMiddleware):
 app = FastAPI(title="SN44 Image Labeler", version="1.0.0", lifespan=lifespan)
 app.include_router(collector_router)
 app.include_router(keys_router)
+app.include_router(studio_router)
 app.add_middleware(SelectiveGZipMiddleware, minimum_size=1024, compresslevel=5)
 app.add_middleware(
     CORSMiddleware,

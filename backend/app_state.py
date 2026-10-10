@@ -5401,9 +5401,13 @@ class ReviewAppState:
         quality: str = "all",
         item_keys: list[str] | None = None,
     ) -> dict:
-        """Stage Platform beverage GT and rsync --delete to the beverage-studio VM."""
+        """Stage Platform beverage GT into the Studio's dataset (beverage_gt/), replacing what was there.
+
+        The Studio now runs on this server (``studio/``), so this is a local copy; the old SSH push to the
+        beverage-studio VM is only used when the local Studio folder is missing."""
         import subprocess
 
+        local_studio_gt = Path(__file__).resolve().parents[1] / "studio" / "beverage_gt"
         SEND_GT_HOST = "194.163.173.245"
         SEND_GT_USER = "root"
         SEND_GT_REMOTE = "/home/generate/beverage-studio/beverage_gt"
@@ -5415,9 +5419,6 @@ class ReviewAppState:
 
         if not is_beverage_topic(self):
             raise ValueError("Send GT is only available for beverage-detect")
-        if not SEND_GT_KEY.is_file():
-            raise ValueError(f"SSH key missing: {SEND_GT_KEY}")
-
         # n_images=0 → stage every matching Done row (no newest-N cap).
         dest, packed, meta = self.stage_reviewed_gt(
             0,
@@ -5428,6 +5429,32 @@ class ReviewAppState:
         )
         if packed <= 0:
             raise ValueError("No Done GT to send for that range / quality")
+
+        if local_studio_gt.parent.is_dir():
+            local_studio_gt.mkdir(parents=True, exist_ok=True)
+            done = subprocess.run(
+                ["rsync", "-a", "--delete", f"{dest}/", f"{local_studio_gt}/"],
+                capture_output=True,
+                text=True,
+                timeout=30 * 60,
+            )
+            if done.returncode != 0:
+                err = (done.stderr or done.stdout or "").strip() or f"exit {done.returncode}"
+                raise ValueError(f"copy to Studio failed: {err}")
+            self.status_message = f"Sent {packed} Platform GT image(s) → Studio dataset"
+            return {
+                "ok": True,
+                "n_images": packed,
+                "block_min": meta.get("block_min"),
+                "block_max": meta.get("block_max"),
+                "quality": meta.get("quality") or quality,
+                "remote": "Studio (this server)",
+                "host": "local",
+                "path": str(local_studio_gt),
+            }
+
+        if not SEND_GT_KEY.is_file():
+            raise ValueError(f"SSH key missing: {SEND_GT_KEY}")
 
         ssh_base = [
             "ssh",

@@ -77,6 +77,9 @@ export default function WorkspaceChooser({ slug, title, platformImages, user }: 
           <Link to="/collected" className="text-[12px] font-semibold text-slate-400 hover:text-sky-300">
             Collected miner solutions →
           </Link>
+          <Link to="/studio" className="text-[12px] font-semibold text-violet-400 hover:text-violet-300">
+            Studio · generate images →
+          </Link>
         </div>
       </div>
     </div>

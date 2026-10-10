@@ -31,6 +31,14 @@ class ImportBody(BaseModel):
     ultralytics_api_key: str = ""
 
 
+def _studio_reload(service: str) -> None:
+    """The Studio reads its generator keys when it starts: restart it (once it is idle) to use a new key."""
+    if service in ("openai", "gemini", "openrouter", "ultralytics"):
+        from .studio_proxy import restart_studio_when_idle
+
+        restart_studio_when_idle(f"{service} key changed")
+
+
 @router.get("")
 def get_keys() -> dict:
     return vault.public_view()
@@ -68,17 +76,19 @@ def hf_models(account: str = "") -> dict:
 
 @router.put("/{service}")
 def put_service(service: str, body: KeyBody, request: Request) -> dict:
-    if service not in ("chutes", "ultralytics"):
+    if service not in vault.SERVICES:
         raise HTTPException(404, "unknown service")
     vault.set_service_key(service, body.api_key, _who(request))
+    _studio_reload(service)
     return {"ok": True, "keys": vault.public_view()}
 
 
 @router.delete("/{service}")
 def delete_service(service: str, request: Request) -> dict:
-    if service not in ("chutes", "ultralytics"):
+    if service not in vault.SERVICES:
         raise HTTPException(404, "unknown service")
     vault.set_service_key(service, "", _who(request))
+    _studio_reload(service)
     return {"ok": True, "keys": vault.public_view()}
 
 
@@ -106,6 +116,24 @@ def test_service(service: str) -> dict:
             summary = ultra.account_summary(key)
             who = (summary or {}).get("username") or (summary or {}).get("user") or "ok"
             return {"ok": True, "detail": f"Ultralytics account: {who}"}
+        if service in ("openai", "gemini", "openrouter"):
+            key = vault.service_key(service)
+            if not key:
+                raise ValueError(f"no {service} key saved")
+            # A read-only listing call: proves the key is accepted without generating (= spending) anything.
+            url, headers = {
+                "openai": ("https://api.openai.com/v1/models", {"Authorization": f"Bearer {key}"}),
+                "gemini": ("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {"x-goog-api-key": key}),
+                "openrouter": ("https://openrouter.ai/api/v1/key", {"Authorization": f"Bearer {key}"}),
+            }[service]
+            req = urllib.request.Request(url, headers={**headers, "Accept": "application/json", "User-Agent": "sn44-image-labeler"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = json.loads(resp.read().decode("utf-8") or "{}")
+            if service == "openrouter":
+                d = body.get("data") or {}
+                left = d.get("limit_remaining")
+                return {"ok": True, "detail": "OpenRouter key accepted" + (f" · ${left:.2f} left" if isinstance(left, (int, float)) else "")}
+            return {"ok": True, "detail": f"{service.capitalize()} key accepted"}
     except urllib.error.HTTPError as exc:
         return {"ok": False, "detail": f"rejected by provider (HTTP {exc.code})"}
     except Exception as exc:  # noqa: BLE001

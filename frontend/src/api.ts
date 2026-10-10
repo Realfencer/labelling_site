@@ -206,10 +206,10 @@ export const api = {
   keysScanHf: (id: string) =>
     request<{ ok: boolean; keys: KeysView }>(`/keys/hf/${encodeURIComponent(id)}/scan`, { method: "POST", timeoutMs: 90000 }),
   keysModels: (account = "") => request<{ models: HfModelRow[] }>(`/keys/hf/models?account=${encodeURIComponent(account)}`),
-  keysPut: (service: "chutes" | "ultralytics", api_key: string) =>
+  keysPut: (service: KeyService, api_key: string) =>
     request<{ ok: boolean; keys: KeysView }>(`/keys/${service}`, { method: "PUT", body: JSON.stringify({ api_key }) }),
-  keysDelete: (service: "chutes" | "ultralytics") => request<{ ok: boolean; keys: KeysView }>(`/keys/${service}`, { method: "DELETE" }),
-  keysTest: (service: "chutes" | "ultralytics") =>
+  keysDelete: (service: KeyService) => request<{ ok: boolean; keys: KeysView }>(`/keys/${service}`, { method: "DELETE" }),
+  keysTest: (service: KeyService) =>
     request<{ ok: boolean; detail: string }>(`/keys/${service}/test`, { method: "POST", timeoutMs: 30000 }),
   keysImport: (body: { chutes_api_key?: string; ultralytics_api_key?: string }) =>
     request<{ ok: boolean; imported: string[]; keys: KeysView }>("/keys/import", { method: "POST", body: JSON.stringify(body) }),
@@ -1601,9 +1601,14 @@ export type KeysView = {
   }>;
   chutes: { configured: boolean; masked: string };
   ultralytics: { configured: boolean; masked: string };
+  openai?: { configured: boolean; masked: string };
+  gemini?: { configured: boolean; masked: string };
+  openrouter?: { configured: boolean; masked: string };
   updated_at: number | null;
   updated_by: string | null;
 };
+
+export type KeyService = "chutes" | "ultralytics" | "openai" | "gemini" | "openrouter";
 
 export type HfModelRow = {
   repo_id: string;

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in — Beverage Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-panel" aria-labelledby="loginTitle">
+      <div class="login-brand">
+        <span class="brand-mark login-mark" aria-hidden="true"></span>
+        <h1 id="loginTitle" class="login-title">Beverage Studio</h1>
+        <p class="login-sub">Sign in to analyze regimes and generate CCTV beverage data.</p>
+      </div>
+      <form id="loginForm" class="login-form" autocomplete="on">
+        <label class="field">
+          <span>Username</span>
+          <input id="username" name="username" type="text" required autocomplete="username" autofocus />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="password" name="password" type="password" required autocomplete="current-password" />
+        </label>
+        <p id="loginError" class="login-error" hidden></p>
+        <button type="submit" class="btn primary login-submit" id="loginBtn">Sign in</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById("loginForm");
+    const err = document.getElementById("loginError");
+    const btn = document.getElementById("loginBtn");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      btn.disabled = true;
+      btn.textContent = "Signing in…";
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "Invalid username or password");
+        window.location.href = "/";
+      } catch (ex) {
+        err.textContent = ex.message || String(ex);
+        err.hidden = false;
+        btn.disabled = false;
+        btn.textContent = "Sign in";
+      }
+    });
+  </script>
+</body>
+</html>

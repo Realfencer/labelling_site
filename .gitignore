@@ -28,3 +28,13 @@ _hf_probe/
 preprocessing/
 *.pt
 *.npz
+
+# Studio (image generation): environment, data, runs, model weights, proxy secret
+studio/.venv/
+studio/outputs/
+studio/beverage_gt/
+studio/.proxy_secret
+studio/data/eval/*
+studio/data/generated/*
+!studio/data/eval/.gitkeep
+!studio/data/generated/.gitkeep

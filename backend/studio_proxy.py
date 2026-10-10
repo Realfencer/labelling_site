@@ -1,0 +1,197 @@
+"""The Studio (image generation, ``studio/``) inside the labeler.
+
+The Studio runs as its own process (``score-studio`` service, 127.0.0.1:8788). Logged-in labeler users reach it
+through ``/api/studio/<path>`` → Studio ``/api/<path>``; this file forwards those requests with the shared proxy
+secret, and keeps the few labeler-side settings (who may start paid runs, the Hugging Face dataset repo).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+import httpx
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+from . import vault
+
+log = logging.getLogger(__name__)
+
+WEB = Path(__file__).resolve().parents[1]
+STUDIO = WEB / "studio"
+UPSTREAM = "http://127.0.0.1:8788"
+SECRET_FILE = STUDIO / ".proxy_secret"
+SETTINGS_FILE = STUDIO / "outputs" / "labeler_settings.json"
+HF_REPO_FILE = STUDIO / "outputs" / "hf_repo.txt"
+DEFAULT_ALLOWED = ["fencer", "hikari"]
+# Requests that spend money at OpenAI / Google / OpenRouter.
+PAID = {("POST", "gen/start")}
+SERVICE = "score-studio"
+
+router = APIRouter(tags=["studio"])
+_client: httpx.AsyncClient | None = None
+
+
+def _who(request: Request) -> str:
+    return str(getattr(request.state, "user", "") or "")
+
+
+def _settings() -> dict:
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    allowed = data.get("allowed_users")
+    data["allowed_users"] = [str(u) for u in allowed] if isinstance(allowed, list) else list(DEFAULT_ALLOWED)
+    return data
+
+
+def _save_settings(data: dict) -> None:
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(SETTINGS_FILE)
+
+
+def can_spend(user: str) -> bool:
+    return user.strip().lower() in {u.strip().lower() for u in _settings()["allowed_users"]}
+
+
+def _secret() -> str:
+    try:
+        return SECRET_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _service_state() -> str:
+    try:
+        return subprocess.run(["systemctl", "is-active", SERVICE], capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def restart_studio_when_idle(reason: str) -> None:
+    """Restart the Studio so it picks up new keys / settings — but never in the middle of a generation."""
+
+    def run() -> None:
+        deadline = time.time() + 6 * 3600
+        while time.time() < deadline:
+            try:
+                r = httpx.get(f"{UPSTREAM}/api/gen/job", headers={"x-studio-proxy": _secret()}, timeout=10)
+                job = r.json() if r.status_code == 200 else {}
+            except Exception:  # noqa: BLE001
+                job = {}
+            if not job.get("running"):
+                break
+            time.sleep(30)
+        log.info("restarting Studio: %s", reason)
+        subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=60)
+
+    threading.Thread(target=run, daemon=True, name="studio-restart").start()
+
+
+# ---- labeler-side settings ------------------------------------------------------------------------------------
+
+
+class StudioSettingsBody(BaseModel):
+    allowed_users: list[str] | None = Field(default=None, max_length=50)
+    hf_repo: str | None = Field(default=None, max_length=200)
+
+
+@router.get("/api/studio-admin/status")
+def studio_status(request: Request) -> dict:
+    keys = vault.public_view()
+    try:
+        r = httpx.get(f"{UPSTREAM}/api/health", timeout=5)
+        health = r.json() if r.status_code == 200 else {"error": f"HTTP {r.status_code}"}
+        up = r.status_code == 200
+    except Exception as exc:  # noqa: BLE001
+        health, up = {"error": str(exc)[:160]}, False
+    s = _settings()
+    return {
+        "up": up,
+        "service": _service_state(),
+        "health": health,
+        "keys": {k: keys[k] for k in ("openai", "gemini", "openrouter", "ultralytics")},
+        "hf_accounts": [a["account"] for a in keys["hf"]],
+        "hf_repo": HF_REPO_FILE.read_text(encoding="utf-8").strip() if HF_REPO_FILE.is_file() else "",
+        "allowed_users": s["allowed_users"],
+        "me": _who(request),
+        "can_spend": can_spend(_who(request)),
+    }
+
+
+@router.put("/api/studio-admin/settings")
+def studio_settings(body: StudioSettingsBody, request: Request) -> dict:
+    who = _who(request)
+    if not can_spend(who):
+        raise HTTPException(403, "Only the people allowed to start paid runs can change Studio settings")
+    s = _settings()
+    if body.allowed_users is not None:
+        users = sorted({u.strip() for u in body.allowed_users if u.strip()}, key=str.lower)
+        if who.lower() not in {u.lower() for u in users}:
+            raise HTTPException(400, "Keep yourself on the list (otherwise nobody you trust can change it back)")
+        s["allowed_users"] = users
+    _save_settings(s)
+    if body.hf_repo is not None:
+        repo = body.hf_repo.strip().strip("/")
+        HF_REPO_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HF_REPO_FILE.write_text(repo, encoding="utf-8")
+        restart_studio_when_idle("Hugging Face repo changed")
+    return studio_status(request)
+
+
+@router.post("/api/studio-admin/restart")
+def studio_restart(request: Request) -> dict:
+    if not can_spend(_who(request)):
+        raise HTTPException(403, "Not allowed")
+    restart_studio_when_idle(f"restart asked by {_who(request)}")
+    return {"ok": True}
+
+
+# ---- forwarding -----------------------------------------------------------------------------------------------
+
+_FWD_REQ = ("content-type", "accept", "if-none-match", "if-modified-since", "range")
+_FWD_RESP = ("content-type", "content-encoding", "cache-control", "etag", "last-modified", "content-disposition", "content-range", "accept-ranges")
+
+
+@router.api_route("/api/studio/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def studio_forward(path: str, request: Request):
+    global _client
+    if (request.method, path.strip("/")) in PAID and not can_spend(_who(request)):
+        raise HTTPException(403, "Only the people on the Studio's list can start paid generation runs")
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+    headers = {k: v for k, v in request.headers.items() if k.lower() in _FWD_REQ}
+    headers["x-studio-proxy"] = _secret()
+    headers["x-labeler-user"] = _who(request)
+    url = f"{UPSTREAM}/api/{path}"
+    try:
+        upstream = await _client.send(
+            _client.build_request(request.method, url, params=request.query_params, headers=headers, content=request.stream()),
+            stream=True,
+        )
+    except httpx.ConnectError as exc:
+        raise HTTPException(503, "The Studio is not running (service score-studio) — it restarts by itself within seconds") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Studio request failed: {exc}") from exc
+    out_headers = {k: v for k, v in upstream.headers.items() if k.lower() in _FWD_RESP}
+    if upstream.status_code == 304 or request.method == "HEAD":
+        await upstream.aclose()
+        return Response(status_code=upstream.status_code, headers=out_headers)
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(body(), status_code=upstream.status_code, headers=out_headers)

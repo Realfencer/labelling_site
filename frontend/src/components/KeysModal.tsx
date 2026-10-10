@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ChevronDown, KeyRound, Loader2, Lock, RefreshCw, Trash2, X } from "lucide-react";
-import { api } from "../api";
+import { api, type KeyService } from "../api";
 import { cn } from "../lib/utils";
 import { timeAgo, useTeam } from "../store/useTeam";
 import { useKeys } from "../store/useKeys";
@@ -57,7 +57,7 @@ function ServiceRow({
   hint,
   status,
 }: {
-  service: "chutes" | "ultralytics";
+  service: KeyService;
   title: string;
   hint: string;
   status: { configured: boolean; masked: string };
@@ -406,6 +406,25 @@ export default function KeysModal() {
             title="Ultralytics API key"
             hint="Used to upload labeled datasets to Ultralytics Platform."
             status={view?.ultralytics ?? { configured: false, masked: "" }}
+          />
+          <div className="pt-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">Studio · image generation</div>
+          <ServiceRow
+            service="openai"
+            title="OpenAI API key"
+            hint="GPT Image generation in the Studio (Batch API). Paid per image."
+            status={view?.openai ?? { configured: false, masked: "" }}
+          />
+          <ServiceRow
+            service="gemini"
+            title="Gemini API key"
+            hint="Gemini image generation in the Studio, and its scene captions."
+            status={view?.gemini ?? { configured: false, masked: "" }}
+          />
+          <ServiceRow
+            service="openrouter"
+            title="OpenRouter API key"
+            hint="Optional route to the image models through OpenRouter."
+            status={view?.openrouter ?? { configured: false, masked: "" }}
           />
         </div>
 

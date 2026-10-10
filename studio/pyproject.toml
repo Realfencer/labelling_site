@@ -1,0 +1,46 @@
+[project]
+name = "beverage-studio"
+version = "0.2.0"
+description = "ScoreVision Detect-beverage analyze → regime cluster → Gemini / OpenAI image generate workbench"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "python-multipart>=0.0.12",
+  "pillow>=10.4.0",
+  "numpy>=2.0.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "opencv-python-headless>=4.8",
+  "scikit-learn>=1.3",
+  "PyYAML>=6.0",
+  "python-dotenv>=1.0",
+  "huggingface-hub>=0.26.0",
+  "itsdangerous>=2.2.0",
+  "openai>=1.60",
+  "google-genai>=1.0.0",
+  # best-model inference for error mining + auto-labelling generated images (CPU-only torch)
+  "ultralytics>=8.4",
+  "torch>=2.4",
+  "torchvision>=0.19",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[project.scripts]
+beverage-studio = "app.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

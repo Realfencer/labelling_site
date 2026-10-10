@@ -7,6 +7,7 @@ import KeysModal from "./components/KeysModal";
 import { useKeys } from "./store/useKeys";
 import TopicsPage from "./TopicsPage";
 const CollectedPage = lazy(() => import("./pages/CollectedPage"));
+const StudioPage = lazy(() => import("./pages/StudioPage"));
 import { api, type AuthStatus } from "./api";
 import "./index.css";
 
@@ -102,6 +103,14 @@ function Root() {
           element={
             <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-[#0b1220] text-sm text-slate-400">Loading…</div>}>
               <CollectedPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/studio"
+          element={
+            <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-[#0b1220] text-sm text-slate-400">Loading…</div>}>
+              <StudioPage />
             </Suspense>
           }
         />

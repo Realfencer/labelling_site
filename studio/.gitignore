@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/eval/*
+data/generated/*
+!data/eval/.gitkeep
+!data/generated/.gitkeep
+!data/meta/.gitkeep
+data/meta/*_index.json
+data/meta/distribution_report.json
+*.egg-info/
+outputs/model_eval/weights/
+outputs/.img_cache/
+
+# GT eval data — never committed
+beverage_gt/
+100_gt_Dataset/
+synthid_check/
+# runtime data: generated runs, analysis caches (contain GT-derived images), model weights, image cache
+outputs/
+*.pt
+# credentials
+api_key
+*.pem

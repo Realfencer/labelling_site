@@ -34,8 +34,15 @@ MAX_MODELS_PER_ACCOUNT = 500
 RESCAN_SECONDS = 24 * 3600
 
 
+# Single-key services. openai / gemini / openrouter are the image generators of the Studio (Generate page).
+SERVICES = ("chutes", "ultralytics", "openai", "gemini", "openrouter")
+
+
 def _empty() -> dict[str, Any]:
-    return {"version": 1, "hf": [], "chutes": {"api_key": ""}, "ultralytics": {"api_key": ""}, "updated_at": 0, "updated_by": ""}
+    out: dict[str, Any] = {"version": 1, "hf": [], "updated_at": 0, "updated_by": ""}
+    for name in SERVICES:
+        out[name] = {"api_key": ""}
+    return out
 
 
 def _fernet() -> Fernet:
@@ -135,6 +142,13 @@ def ultralytics_key(explicit: str = "") -> str:
     return str(_load()["ultralytics"].get("api_key") or "").strip()
 
 
+def service_key(service: str) -> str:
+    """Saved key of a single-key service ("" when none)."""
+    if service not in SERVICES:
+        raise ValueError("unknown service")
+    return str((_load().get(service) or {}).get("api_key") or "").strip()
+
+
 # ---- public (masked) view --------------------------------------------------------------------
 
 
@@ -153,10 +167,12 @@ def public_view() -> dict[str, Any]:
             }
             for a in d["hf"]
         ],
-        "chutes": {"configured": bool(str(d["chutes"].get("api_key") or "").strip()), "masked": mask(str(d["chutes"].get("api_key") or ""))},
-        "ultralytics": {
-            "configured": bool(str(d["ultralytics"].get("api_key") or "").strip()),
-            "masked": mask(str(d["ultralytics"].get("api_key") or "")),
+        **{
+            name: {
+                "configured": bool(str((d.get(name) or {}).get("api_key") or "").strip()),
+                "masked": mask(str((d.get(name) or {}).get("api_key") or "")),
+            }
+            for name in SERVICES
         },
         "updated_at": d.get("updated_at"),
         "updated_by": d.get("updated_by"),
@@ -213,7 +229,7 @@ def remove_hf(account_id: str, who: str = "") -> None:
 
 
 def set_service_key(service: str, api_key: str, who: str = "") -> None:
-    if service not in ("chutes", "ultralytics"):
+    if service not in SERVICES:
         raise ValueError("unknown service")
     with _lock:
         data = json.loads(json.dumps(_load()))

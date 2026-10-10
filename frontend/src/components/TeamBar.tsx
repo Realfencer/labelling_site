@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Eye, Library, LogOut } from "lucide-react";
+import { Eye, Library, LogOut, Sparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTeam, type TeamUser } from "../store/useTeam";
 import { cn } from "../lib/utils";
@@ -203,6 +203,13 @@ function TeamBar({
         className="flex shrink-0 items-center gap-1 rounded-md border border-slate-300 px-1.5 py-1 text-[10px] font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
       >
         <Library className="h-3 w-3" /> Collected
+      </Link>
+      <Link
+        to="/studio"
+        title="Studio: generate challenge-look training images (OpenAI / Gemini)"
+        className="flex shrink-0 items-center gap-1 rounded-md border border-violet-300 px-1.5 py-1 text-[10px] font-bold text-violet-700 hover:bg-violet-50 dark:border-violet-700 dark:text-violet-300 dark:hover:bg-violet-950/30"
+      >
+        <Sparkles className="h-3 w-3" /> Studio
       </Link>
       <button
         type="button"
