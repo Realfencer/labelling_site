@@ -52,10 +52,9 @@ def _stretch_to_square(src: Path, dest: Path, size: int = SEND_SIZE) -> None:
             # re-encoding cost ~1.3 s/image and would turn the palette PNG back into RGB
             shutil.copyfile(src, dest)
             return
-        rgb = im.convert("RGB")
-        if rgb.size != (size, size):
-            rgb = rgb.resize((size, size), Image.Resampling.LANCZOS)
-        rgb.save(dest, format="PNG", compress_level=1)
+        from app.gen_common import square_frame
+
+        square_frame(im, size).save(dest, format="PNG", compress_level=1)
 
 
 def send_run_to_labeler(

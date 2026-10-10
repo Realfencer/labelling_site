@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
-from app.gen_common import GENERATED_ROOT, list_runs
+from app.gen_common import GENERATED_ROOT, list_runs, square_frame
 
 HF_UPLOAD_SIZE = 1024
 # Dataset payload — YOLO layout at archive root: images/*, labels/*
@@ -59,7 +59,8 @@ def pick_run_dir(run: str | None = None) -> Path:
 
 def stretch_run_images_to_square(run_dir: Path, size: int = HF_UPLOAD_SIZE) -> int:
     """
-    Stretch every image in run_dir/images to size×size (non-aspect-preserving).
+    Stretch every image in run_dir/images to size×size (non-aspect-preserving; wide frames are centre-cropped
+    to SQUARE_CROP_ASPECT first — see gen_common.square_frame).
     YOLO labels stay valid (normalized 0–1 coords follow the stretched frame).
     """
     from PIL import Image
@@ -76,9 +77,7 @@ def stretch_run_images_to_square(run_dir: Path, size: int = HF_UPLOAD_SIZE) -> i
             if im.size == (size, size) and im.format == "PNG" and im.mode in ("RGB", "P"):
                 n += 1
                 continue
-            rgb = im.convert("RGB")
-            if rgb.size != (size, size):
-                rgb = rgb.resize((size, size), Image.Resampling.LANCZOS)
+            rgb = square_frame(im, size)
             out = path if path.suffix.lower() == ".png" else path.with_suffix(".png")
             rgb.save(out, format="PNG")
             if out != path:

@@ -139,6 +139,9 @@ export default function Results() {
   return (
     <div className="space-y-4">
       <RunStrip runs={st.runs} active={run} onPick={st.setActiveRun} />
+      {st.runs.find((r) => r.name === run)?.note && (
+        <div className="rounded-xl bg-violet-500/10 px-3 py-2 text-[12px] text-violet-800 dark:text-violet-200">{st.runs.find((r) => r.name === run)?.note}</div>
+      )}
 
       {!run ? (
         <Empty>No runs yet — start with a test on one source (step 3).</Empty>
@@ -344,6 +347,7 @@ function RunStrip({ runs, active, onPick }: { runs: Run[]; active: string; onPic
         <button
           key={r.name}
           type="button"
+          title={r.note || undefined}
           onClick={() => onPick(r.name)}
           className={cn(
             "min-w-[170px] shrink-0 rounded-2xl border px-3 py-2 text-left transition",
@@ -360,6 +364,7 @@ function RunStrip({ runs, active, onPick }: { runs: Run[]; active: string; onPic
             <span className="text-slate-500">img · {(r.provider || "openai") === "gemini" ? "Gemini" : "OpenAI"}</span>
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
+            {r.label && <Chip tone="violet">{r.label}</Chip>}
             {r.pending && <Chip tone="amber">generating</Chip>}
             {r.near_copies > 0 && <Chip tone="amber">{r.near_copies} near copies</Chip>}
             {(r.camera_drift ?? 0) > 0 && <Chip tone="rose">{r.camera_drift} drift</Chip>}

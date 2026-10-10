@@ -199,6 +199,29 @@ def flag_near_copy(image_bytes: bytes, source_path: str | Path) -> dict:
             "near_copy": bool(sim is not None and threshold > 0 and sim > threshold)}
 
 
+# Wide generator frames are centre-cropped to this aspect before the 1024² squash. Our Gemini draws people
+# narrower than the platform's (raw 16:9 person w/h 0.32 vs ~0.38), so squashing the full 1376×768 frame gave
+# 0.188 vs the platform's 0.214; cropping to 1.54:1 (central 86% of a 1376-wide frame) gives ~0.214
+# (measured 2026-10-10 on 24 Gemini test images: 1152 px → 0.219, 1216 px → 0.207).
+SQUARE_CROP_ASPECT = 1.54
+
+
+def square_frame(im, size: int = 1024):
+    """A generator frame → size×size RGB: centre-crop anything wider than SQUARE_CROP_ASPECT, then the
+    non-aspect squash (the platform's own 16:9 → 1:1 stretch). Square inputs are only resized."""
+    from PIL import Image
+
+    rgb = im.convert("RGB")
+    w, h = rgb.size
+    if w > h * SQUARE_CROP_ASPECT * 1.01:
+        wc = int(round(h * SQUARE_CROP_ASPECT))
+        x0 = (w - wc) // 2
+        rgb = rgb.crop((x0, 0, x0 + wc, h))
+    if rgb.size != (size, size):
+        rgb = rgb.resize((size, size), Image.Resampling.LANCZOS)
+    return rgb
+
+
 def as_png(image_bytes: bytes) -> bytes:
     """The generator's pixels unchanged, stored as PNG (runs keep *.png). No resize / blur / tone / grain:
     all post-processing was removed (2026-10-06) — it cost ~60% of the sharpness vs the GT frames.
@@ -449,6 +472,25 @@ def _camera_drift_count(run: Path) -> int | None:
     return cc.get("drift") if cc else None
 
 
+def keep_sources(run_dir: Path) -> int:
+    """Copy each source frame of a run into <run>/sources/, so the run still shows its sources after the eval set
+    is replaced (Update from labeler / Send GT replace beverage_gt/ wholesale)."""
+    import shutil
+
+    man = Path(run_dir) / "run_manifest.json"
+    items = (json.loads(man.read_text(encoding="utf-8")).get("items") or []) if man.exists() else []
+    out = Path(run_dir) / "sources"
+    n = 0
+    for it in items:
+        name, sp = Path(str(it.get("source_image") or "")).name, Path(str(it.get("source_path") or ""))
+        if not name or (out / name).exists() or not sp.is_file():
+            continue
+        out.mkdir(exist_ok=True)
+        shutil.copyfile(sp, out / name)
+        n += 1
+    return n
+
+
 def list_runs() -> list[dict]:
     if not GENERATED_ROOT.exists():
         return []
@@ -495,6 +537,9 @@ def list_runs() -> list[dict]:
                 "chunks": n_chunks,
                 "chunk_status": job_meta.get("status"),
                 "autolabelled": (p / "autolabel.json").exists(),
+                # Optional short tag + explanation (e.g. comparison runs made by hand)
+                "label": meta.get("label"),
+                "note": meta.get("note"),
                 "camera_drift": _camera_drift_count(p),
                 "near_copies": sum(bool(it.get("near_copy")) for it in (meta.get("items") or [])),
             }

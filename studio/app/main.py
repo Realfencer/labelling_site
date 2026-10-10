@@ -942,6 +942,9 @@ def api_gen_source(request: Request, filename: str, run: str = Query(...), w: in
             break
     if not src_name and "__" in filename:
         src_name = filename.split("__", 1)[0] + ".png"
+    kept = GENERATED_ROOT / Path(run).name / "sources" / Path(src_name).name if src_name else None
+    if kept and kept.is_file():  # the run's own copy (survives an eval-set replace)
+        return file_response(request, kept, clamp_width(w))
     path = _resolve_dataset_image(src_name) if src_name else None
     if not path:
         raise HTTPException(404, "source image not found")

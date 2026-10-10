@@ -241,6 +241,9 @@ export type Run = {
   autolabelled: boolean;
   camera_drift: number | null;
   near_copies: number;
+  /** Optional short tag and explanation (comparison runs). */
+  label?: string | null;
+  note?: string | null;
 };
 
 export type ClearPreview = {

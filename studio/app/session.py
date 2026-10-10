@@ -344,6 +344,14 @@ def start_generation(
                 except Exception as e:  # noqa: BLE001
                     base_msg += f" · 1024² stretch failed: {e}"
 
+            if run_dir and int(result.get("count") or 0) > 0:
+                try:
+                    from app.gen_common import keep_sources
+
+                    keep_sources(Path(run_dir))
+                except Exception as e:  # noqa: BLE001 — a missing copy only affects the Results view
+                    base_msg += f" · keeping source copies failed: {e}"
+
             # CCTV look (blur → saturation → 224-colour palette) for this mode, when switched on — before the camera
             # check / auto-labels / upload so they all see the frames that are trained on.
             settings = get_settings()
