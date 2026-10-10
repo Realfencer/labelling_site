@@ -322,6 +322,8 @@ def _miss_reason(o: dict, conf: float) -> str:
         return "not detected at all"
     if b["iou"] is not None:
         return f"only a misplaced {o['gt_class']} box (IoU {b['iou']:.2f} < {o['iou_bar']:.2f})"
+    if conf <= 0:
+        return f"its {o['gt_class']} box was used up by a neighbouring drink (one box for two drinks)"
     return f"seen only below the operating confidence (conf {b['conf']:.2f} < {conf:.2f})"
 
 
@@ -486,7 +488,7 @@ def mine_errors(
             x1, y1, x2, y2 = e["xyxy"]
             e["frame_pct"] = {"h": round((y2 - y1) / h * 100, 1), "y": round((y1 + y2) / 2 / h * 100),
                               "x": round((x1 + x2) / 2 / w * 100)}
-        per_source[fn] = {"path": str(p), "matches": matches, "errors": errs,
+        per_source[fn] = {"path": str(p), "matches": matches, "errors": errs, "labels_sig": _labels_sig(gt),
                           "counts": {"gt": len(gt), "hit": sum(o["status"] == "hit" for o in matches),
                                      "missed": sum(o["status"] == "missed" for o in matches),
                                      "wrong_class": sum(o["status"] == "wrong_class" for o in matches),
@@ -504,8 +506,10 @@ def mine_errors(
             caps = json.loads(cpath.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             caps = {}
+        # error ids are renumbered when the labels change: captions made for other labels describe other boxes
+        stale = caps.get("_labels") not in (None, entry["labels_sig"])
         # re-ask when any error lacks a caption (e.g. cached before MAX_CROPS was raised)
-        if all(str(e["id"]) in caps for e in entry["errors"][:MAX_CROPS]):
+        if not stale and all(str(e["id"]) in caps for e in entry["errors"][:MAX_CROPS]):
             entry["captions"] = caps
         else:
             todo.append((fn, cpath))
@@ -535,12 +539,14 @@ def mine_errors(
                     if progress_cb:
                         progress_cb(done, len(todo), f"Gemini describing detector errors {done}/{len(todo)}…")
                     if caps:
+                        caps["_labels"] = per_source[fn]["labels_sig"]
                         cpath.write_text(json.dumps(caps, indent=2), encoding="utf-8")
                         per_source[fn]["captions"] = caps
                     else:
                         per_source[fn]["caption_error"] = err
 
     for entry in per_source.values():
+        entry.pop("labels_sig", None)
         caps = entry.pop("captions", {}) or {}
         for e in entry["errors"]:
             if str(e["id"]) in caps:
@@ -559,6 +565,14 @@ def mine_errors(
     }
     (analysis_dir / ERRORS_FILE).write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
+
+
+def _labels_sig(gt: list[dict]) -> str:
+    """Short signature of a frame's GT boxes (captions are only valid for the labels they were made for)."""
+    import hashlib
+
+    flat = ";".join(f"{g['cls']}:{','.join(str(round(v)) for v in g['xyxy'])}" for g in gt)
+    return hashlib.sha1(flat.encode()).hexdigest()[:12]
 
 
 def _summary(per_source: dict[str, dict]) -> dict:
@@ -695,42 +709,30 @@ def _target_line(e: dict) -> str:
         return f"{head} ({depth}): {e['reason']}."
     bits = [depth, c.get("shape") or c.get("object"), c.get("placement_detail") or c.get("placement"),
             f"orientation {c['orientation']}" if c.get("orientation") else "",
-            f"occlusion {c['occlusion']}" if c.get("occlusion") else "", c.get("lighting")]
+            f"occlusion {c['occlusion']}" if c.get("occlusion") else "", c.get("lighting"), _seen_note(e)]
     return f"{head}: " + "; ".join(str(b) for b in bits if b) + "."
 
 
+def _seen_note(e: dict) -> str:
+    """What the detector DID see — a misplaced box means the outline is hard to separate from what surrounds it."""
+    r = str(e.get("reason") or "")
+    if r.startswith("only a misplaced"):
+        return ("the detector only drew a misplaced box — its outline blends into the hand / clothes / clutter around it, "
+                "keep that ambiguity")
+    if "neighbouring drink" in r:
+        return "it sits right next to another drink, so the detector merges the two — keep them that close"
+    return ""
+
+
 DEPTH_LOCK = (
-    "DEPTH + SIZE LOCK for these targets (hard, overrides scale_lock / HARD SIZE LOCK / size floor / readability "
-    "rules, which apply only to the OTHER drinks): each target sits at EXACTLY the same distance from the camera as "
-    "in the reference and is EXACTLY as small (same % of frame height, same size relative to the furniture/people "
-    "beside it). Do NOT move it closer, do NOT enlarge it, do NOT make it more readable — a FAR target stays a tiny "
-    "drink at the far end of the space."
+    "Each target sits at the SAME distance from the camera as in the reference and is EXACTLY as small (same % of frame "
+    "height, same size relative to the people/furniture beside it); a FAR target stays a tiny drink at the far end."
 )
 
 
 def _split(entry: dict | None) -> tuple[list[dict], list[dict]]:
     errs = (entry or {}).get("errors") or []
     return [e for e in errs if e["status"] != "false_positive"], [e for e in errs if _is_negative(e)]
-
-
-def failure_profile_block(entry: dict | None) -> str:
-    """Source-wide failures, placed inside MEASURED SOURCE PROFILE (sent with every variant)."""
-    pos, neg = _split(entry)
-    blocks = []
-    if pos:
-        blocks.append(
-            "DETECTOR FAILURE TARGETS (the production detector gets these drinks in this reference WRONG — the new "
-            "scene must contain drinks that are hard in the SAME way: same class, same DISTANCE from the camera, same "
-            "smallness, shape/material, placement type, orientation, occlusion and lighting/contrast; NEW scene, NEW "
-            "layout, NOT copied positions):\n" + "\n".join(f"  {k}. {_target_line(e)}" for k, e in enumerate(pos, 1))
-            + "\n" + DEPTH_LOCK)
-    if neg:
-        blocks.append(
-            "HARD NEGATIVES (the detector FALSELY reports a drink on these NON-drink objects — include similar "
-            "look-alike objects at the same distance, in similar spots and light, rendered unmistakably as what they "
-            "are; they must NOT be cups, cans or bottles and do not count toward the drink count):\n"
-            + "\n".join(f"  {k}. {_target_line(e)}" for k, e in enumerate(neg, 1)))
-    return "\n".join(blocks)
 
 
 def variant_targets(entry: dict | None, variant_idx: int, per_variant: int = 2) -> tuple[list[dict], dict | None]:
@@ -754,12 +756,20 @@ def variant_focus(entry: dict | None, variant_idx: int) -> str:
             c = e.get("caption") or {}
             lines.append(f"- {_depth(e)}: {c.get('generation_directive') or _target_line(e)}"
                          + (f" (why it is hard: {c['likely_cause']})" if c.get("likely_cause") else ""))
-        out.append("FAILURE FOCUS (hard — this variant MUST include these, clearly a "
-                   + "/".join(sorted({e['gt_class'] for e in picks})) + ", correct class shape):\n"
-                   + "\n".join(lines) + "\n" + DEPTH_LOCK)
+        classes = "/".join(sorted({e["gt_class"] for e in picks}))
+        wrong = [e for e in picks if e["status"] == "wrong_class"]
+        out.append(
+            f"FAILURE FOCUS (hard — the base model gets these wrong in the reference; this image MUST contain a {classes} "
+            "that is hard in the SAME way — same distance and smallness, same blur, occlusion, contrast and orientation, "
+            "even if that is tilted, sideways or upside down. Do NOT make it clearer, larger, better lit or more typical; "
+            "it is still a real drink that an attentive annotator can find):\n"
+            + "\n".join(lines) + "\n" + DEPTH_LOCK
+            + ("".join(f"\nThe {e['gt_class']} the detector calls a {e['pred_class']}: keep the look that makes it "
+                       f"ambiguous (it is still a {e['gt_class']})." for e in wrong)))
     if negative:
         c = negative.get("caption") or {}
-        out.append(f"HARD NEGATIVE (include, NOT a drink; {_depth(negative)}): "
+        out.append(f"HARD NEGATIVE (include a look-alike that is NOT a drink — same size, color and shape cues that fool "
+                   f"a detector, but really the object described; it does not count as a drink; {_depth(negative)}): "
                    f"{c.get('generation_directive') or _target_line(negative)}"
                    + (f" (the detector mistakes it for a {negative['pred_class']}: {c['confusers']})" if c.get("confusers")
                       else f" (the detector mistakes it for a {negative['pred_class']})"))

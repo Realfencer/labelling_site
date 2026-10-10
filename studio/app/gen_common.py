@@ -15,7 +15,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from app.gen_plan import MASTER_PROMPT
+from app.gen_plan import GENERAL_RULES_TITLE, MASTER_PROMPT, TASK_HEADER
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATED_ROOT = ROOT / "outputs" / "generated"
@@ -100,44 +100,37 @@ def _variant_prompt(base_prompt: str, variant_idx: int, total: int) -> str:
 
 
 def _variant_prompt_raw(base_prompt: str, variant_idx: int, total: int) -> str:
-    pattern = rf"VARIANT {variant_idx}/{total}[\s\S]*?(?=VARIANT {variant_idx+1}/{total}|$)"
-    m = re.search(pattern, base_prompt)
-    recipe = (
-        m.group(0).strip()
-        if m
-        else f"VARIANT {variant_idx}/{total}: same CCTV place/lighting as reference; new people + drinks at source distance scale."
-    )
-    # Per-source measurements (drink counts, distance lock) live between these markers in the package file.
-    pm = re.search(r"^MEASURED SOURCE PROFILE \([\s\S]*?(?=\n\s*ASSIGNED RECIPES FOR THIS SOURCE:|\Z)",
+    """The prompt for one image: task → THIS image's recipe → THIS SOURCE → general rules → short closing.
+
+    The package file is ``master + THIS SOURCE + ASSIGNED RECIPES``; the master (task + general rules with the
+    eval-set statistics measured at prepare time) is read back from the file, so a re-analysis reaches the generator.
+    Variants beyond the package's recipe count reuse the recipes in turn with a "different place again" note."""
+    total = max(1, int(total))
+    k = (variant_idx - 1) % total + 1
+    repeat = (variant_idx - 1) // total
+    m = re.search(rf"VARIANT {k}/{total}[\s\S]*?(?=\n\s*VARIANT {k + 1}/{total}|\n\s*Generate exactly ONE image|\Z)",
+                  base_prompt)
+    recipe = (m.group(0).strip() if m else
+              f"VARIANT {k}/{total}: a new location of the same place type from a new camera position; new people and drinks.")
+    if repeat:
+        recipe += (f"\nREPEAT {repeat + 1} of this recipe: choose yet ANOTHER location, layout and camera position than "
+                   "the earlier images made from it — new people and new drink instances.")
+    pm = re.search(r"^(?:THIS SOURCE|MEASURED SOURCE PROFILE) \([\s\S]*?(?=\n\s*ASSIGNED RECIPES FOR THIS SOURCE:|\Z)",
                    base_prompt, flags=re.MULTILINE)
-    profile = f"\n\n{pm.group(0).strip()}" if pm else ""
+    profile = pm.group(0).strip() if pm else ""
+    master = base_prompt[: pm.start()].strip() if pm else MASTER_PROMPT
+    if GENERAL_RULES_TITLE in master:
+        task, rules = master.split(GENERAL_RULES_TITLE, 1)
+        rules = GENERAL_RULES_TITLE + rules
+    else:  # package written before the restructure
+        task, rules = TASK_HEADER, master
     return (
-        f"{MASTER_PROMPT}{profile}\n\n---\nUSE THIS VARIANT RECIPE NOW:\n{recipe}\n\n"
-        "CRITICAL FOR TRAIN DATA: the attached image is a style example, NOT an image to edit — do not edit or "
-        "re-populate it. Build a NEW LOCATION of the same place type from the VIEW CHANGE camera position: walls, "
-        "windows, doors, pillars, lights, benches, bins and the vanishing point must differ from the reference. "
-        "Keeping the reference background and changing only people/drinks/weather is a COPY and FAILS. "
-        "Keep distance view + class mix from MEASURED SOURCE PROFILE. "
-        "HARD: match source class_counts (do not invent missing classes). "
-        "HARD SIZE FLOOR: cup/can/bottle apparent size must be ≥ the source drinks (same or slightly larger) — "
-        "shrinking below the reference scale is a FAIL. Paint drinks clearly enough to tell cup vs can vs bottle. "
-        + ("EXCEPTION — FAILURE FOCUS / HARD NEGATIVE objects follow their DEPTH + SIZE LOCK instead: exactly the "
-           "reference distance and smallness (far ones stay tiny at the far end), never enlarged or moved closer. "
-           if "FAILURE FOCUS" in recipe or "HARD NEGATIVE (include" in recipe else "")
-        + "HARD NO PASTE:drinks must be physically in the scene (matching light, contact shadows, perspective, "
-        "CCTV softness) — floating/cut-out/composited sticker drinks = FAIL. "
-        "HARD: drinks go in the SAME kinds of spots as the reference's drinks (mostly hands and tables-counters; "
-        "a few in bags, bins or on the ground). Hand-held drinks stay UPRIGHT in natural grips; table/counter drinks "
-        "stand UPRIGHT and intact (a rare one tipped over is fine — never most of them). IN-BIN: 1–2 drinks among "
-        "real trash inside the bin is OK; a bin stuffed with drinks only = FAIL. "
-        "Partly covered by hands, sleeves, bags and other people, but NOT smaller or mushier than the reference. "
-        "NO neat rows, NO drink-only heaps, NO six-packs or product displays. "
-        "HARD: NO text anywhere in the image (no timestamp, date, camera name, caption or watermark) and NO drawn "
-        "boxes, circles, outlines or labels on objects. "
-        "Follow CCTV / SURVEILLANCE CAMERA APPEARANCE + EVAL-SET LOOK + DRINK DIFFICULTY + DRINK "
-        "READABILITY GUARD: wall/ceiling HD security camera looking down at a moderate angle, mild distortion (no "
-        "fisheye), clean detail with subtle grain, flat natural contrast, slightly muted full color, no overlay text — "
-        "drinks class-identifiable at ≥ source size, mostly held or standing upright."
+        f"{task.strip()}\n\n---\nTHIS IMAGE — {recipe}\n\n---\n{profile}\n\n---\n{rules.strip()}\n\n---\n"
+        "FINAL CHECK: a NEW location and camera position (not a copy of the reference); only the source's drink classes, "
+        "about the source's drink count; drinks as small, soft, partly hidden and low-contrast as in the reference — "
+        "nothing made clearer or bigger to be readable, but every drink physically real (in a hand, on a surface, in a "
+        "bag) and findable by an attentive annotator; FAILURE FOCUS drinks keep their reference look, orientation "
+        "included; no text, no drawn boxes."
     )
 
 
