@@ -1,34 +1,52 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
+  CloudDownload,
   CloudUpload,
+  Crosshair,
   Download,
   FolderUp,
   Upload,
   Moon,
   Rocket,
   Sparkles,
+  GitCompareArrows,
   Square,
   SquareDashedMousePointer,
   Sun,
   Trash2,
   Zap,
+  Loader2,
+  Send,
 } from "lucide-react";
-import { api, workspaceFromState, type ChutesStatus, type WorkspaceMode } from "./api";
+import { api, workspaceFromState, HttpError, type WorkspaceMode } from "./api";
+import TeamBar from "./components/TeamBar";
+import ImageStatusBar from "./components/ImageStatusBar";
+import StripStatusBar, { STRIP_CODE, type StripCodes } from "./components/StripStatusBar";
+import { useTeam } from "./store/useTeam";
+import { useKeys } from "./store/useKeys";
+import { useTeamSync } from "./hooks/useTeamSync";
+import { dropPendingSave, flushOnUnload, hasPendingSaves, retrySave, setSaveConflictHandler } from "./store/saveRetry";
 import AnnotationCanvas from "./components/AnnotationCanvas";
-import ChutesBalanceChip from "./components/ChutesBalanceChip";
-import ChutesModal from "./components/ChutesModal";
-import FindBestModal from "./components/FindBestModal";
-import UploadLabelsModal from "./components/UploadLabelsModal";
-import DownloadGtModal from "./components/DownloadGtModal";
-import UploadUltralyticsModal from "./components/UploadUltralyticsModal";
-import DeepPostProcModal from "./components/DeepPostProcModal";
-import OwnDeleteRangeModal from "./components/OwnDeleteRangeModal";
-import OwnUploadModal from "./components/OwnUploadModal";
+const FindBestModal = lazy(() => import("./components/FindBestModal"));
+const ManualMergeModal = lazy(() => import("./components/ManualMergeModal"));
+import SubmitModeModal from "./components/SubmitModeModal";
+const UploadLabelsModal = lazy(() => import("./components/UploadLabelsModal"));
+const DownloadGtModal = lazy(() => import("./components/DownloadGtModal"));
+const OwnSam3Modal = lazy(() => import("./components/OwnSam3Modal"));
+const SendGtModal = lazy(() => import("./components/SendGtModal"));
+const UploadUltralyticsModal = lazy(() => import("./components/UploadUltralyticsModal"));
+const DeepPostProcModal = lazy(() => import("./components/DeepPostProcModal"));
+const CompareHfModelsModal = lazy(() => import("./components/CompareHfModelsModal"));
+const SelectBaseModelModal = lazy(() => import("./components/SelectBaseModelModal"));
+const OwnDeleteRangeModal = lazy(() => import("./components/OwnDeleteRangeModal"));
+const OwnUploadModal = lazy(() => import("./components/OwnUploadModal"));
+const OwnHfImportModal = lazy(() => import("./components/OwnHfImportModal"));
+import OwnDayList from "./components/OwnDayList";
 import { defaultWorkspaceMetrics, type OwnFilter } from "./components/WorkspaceBar";
 import WorkspaceSwitch from "./components/WorkspaceSwitch";
 import FilmstripThumb from "./components/FilmstripThumb";
-import { clearDetailCache, getCachedDetail, getCachedDetailByItemKey, preloadDetails, setCachedDetail } from "./store/detailCache";
+import { clearDetailCache, dropCachedDetail, getCachedDetail, getCachedDetailByItemKey, preloadDetails, setCachedDetail } from "./store/detailCache";
 import {
   challengePreviewUrl,
   challengeThumbnailUrl,
@@ -46,7 +64,7 @@ import { itemKeysMatch, stateMatchesTopic, topicSlugFromSkill } from "./utils/sk
 import { getTabSessionId } from "./sessionId";
 import { boxFromDict, challengeImageUrl, colorForClass, preloadChallengeForward, preloadChallengeUrgent } from "./utils/colors";
 import { cn } from "./lib/utils";
-import { loadChutesSettings } from "./chutesSettings";
+import DeleteImageConfirm from "./components/DeleteImageConfirm";
 
 /** item_keys marked Done in the UI before saveBoxes / SSE has caught up. */
 const pendingDoneKeys = new Set<string>();
@@ -99,6 +117,7 @@ function payloadMatchesPinnedTopic(state: { active_skill?: { element_path?: stri
 function applyState(s: AppState) {
   if (!payloadMatchesPinnedTopic(s)) return;
   const prev = useLabeler.getState().appState;
+  const stickyChecks = readStripChecksStore(pinnedTopicSlug);
   // Never merge Platform ↔ Own challenge lists — they are private pools.
   const modeChanged = Boolean(prev && prev.review_mode !== s.review_mode);
   if (
@@ -116,6 +135,7 @@ function applyState(s: AppState) {
     };
     const challenges = s.challenges.map((c) => {
       const old = findOld(c.item_key);
+      const sticky = stickyChecks.get(c.item_key);
       const oldLeft = normalizeBoxes(old?.cached_left_boxes);
       const newLeft = normalizeBoxes(c.cached_left_boxes);
       const serverBoxesChanged = Boolean(old) && !boxesEqual(oldLeft, newLeft);
@@ -131,40 +151,82 @@ function applyState(s: AppState) {
       const hasPendingDone = pendingDoneKeys.has(c.item_key);
       const hasPendingNew = pendingNewKeys.has(c.item_key);
 
-      // Strip NEW/DONE must track the user's labeling, not flicker from SSE / Own pool
+      // Strip NEW/DONE/SAM3 must track the user's labeling, not flicker from SSE / Own pool
       // reloads. Never regress Done→New unless Again (pendingNew) was pressed.
+      // pendingDone (M) always wins — even if the server still briefly reports a SAM3 draft
+      // before the .done marker is visible. Do not clear pendingDone on has_label drafts.
       let reviewed = Boolean(c.reviewed);
+      let has_label = Boolean(c.has_label);
       if (hasPendingNew) {
+        // Again (A): Done/SAM3 → New (winner). Keep pending until server drops both flags.
         reviewed = false;
-        if (!c.reviewed) pendingNewKeys.delete(c.item_key);
+        has_label = false;
+        if (!c.reviewed && !c.has_label) pendingNewKeys.delete(c.item_key);
       } else if (hasPendingDone) {
+        // M / explicit Done — keep Done until server confirms reviewed=true.
         reviewed = true;
+        has_label = true;
         if (c.reviewed) pendingDoneKeys.delete(c.item_key);
-      } else if (old?.reviewed && !c.reviewed) {
+      } else if (old?.reviewed && !c.reviewed && !c.has_label) {
+        // Sticky Done only when server dropped reviewed without a SAM3 draft label.
         reviewed = true;
+        has_label = true;
       } else {
         reviewed = Boolean(c.reviewed);
+        // SAM3 draft = has_label && !reviewed; Done implies label.
+        has_label = Boolean(c.has_label) || reviewed;
+        // Trust server SAM3 drafts over sticky Done (no pending M).
+        if (Boolean(c.has_label) && !c.reviewed) {
+          reviewed = false;
+          has_label = true;
+        }
       }
 
       let checks_passed = c.checks_passed ?? null;
+      let checks_total = c.checks_total ?? null;
       let checks = c.checks ?? null;
       const checksStale = Boolean(c.checks_kind && c.checks_kind !== CURRENT_CHECKS_KIND);
       if (checksStale) {
-        checks_passed = old?.checks_kind === CURRENT_CHECKS_KIND ? (old?.checks_passed ?? null) : null;
-        checks = old?.checks_kind === CURRENT_CHECKS_KIND ? (old?.checks ?? null) : null;
+        checks_passed =
+          old?.checks_kind === CURRENT_CHECKS_KIND
+            ? (old?.checks_passed ?? null)
+            : sticky?.checks_kind === CURRENT_CHECKS_KIND
+              ? sticky.checks_passed
+              : null;
+        checks_total =
+          old?.checks_kind === CURRENT_CHECKS_KIND
+            ? (old?.checks_total ?? null)
+            : sticky?.checks_kind === CURRENT_CHECKS_KIND
+              ? sticky.checks_total
+              : null;
+        checks =
+          old?.checks_kind === CURRENT_CHECKS_KIND
+            ? (old?.checks ?? null)
+            : sticky?.checks_kind === CURRENT_CHECKS_KIND
+              ? (sticky.checks ?? null)
+              : null;
       }
       if (!reviewed) {
         checks_passed = null;
+        checks_total = null;
         checks = null;
       } else if (c.checks_kind === CURRENT_CHECKS_KIND && c.checks_passed != null) {
         checks_passed = c.checks_passed;
+        checks_total = c.checks_total ?? null;
         checks = c.checks ?? null;
       } else if (old?.checks_passed != null && (c.checks_passed == null || hasPendingDone)) {
-        // Keep prior n/3 while server recompute is in flight — stops strip tags bouncing.
+        // Keep prior n/N while server recompute is in flight — stops strip tags bouncing.
         checks_passed = old.checks_passed;
+        checks_total = old.checks_total ?? checks_total;
         checks = old.checks ?? checks;
+      } else if (sticky?.checks_passed != null && c.checks_passed == null) {
+        // Survives full page refresh / server restart until disk hydrate catches up.
+        checks_passed = sticky.checks_passed;
+        checks_total = sticky.checks_total ?? checks_total;
+        checks = sticky.checks ?? checks;
       } else if (c.checks_passed != null) {
         checks_passed = c.checks_passed;
+        checks_total = c.checks_total ?? null;
         checks = c.checks ?? null;
       }
       if (
@@ -172,6 +234,7 @@ function applyState(s: AppState) {
         top === c.top_boxes &&
         left === c.cached_left_boxes &&
         reviewed === c.reviewed &&
+        has_label === Boolean(c.has_label) &&
         checks_passed === c.checks_passed
       ) {
         return c;
@@ -179,10 +242,13 @@ function applyState(s: AppState) {
       return {
         ...c,
         reviewed,
+        has_label,
         top_boxes: top || c.top_boxes || [],
         cached_left_boxes: left,
         checks_passed,
+        checks_total,
         checks,
+        checks_kind: c.checks_kind ?? old?.checks_kind,
       };
     });
     const notReviewed = challenges.filter((c) => c.loaded && !c.reviewed).length;
@@ -196,8 +262,26 @@ function applyState(s: AppState) {
         ready_to_tune: ready,
       },
     };
+  } else if (Array.isArray(s.challenges) && stickyChecks.size) {
+    // Fresh session / page reload: restore strip n/N from sessionStorage until server hydrates.
+    s = {
+      ...s,
+      challenges: s.challenges.map((c) => {
+        if (!c.reviewed || c.checks_passed != null) return c;
+        const sticky = stickyChecks.get(c.item_key);
+        if (!sticky || sticky.checks_passed == null) return c;
+        return {
+          ...c,
+          checks_passed: sticky.checks_passed,
+          checks_total: sticky.checks_total ?? c.checks_total,
+          checks: sticky.checks ?? c.checks,
+          checks_kind: sticky.checks_kind || c.checks_kind,
+        };
+      }),
+    };
   }
   useLabeler.getState().setAppState(s);
+  if (Array.isArray(s.challenges)) writeStripChecksStore(pinnedTopicSlug, s.challenges);
 }
 
 function patchChallengeChecks(index: number, patch: Partial<ChallengeItem>) {
@@ -216,6 +300,7 @@ function patchChallengeChecksByKey(itemKey: string | null | undefined, patch: Pa
   const ch = app.challenges[idx];
   if (
     ch.checks_passed === patch.checks_passed &&
+    ch.checks_total === patch.checks_total &&
     ch.checks?.r1 === patch.checks?.r1 &&
     ch.checks?.r2 === patch.checks?.r2 &&
     ch.checks?.r3 === patch.checks?.r3 &&
@@ -226,6 +311,7 @@ function patchChallengeChecksByKey(itemKey: string | null | undefined, patch: Pa
   const challenges = app.challenges.slice();
   challenges[idx] = { ...ch, ...patch };
   useLabeler.getState().setAppState({ ...app, challenges });
+  writeStripChecksStore(pinnedTopicSlug, challenges);
 }
 
 function syncStripChecks(
@@ -258,14 +344,106 @@ function filmstripIndices(
 }
 
 const LABEL_CHECK_DELTA = 0.06;
-const CURRENT_CHECKS_KIND = "r123-v8";
+const CURRENT_CHECKS_KIND = "r123-v9";
+const STRIP_CHECKS_STORE = "labeler_strip_checks_v1";
+
+type StoredStripChecks = {
+  checks_passed: number | null;
+  checks_total: number | null;
+  checks: ChallengeItem["checks"];
+  checks_kind: string;
+};
+
+function stripChecksStoreKey(topic: string | null | undefined): string {
+  return `${STRIP_CHECKS_STORE}:${topic || "default"}`;
+}
+
+const OWN_CURSOR_STORE = "labeler_own_cursor_v1";
+
+function ownCursorStoreKey(topic: string | null | undefined): string {
+  return `${OWN_CURSOR_STORE}:${topic || "default"}`;
+}
+
+function readOwnCursor(topic: string | null | undefined): string | null {
+  if (!topic) return null;
+  try {
+    const raw = localStorage.getItem(ownCursorStoreKey(topic));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { item_key?: string };
+    return parsed?.item_key ? String(parsed.item_key) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeOwnCursor(topic: string | null | undefined, itemKey: string | null | undefined): void {
+  if (!topic || !itemKey) return;
+  try {
+    localStorage.setItem(ownCursorStoreKey(topic), JSON.stringify({ item_key: itemKey }));
+  } catch {
+    /* ignore quota */
+  }
+}
+
+function readStripChecksStore(topic: string | null | undefined): Map<string, StoredStripChecks> {
+  const out = new Map<string, StoredStripChecks>();
+  try {
+    const raw = sessionStorage.getItem(stripChecksStoreKey(topic));
+    if (!raw) return out;
+    const parsed = JSON.parse(raw) as Record<string, StoredStripChecks>;
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (!value || value.checks_kind !== CURRENT_CHECKS_KIND) continue;
+      if (value.checks_passed == null) continue;
+      out.set(key, value);
+    }
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+function writeStripChecksStore(topic: string | null | undefined, rows: ChallengeItem[]): void {
+  try {
+    const prev = readStripChecksStore(topic);
+    for (const c of rows) {
+      if (!c?.item_key || !c.reviewed) continue;
+      if (c.checks_kind !== CURRENT_CHECKS_KIND || c.checks_passed == null) continue;
+      prev.set(c.item_key, {
+        checks_passed: c.checks_passed,
+        checks_total: c.checks_total ?? null,
+        checks: c.checks ?? null,
+        checks_kind: CURRENT_CHECKS_KIND,
+      });
+    }
+    const payload: Record<string, StoredStripChecks> = {};
+    for (const [key, value] of prev) payload[key] = value;
+    sessionStorage.setItem(stripChecksStoreKey(topic), JSON.stringify(payload));
+  } catch {
+    /* ignore */
+  }
+}
+
+function checksTotal(c: ChallengeItem): number {
+  if (c.checks_total != null && c.checks_total > 0) return c.checks_total;
+  const slots = [c.checks?.r1, c.checks?.r2, c.checks?.r3];
+  const active = slots.filter((v) => v !== null && v !== undefined);
+  if (active.length > 0) return active.length;
+  return 3;
+}
+
+function checksPassComplete(c: ChallengeItem): boolean {
+  const total = checksTotal(c);
+  if (total <= 0) return false;
+  return (c.checks_passed ?? 0) >= total;
+}
 
 type StripFilter = "all" | "new" | "fail" | "mid" | "pass";
 
 function matchesOwnFilter(c: ChallengeItem | undefined, filter: OwnFilter): boolean {
   if (!c?.loaded) return false;
-  if (filter === "new") return !c.reviewed;
-  if (filter === "done") return c.reviewed;
+  if (filter === "new") return !c.reviewed && !c.has_label;
+  if (filter === "sam3") return !c.reviewed && Boolean(c.has_label);
+  if (filter === "done") return Boolean(c.reviewed);
   return true;
 }
 
@@ -281,7 +459,7 @@ function matchesFilmstripFilter(
 
 function stripBucket(c: ChallengeItem): "new" | "fail" | "mid" | "pass" {
   if (!c.reviewed) return "new";
-  if (c.checks_passed === 3) return "pass";
+  if (checksPassComplete(c)) return "pass";
   if (c.checks_passed === 0) return "fail";
   return "mid";
 }
@@ -321,8 +499,9 @@ function checksPatchForItem(ch: ChallengeItem, gt: DetectionBox[], variantsRaw?:
       },
     ];
   }
-  const flags = [false, false, false];
-  variants.slice(0, 3).forEach((v, i) => {
+  const available = variants.filter((v) => v.boxes.length > 0).slice(0, 3);
+  if (!available.length) return { checks_passed: null, checks: null, checks_total: null };
+  const flags = available.map((v) => {
     const scored = scoreTopAgainstLeftGt(
       v.boxes,
       gt,
@@ -334,7 +513,7 @@ function checksPatchForItem(ch: ChallengeItem, gt: DetectionBox[], variantsRaw?:
       ch.image_width || undefined,
       ch.image_height || undefined,
     );
-    flags[i] = minerPasses(
+    return minerPasses(
       v.total_weighted,
       v.map50,
       v.false_positive,
@@ -343,9 +522,14 @@ function checksPatchForItem(ch: ChallengeItem, gt: DetectionBox[], variantsRaw?:
       scored?.false_positive,
     );
   });
+  const slotFlags: Array<boolean | null> = [null, null, null];
+  flags.forEach((flag, i) => {
+    slotFlags[i] = flag;
+  });
   return {
-    checks_passed: Number(flags[0]) + Number(flags[1]) + Number(flags[2]),
-    checks: { r1: flags[0], r2: flags[1], r3: flags[2] },
+    checks_passed: flags.filter(Boolean).length,
+    checks_total: available.length,
+    checks: { r1: slotFlags[0], r2: slotFlags[1], r3: slotFlags[2] },
     checks_kind: CURRENT_CHECKS_KIND,
   };
 }
@@ -355,7 +539,7 @@ function needsWork(c: ChallengeItem | undefined, app?: AppState | null): boolean
   if (!c?.loaded) return false;
   if (!c.reviewed) return true;
   if (app?.review_mode === "local") return false;
-  return c.checks_passed !== 3;
+  return c.checks_passed !== checksTotal(c);
 }
 
 function needsWorkStripIndices(app: AppState): number[] {
@@ -368,12 +552,28 @@ function needsWorkStripIndices(app: AppState): number[] {
 
 /** N/B targets: always NEW / needs-work. Own Done filter must not empty the N/B list. */
 function needsWorkNavIndices(app: AppState, _stripFilter: StripFilter, _ownFilter: OwnFilter): number[] {
-  return needsWorkStripIndices(app);
+  const all = needsWorkStripIndices(app);
+  // Avoid duplicate work: N/B and auto-advance skip images a teammate has open right now.
+  const claims = useTeam.getState().claims;
+  if (!Object.keys(claims).length) return all;
+  return all.filter((i) => !claims[app.challenges[i]?.item_key]);
 }
 
 function isAbortish(err: unknown): boolean {
   const msg = String(err).toLowerCase();
   return msg.includes("abort") || msg.includes("timed out") || msg.includes("timeout");
+}
+
+function isStaleChallengeError(err: unknown): boolean {
+  const msg = String(err).toLowerCase();
+  return (
+    msg.includes("404") ||
+    msg.includes("409") ||
+    msg.includes("invalid challenge index") ||
+    msg.includes("unknown item_key") ||
+    msg.includes("not found") ||
+    msg.includes("block mismatch")
+  );
 }
 
 function neighborNeedsWorkIndex(
@@ -447,24 +647,28 @@ function stripBadge(c: ChallengeItem): { text: string; className: string; title:
   const r1 = c.checks?.r1;
   const r2 = c.checks?.r2;
   const r3 = c.checks?.r3;
+  const total = checksTotal(c);
   const bits =
     r1 == null && r2 == null && r3 == null
       ? "checks pending"
-      : `R1${r1 ? "✓" : "✗"} R2${r2 ? "✓" : "✗"} R3${r3 ? "✓" : "✗"}`;
+      : [
+          r1 == null ? null : `R1${r1 ? "✓" : "✗"}`,
+          r2 == null ? null : `R2${r2 ? "✓" : "✗"}`,
+          r3 == null ? null : `R3${r3 ? "✓" : "✗"}`,
+        ]
+          .filter(Boolean)
+          .join(" ");
   const n = c.checks_passed;
   if (n == null) {
-    return { text: "?/3", className: "bg-slate-500 text-white", title: `${c.display_name} · Done · ${bits}` };
+    return { text: `?/${total}`, className: "bg-slate-500 text-white", title: `${c.display_name} · Done · ${bits}` };
   }
-  if (n >= 3) {
-    return { text: "3/3", className: "bg-emerald-500 text-white", title: `${c.display_name} · Pass · ${bits}` };
+  if (checksPassComplete(c)) {
+    return { text: `${total}/${total}`, className: "bg-emerald-500 text-white", title: `${c.display_name} · Pass · ${bits}` };
   }
-  if (n === 2) {
-    return { text: "2/3", className: "bg-lime-500 text-lime-950", title: `${c.display_name} · Partial · ${bits}` };
+  if (n === 0) {
+    return { text: `0/${total}`, className: "bg-rose-500 text-white", title: `${c.display_name} · Fail · ${bits}` };
   }
-  if (n === 1) {
-    return { text: "1/3", className: "bg-amber-500 text-white", title: `${c.display_name} · Partial · ${bits}` };
-  }
-  return { text: "0/3", className: "bg-rose-500 text-white", title: `${c.display_name} · Fail · ${bits}` };
+  return { text: `${n}/${total}`, className: "bg-amber-500 text-white", title: `${c.display_name} · Partial · ${bits}` };
 }
 
 function cloneBoxes(boxes: DetectionBox[]): DetectionBox[] {
@@ -504,8 +708,12 @@ function normalizeReferenceVariants(raw: unknown): RefVariant[] {
     if (!item || typeof item !== "object") continue;
     const source = String((item as { source?: unknown }).source || "reference");
     const boxes = normalizeBoxes((item as { boxes?: unknown }).boxes);
-    if (!boxes.length) continue;
     const rec = item as Record<string, unknown>;
+    const hasScores =
+      typeof rec.total_weighted === "number" ||
+      typeof rec.map50 === "number" ||
+      typeof rec.false_positive === "number";
+    if (!boxes.length && !hasScores) continue;
     out.push({
       source,
       boxes,
@@ -565,23 +773,11 @@ function effectiveReferenceVariants(
   return [];
 }
 
-function detailReferenceVariants(ch: ChallengeItem): NonNullable<ChallengeDetail["reference_variants"]> {
-  return referenceVariantsFromChallenge(ch).map((v) => ({
-    source: v.source,
-    boxes: v.boxes as unknown as Record<string, unknown>[],
-    hotkey: v.hotkey,
-    total_weighted: v.total_weighted,
-    map50: v.map50,
-    false_positive: v.false_positive,
-    composite_score: v.composite_score,
-    is_winner: v.is_winner,
-  }));
-}
-
 /** Per-image winner-miner defaults for instant Again (A). Keyed by item_key. */
 const winnerPredCache = new Map<string, DetectionBox[]>();
 
 /** Only cache preds that are actually winner-model output, not reviewed GT mis-tagged as preds. */
+/** Winner-model snapshot for dual base-pane. Key A always re-infers fresh. */
 function rememberWinnerPreds(
   itemKey: string | null | undefined,
   preds: DetectionBox[],
@@ -589,29 +785,80 @@ function rememberWinnerPreds(
   reviewed: boolean,
 ) {
   if (!itemKey || !preds.length) return;
-  if (reviewed && boxesEqual(preds, left)) return;
+  // Always keep a winner-model snapshot for dual base-pane + Again (A).
+  // Previously we skipped when Done GT == preds (accept-without-edit), which
+  // left Own dual-view base detection and key A empty on new/unedited images.
+  void left;
+  void reviewed;
   winnerPredCache.set(itemKey, preds);
 }
 
-/** Winner-model defaults for Again (A) — never reuse the current left-pane GT as origin. */
-function resolveWinnerOrigin(
-  itemKey: string | null | undefined,
-  current: ChallengeDetail,
-  ch: ChallengeItem,
-  prevBoxes: DetectionBox[],
-): DetectionBox[] {
-  const cached = itemKey ? winnerPredCache.get(itemKey) : undefined;
-  const preds = normalizeBoxes(current.prediction_boxes);
-  let origin = cached?.length ? cloneBoxes(cached) : preds;
-  if (origin.length && boxesEqual(origin, prevBoxes)) origin = [];
-  if (
-    origin.length &&
-    ch.reviewed &&
-    boxesEqual(origin, normalizeBoxes(ch.cached_left_boxes))
-  ) {
-    origin = [];
+/** Winner-model defaults kept for dual-pane paint — key A always re-infers. */
+
+function variantSetScore(variants: { boxes?: unknown[] }[] | null | undefined): number {
+  if (!variants?.length) return 0;
+  let boxed = 0;
+  for (const v of variants) {
+    if (Array.isArray(v.boxes) && v.boxes.length) boxed += 1;
   }
-  return origin;
+  return variants.length * 10 + boxed;
+}
+
+/** Prefer the richer R1/R2/R3 payload so a late R1-only response cannot wipe alts. */
+function preferReferenceVariants<T extends { boxes?: unknown[] }>(
+  incoming: T[] | null | undefined,
+  previous: T[] | null | undefined,
+  fallback: T[] = [],
+): T[] {
+  const a = incoming?.length ? incoming : [];
+  const b = previous?.length ? previous : [];
+  const c = fallback;
+  const best = [a, b, c].sort((x, y) => variantSetScore(y) - variantSetScore(x))[0];
+  return best.length ? best : [];
+}
+
+/**
+ * Live R1/R2/R3 selection. Late disk/SSE payloads always ship winner (R1) as
+ * `reference_boxes` / `top_boxes` — writers must re-apply this index or the right
+ * pane snaps back to R1 while the middle rail still highlights R2/R3.
+ */
+const activeRefVariantIdxGate = { current: 0 };
+
+/** Resolve boxes for the currently selected miner variant (falls back to `fallback`). */
+function refBoxesForActiveVariant(
+  variants: { boxes?: unknown[] }[] | null | undefined,
+  fallback: DetectionBox[],
+  idx = activeRefVariantIdxGate.current,
+): DetectionBox[] {
+  if (!variants?.length) return fallback;
+  const clamped = Math.max(0, Math.min(idx, variants.length - 1));
+  const picked = normalizeBoxes(variants[clamped]?.boxes);
+  return picked.length ? picked : fallback;
+}
+
+/** Keep store.refBoxes + detail.reference_boxes on the selected R# after a late merge. */
+function reapplyActiveRefVariant(detail?: ChallengeDetail | null) {
+  const state = useLabeler.getState();
+  const current = detail ?? state.detail;
+  if (!current) return;
+  const navI = current.index ?? state.appState?.current_index ?? -1;
+  const ch = navI >= 0 ? state.appState?.challenges[navI] : current.challenge;
+  const variants = effectiveReferenceVariants(
+    current.reference_variants,
+    ch,
+    current.challenge,
+    state.refBoxes,
+  );
+  if (!variants.length) return;
+  const next = refBoxesForActiveVariant(variants, state.refBoxes);
+  if (!next.length) return;
+  if (!boxesEqual(state.refBoxes, next)) state.setRefBoxes(next);
+  if (!boxesEqual(normalizeBoxes(current.reference_boxes), next)) {
+    state.setDetail({
+      ...current,
+      reference_boxes: next as unknown as Record<string, unknown>[],
+    });
+  }
 }
 
 function applyDetail(d: ChallengeDetail) {
@@ -629,16 +876,47 @@ function applyDetail(d: ChallengeDetail) {
     itemKeysMatch(prev.challenge.item_key, d.challenge.item_key);
   const width = sameItem && prev.width > 0 ? prev.width : d.width;
   const height = sameItem && prev.height > 0 ? prev.height : d.height;
+  const fallbackVariants = referenceVariantsFromChallenge(d.challenge).map((v) => ({
+    source: v.source,
+    boxes: v.boxes as unknown as Record<string, unknown>[],
+    hotkey: v.hotkey,
+    total_weighted: v.total_weighted,
+    map50: v.map50,
+    false_positive: v.false_positive,
+    composite_score: v.composite_score,
+    is_winner: v.is_winner,
+  }));
+  const keepVariants = preferReferenceVariants(
+    d.reference_variants || [],
+    sameItem ? prev?.reference_variants : undefined,
+    fallbackVariants,
+  );
+  const keepRef =
+    ref.length > 0
+      ? ref
+      : sameItem && (prev?.reference_boxes?.length ?? 0) > 0
+        ? normalizeBoxes(prev!.reference_boxes)
+        : ref;
+  // Same image refresh must not yank the right pane back to R1/winner.
+  const activeRef = sameItem
+    ? refBoxesForActiveVariant(keepVariants, keepRef.length ? keepRef : ref)
+    : keepRef.length
+      ? keepRef
+      : ref;
   setDetail({
     ...d,
     width,
     height,
     boxes: left,
-    reference_boxes: ref as unknown as Record<string, unknown>[],
+    reference_boxes: (activeRef.length ? activeRef : keepRef.length ? keepRef : ref) as unknown as Record<
+      string,
+      unknown
+    >[],
+    reference_variants: keepVariants,
     prediction_boxes: preds,
   });
   setBoxes(left);
-  setRefBoxes(ref);
+  setRefBoxes(activeRef.length ? activeRef : keepRef.length ? keepRef : ref);
   setSelected(null);
   rememberWinnerPreds(challengeItemKey(d.challenge), preds, left, reviewed);
 }
@@ -663,6 +941,9 @@ function applyChallengeInstant(
   if (ch.reviewed) {
     // DONE → saved GT labels
     seededLeft = left;
+  } else if (Boolean(ch.has_label) && !ch.reviewed) {
+    // Own SAM3 draft (label on disk, not Done) → SAM3 labels, never winner.
+    seededLeft = left;
   } else {
     // NEW → winner preds; if cache still cold, show top detections so left is never blank.
     seededLeft = winner.length ? winner : left.length ? left : ref;
@@ -671,17 +952,28 @@ function applyChallengeInstant(
     index,
     challenge: {
       ...ch,
-      source_type: ch.source_type || (app.review_mode === "local" ? "local" : "challenge"),
+      source_type: app.review_mode === "local" ? "local" : ch.source_type || "challenge",
     },
     image_url: imageUrl,
     width: w,
     height: h,
     boxes: seededLeft,
     reference_boxes: ch.top_boxes || [],
-    reference_variants: detailReferenceVariants(ch),
+    // Seed winner as R1 immediately so middle/right panes never flash empty.
+    reference_variants: referenceVariantsFromChallenge(ch).map((v) => ({
+      source: v.source,
+      boxes: v.boxes as unknown as Record<string, unknown>[],
+      hotkey: v.hotkey,
+      total_weighted: v.total_weighted,
+      map50: v.map50,
+      false_positive: v.false_positive,
+      composite_score: v.composite_score,
+      is_winner: v.is_winner,
+    })),
     prediction_boxes: winner.length ? winner : seededLeft,
     class_names: app.model_class_names,
-    reference_class_names: app.miner_class_names.length ? app.miner_class_names : app.model_class_names,
+    // Right pane = platform miner boxes → taxonomy / Score Studio order, not local ONNX order.
+    reference_class_names: app.model_class_names.length ? app.model_class_names : app.miner_class_names,
     score: null,
     missing_classes: [],
     record: (ch.record as Record<string, unknown>) || {},
@@ -691,7 +983,19 @@ function applyChallengeInstant(
   useLabeler.getState().setSelected(null);
 }
 
-export default function App({ topicSlug, initialWorkspace }: { topicSlug: string; initialWorkspace?: WorkspaceMode }) {
+export default function App({
+  topicSlug,
+  initialWorkspace,
+  initialOwnDay,
+  ownDaysPage = false,
+}: {
+  topicSlug: string;
+  initialWorkspace?: WorkspaceMode;
+  /** /t/<topic>/own/days/<date>: open this Own day right away. */
+  initialOwnDay?: string;
+  /** /t/<topic>/own/days: show the day-selection page (not a day). */
+  ownDaysPage?: boolean;
+}) {
   pinnedTopicSlug = topicSlug || null;
   const theme = useLabeler((s) => s.theme);
   const toggleTheme = useLabeler((s) => s.toggleTheme);
@@ -708,10 +1012,34 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   const error = useLabeler((s) => s.error);
   const setError = useLabeler((s) => s.setError);
   const [syncTransform, setSyncTransform] = useState<{ scale: number; offsetX: number; offsetY: number } | null>(null);
+  /** Cross-pane hover: highlight matched GT / miner / missed boxes together. */
+  const [linkedBoxFocus, setLinkedBoxFocus] = useState<{
+    gtIdxs: number[];
+    predIdxs: number[];
+    ghostIdxs: number[];
+  } | null>(null);
+  /** Keyboard C/V box inspect — zoom + cross-pane highlight. */
+  const [boxInspect, setBoxInspect] = useState<{ idx: number; seq: number } | null>(null);
+  const boxInspectIdxRef = useRef<number | null>(null);
+  /** Right-pane solo: wrong (W) / extra (E) / missed (R). null = all. */
+  const [minerAlertFilter, setMinerAlertFilter] = useState<"wrong" | "extra" | "missed" | null>(null);
+  /** Own: dual labeled + base-detection panes (default on; toggle with E). */
+  const [ownDualView, setOwnDualView] = useState(true);
+  /** Own: smart dotted row/column guides while labeling (toggle with R). */
+  const [ownGuides, setOwnGuides] = useState(() => {
+    try {
+      return localStorage.getItem("sn44-guides") !== "0"; // dotted guide lines: on unless switched off
+    } catch {
+      return true;
+    }
+  });
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [downloadOpen, setDownloadOpen] = useState(false);
+  const [sendGtOpen, setSendGtOpen] = useState(false);
   const [ultralyticsOpen, setUltralyticsOpen] = useState(false);
   const [dppOpen, setDppOpen] = useState(false);
+  const [hfCompareOpen, setHfCompareOpen] = useState(false);
+  const [baseModelOpen, setBaseModelOpen] = useState(false);
   const [stopCollectBusy, setStopCollectBusy] = useState(false);
   const [stripFilter, setStripFilter] = useState<StripFilter>("all");
   const stripFilterRef = useRef<StripFilter>("all");
@@ -721,9 +1049,22 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   ownFilterRef.current = ownFilter;
   const [modeBusy, setModeBusy] = useState(false);
   const [ownUploadOpen, setOwnUploadOpen] = useState(false);
+  const [ownHfImportOpen, setOwnHfImportOpen] = useState(false);
+  const [sam3Busy, setSam3Busy] = useState(false);
+  const [sam3Open, setSam3Open] = useState(false);
   const [ownDeleteOpen, setOwnDeleteOpen] = useState(false);
+  const [deleteImageAsk, setDeleteImageAsk] = useState<{ key: string; index: number; name: string; hasLabel: boolean } | null>(null);
+  const [daySel, setDaySel] = useState<string[]>([]); // days ticked on the Own day list
   const pendingWorkspaceRef = useRef<WorkspaceMode | null>(initialWorkspace ?? null);
-  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const initialOwnDayRef = useRef(initialOwnDay);
+  initialOwnDayRef.current = initialOwnDay;
+  const ownDaysPageRef = useRef(ownDaysPage);
+  ownDaysPageRef.current = ownDaysPage;
+  const enterOwnDayRef = useRef<((date: string) => Promise<void>) | null>(null);
+  const leaveOwnDayRef = useRef<(() => Promise<void>) | null>(null);
+  const [urlSync, setUrlSync] = useState(false); // false until the link's own day/page has been opened
   const [stripTick, setStripTick] = useState(0);
   const stripTickRafRef = useRef(0);
   const bumpStripTick = useCallback(() => {
@@ -733,26 +1074,42 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       setStripTick((n) => n + 1);
     });
   }, []);
-  const [chutesOpen, setChutesOpen] = useState(false);
   const [findBestOpen, setFindBestOpen] = useState(false);
+  const [submitModeOpen, setSubmitModeOpen] = useState(false);
+  const [manualMergeOpen, setManualMergeOpen] = useState(false);
   const [uploadLabelsOpen, setUploadLabelsOpen] = useState(false);
-  const [showBoxLabels, setShowBoxLabels] = useState(true);
+  const [showBoxLabels, setShowBoxLabels] = useState(() => {
+    try {
+      return localStorage.getItem("sn44-box-labels") === "1"; // class labels: hidden unless switched on
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("sn44-guides", ownGuides ? "1" : "0");
+      localStorage.setItem("sn44-box-labels", showBoxLabels ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+  }, [ownGuides, showBoxLabels]);
   const modalOpenRef = useRef(false);
-  const [chutesSnap, setChutesSnap] = useState<ChutesStatus | null>(null);
-  const [chutesError, setChutesError] = useState(false);
-  const [chutesSettingsTick, setChutesSettingsTick] = useState(0);
   modalOpenRef.current =
-    downloadOpen || findBestOpen || uploadLabelsOpen || ownUploadOpen || ownDeleteOpen || ultralyticsOpen || dppOpen;
-  const onChutesStatus = useCallback((status: ChutesStatus | null) => {
-    setChutesSnap(status);
-    setChutesError(false);
-    setChutesSettingsTick((n) => n + 1);
-  }, []);
+    downloadOpen || sendGtOpen || findBestOpen || uploadLabelsOpen || ownUploadOpen || ownHfImportOpen || ownDeleteOpen || deleteImageAsk != null || ultralyticsOpen || dppOpen || hfCompareOpen ||
+    submitModeOpen || manualMergeOpen || baseModelOpen || sam3Open || useKeys.getState().open;
 
   const [topicReady, setTopicReady] = useState(false);
+  // Team: heartbeat (presence/claims), label log, live feed. Read-only when a teammate owns
+  // the open image or when we are watching (G).
+  useTeamSync(topicReady, topicSlug);
+  const teamReadOnly = useTeam((s) => s.readOnly);
+  const teamClaims = useTeam((s) => s.claims);
+  const teamLabels = useTeam((s) => s.labels);
+  const teamColors = useTeam((s) => s.colors);
   const [refVariantIdx, setRefVariantIdx] = useState(0);
   const refVariantIdxRef = useRef(0);
   refVariantIdxRef.current = refVariantIdx;
+  activeRefVariantIdxGate.current = refVariantIdx;
 
   const saveTimer = useRef<number | null>(null);
   const detailIndexRef = useRef<number | null>(null);
@@ -776,7 +1133,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   const followCollectRef = useRef(true); // true = near left end (latest); collect must not steal selection
   const topicReadyRef = useRef(false);
   const THUMB_SLOT = 118;
-  const [stripRange, setStripRange] = useState({ first: 0, last: 28 });
+  const [stripRange, setStripRange] = useState({ first: 0, last: 12 });
   const blocksMapRef = useRef<Map<number, number>>(new Map());
 
   const buildBlocksMap = useCallback((app: AppState) => {
@@ -804,12 +1161,6 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     imageCacheTokenRef.current = imageCacheToken;
   }, [imageCacheToken]);
 
-  useEffect(() => {
-    const onChange = () => setChutesSettingsTick((n) => n + 1);
-    window.addEventListener("chutes-settings-changed", onChange);
-    return () => window.removeEventListener("chutes-settings-changed", onChange);
-  }, []);
-
   // Dropping a folder onto Chrome otherwise navigates to file:// and blanks the app.
   useEffect(() => {
     const blockNav = (e: DragEvent) => {
@@ -823,34 +1174,6 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     };
   }, []);
 
-  useEffect(() => {
-    let alive = true;
-    let timer: number | undefined;
-    const poll = async () => {
-      const settings = loadChutesSettings();
-      try {
-        // Empty api_key lets the server fall back to CHUTES_API_KEY in .env.
-        const alert = await api.getChutesBalanceAlert({
-          api_key: settings.apiKey,
-          threshold: settings.threshold,
-          force: false,
-        });
-        if (!alive) return;
-        setChutesSnap(alert.configured ? { ...alert, configured: true } : null);
-        setChutesError(false);
-        window.dispatchEvent(new CustomEvent("chutes-balance-alert", { detail: alert }));
-      } catch {
-        if (alive) setChutesError(true);
-      }
-      if (alive) timer = window.setTimeout(poll, 60_000);
-    };
-    void poll();
-    return () => {
-      alive = false;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [chutesSettingsTick]);
-
   const preloadFilmstripWindow = useCallback(() => {
     const el = filmstripRef.current;
     const app = useLabeler.getState().appState;
@@ -862,7 +1185,8 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     const cur = detailIndexRef.current ?? app.current_index;
     const indicesAll = filmstripIndices(app, filter, cur, own);
     const visibleCount = indicesAll.length;
-    const pad = 8;
+    // Ultralytics-style: only the visible slots + a tiny scroll buffer.
+    const pad = 3;
     const firstSlot = Math.max(0, Math.floor(el.scrollLeft / THUMB_SLOT) - pad);
     const lastSlot = Math.min(
       Math.max(0, visibleCount - 1),
@@ -937,6 +1261,8 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     index: number;
     itemKey: string;
     boxes: DetectionBox[];
+    /** Save as Done (false = Own SAM3 draft stays a draft). */
+    done?: boolean;
     gen: number;
   } | null>(null);
   const historyRef = useRef<Map<string, { undo: DetectionBox[][]; redo: DetectionBox[][] }>>(new Map());
@@ -977,9 +1303,25 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     if (!pending) return;
     const target = resolveSaveTarget(index, snapKey);
     if (!target) return;
-    if (snapKey) notePendingDone(snapKey);
+    const app = useLabeler.getState().appState;
+    const row =
+      (snapKey && app?.challenges.find((c) => itemKeysMatch(c.item_key, snapKey))) ||
+      (target.index != null ? app?.challenges[target.index] : null);
+    // Own SAM3 draft only: label on disk, not yet reviewed. NEW with pending boxes → Done.
+    const sam3Draft =
+      app?.review_mode === "local" &&
+      Boolean(row && !row.reviewed && Boolean(row.has_label)) &&
+      !pendingDoneKeys.has(snapKey);
+    const markDone = !sam3Draft;
+    if (markDone && snapKey) notePendingDone(snapKey);
+    const flushKey = target.itemKey || snapKey;
+    const teamNow = useTeam.getState();
+    teamNow.setSave("saving");
     try {
-      await api.saveBoxes(target.index, pending, true, target.itemKey || undefined);
+      const res = await api.saveBoxes(target.index, pending, markDone, target.itemKey || undefined, teamNow.revs[flushKey]);
+      useTeam.getState().noteRev(flushKey, res.rev);
+      useTeam.getState().noteLabel(flushKey, res.labeled_by, res.rev);
+      if (!hasPendingSaves()) useTeam.getState().setSave("saved");
       if (saveGenRef.current !== gen) return;
       if (dirtyItemKeyRef.current && itemKeysMatch(dirtyItemKeyRef.current, snapKey)) {
         dirtyItemKeyRef.current = null;
@@ -987,8 +1329,14 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       } else if (dirtyIndexRef.current === target.index) {
         dirtyIndexRef.current = null;
       }
-    } catch {
-      /* don't block navigation */
+    } catch (err) {
+      // Never block navigation, but never lose the labels either: keep them queued.
+      const status = err instanceof HttpError ? err.status : 0;
+      if (status === 423 || status === 409) {
+        useTeam.getState().setSave(status === 423 ? "locked" : "conflict", err instanceof Error ? err.message : String(err));
+      } else {
+        retrySave(flushKey, target.index, pending, markDone);
+      }
     }
   }, [resolveSaveTarget]);
 
@@ -1009,6 +1357,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
   const selectChallenge = useCallback(
     async (index: number, reason = "select") => {
+      if (switchingWorkspaceRef.current) return;
       const app = useLabeler.getState().appState;
       if (!app || !app.challenges[index]?.loaded) return;
 
@@ -1033,6 +1382,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       openItemKeyRef.current = itemKey;
       setViewIndex(index);
       reviewActionBusyRef.current = false;
+      if (app.review_mode === "local" && itemKey) {
+        writeOwnCursor(topicSlug, itemKey);
+      }
 
       const seq = ++loadSeqRef.current;
       clearLoadRetry();
@@ -1046,7 +1398,12 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       const h = ch.image_height && ch.image_height > 0 ? ch.image_height : 1024;
 
       setRefVariantIdx(0);
+      activeRefVariantIdxGate.current = 0;
+      setMinerAlertFilter(null);
       setSyncTransform(null);
+      setLinkedBoxFocus(null);
+      boxInspectIdxRef.current = null;
+      setBoxInspect(null);
       setError("");
 
       // 1) Paint next image + boxes immediately (before any network / save work).
@@ -1063,7 +1420,18 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         itemKeysMatch(cached!.challenge?.item_key, itemKey) &&
         (ch.reviewed || cacheHasBoxes || stateLeft.length > 0);
       if (cacheOk && cached) {
-        const instantRefs = cached.reference_variants?.length ? cached.reference_variants : detailReferenceVariants(ch);
+        const instantRefs = cached.reference_variants?.length
+          ? cached.reference_variants
+          : referenceVariantsFromChallenge(ch).map((v) => ({
+              source: v.source,
+              boxes: v.boxes as unknown as Record<string, unknown>[],
+              hotkey: v.hotkey,
+              total_weighted: v.total_weighted,
+              map50: v.map50,
+              false_positive: v.false_positive,
+              composite_score: v.composite_score,
+              is_winner: v.is_winner,
+            }));
         if (ch.reviewed) {
           const gt = stateLeft.length ? stateLeft : normalizeBoxes(cached.boxes);
           applyDetail({
@@ -1099,7 +1467,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       useLabeler.getState().setSelected(null);
 
       primeDecodedThumbnail(challengeThumbnailUrl(index, mode, ch.block, true, imageCacheToken, ch.item_key, ch.media_rev));
-      preloadChallengeUrgent(index, mode, ch.block, imageCacheToken, ch.item_key, ch.media_rev);
+      preloadChallengeUrgent(index, mode, ch.block, imageCacheToken, ch.item_key, ch.media_rev, { full: true });
       preloadChallengeForward(
         index,
         mode,
@@ -1111,8 +1479,11 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
       // Save previous labels in the background — never block left-pane paint.
       if (prev != null && prev !== index && prevCh) {
+        const prevIsSam3 =
+          app.review_mode === "local" && Boolean(prevCh.has_label) && !prevCh.reviewed;
         if (
           prevKey &&
+          !prevIsSam3 &&
           (prevCh.reviewed ||
             itemKeysMatch(dirtyItemKeyRef.current, prevKey) ||
             itemKeysMatch(saveSnapshotRef.current?.itemKey, prevKey) ||
@@ -1131,38 +1502,46 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         editSessionRef.current = false;
       }
 
-      // Load R1/R2/R3 after first paint — Platform only (Own has no miner rail).
+      // Load R1/R2/R3 after first paint — always refresh per item_key (never reuse prior block's count).
       window.setTimeout(() => {
         if (app.review_mode === "local") return;
         if (!loadStillCurrent(seq, index, itemKey)) return;
-        const have =
-          useLabeler.getState().detail?.reference_variants?.length ?? 0;
-        if (have >= 3) return;
         void api
-          .getChallengeVariants(index, controller.signal)
+          .getChallengeVariants(index, controller.signal, itemKey)
           .then((payload) => {
             if (!loadStillCurrent(seq, index, itemKey)) return;
             const state = useLabeler.getState();
             const prev = state.detail;
-            if (!prev || prev.index !== index) return;
+            if (!prev || prev.index !== index || prev.challenge?.item_key !== itemKey) return;
             const variants = (payload.reference_variants || []) as NonNullable<
               ChallengeDetail["reference_variants"]
             >;
             if (!variants.length) return;
+            const merged = preferReferenceVariants(
+              variants,
+              prev.reference_variants as typeof variants | undefined,
+              [],
+            );
             const refBoxes = normalizeBoxes(payload.reference_boxes);
             state.setDetail({
               ...prev,
-              reference_variants: variants,
+              reference_variants: merged,
               reference_boxes: (payload.reference_boxes ||
                 prev.reference_boxes) as ChallengeDetail["reference_boxes"],
             } as ChallengeDetail);
             if (refBoxes.length && !state.refBoxes.length) state.setRefBoxes(refBoxes);
+            reapplyActiveRefVariant(useLabeler.getState().detail);
+            setCachedDetail(index, {
+              ...prev,
+              reference_variants: merged,
+              reference_boxes: (payload.reference_boxes || prev.reference_boxes) as ChallengeDetail["reference_boxes"],
+            });
             const gt = normalizeBoxes(state.boxes);
             const reviewed = Boolean(
               prev.challenge?.reviewed || useLabeler.getState().appState?.challenges[index]?.reviewed,
             );
-            if (reviewed && gt.length && variants.length >= 3) {
-              syncStripChecks(index, { ...ch, reviewed: true }, gt, variants);
+            if (reviewed && gt.length && merged.length >= 1) {
+              syncStripChecks(index, { ...ch, reviewed: true }, gt, merged);
               bumpStripTick();
             }
           })
@@ -1171,15 +1550,13 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
       try {
         // 2) Fast disk read. DONE keeps painted GT; NEW always takes winner-model boxes.
-        const d = await api.getChallenge(index, true, controller.signal, true, reason);
+        const d = await api.getChallenge(index, true, controller.signal, true, reason, itemKey);
         if (!loadStillCurrent(seq, index, itemKey) || controller.signal.aborted) return;
         if (
           dirtyIndexRef.current === index ||
           itemKeysMatch(dirtyItemKeyRef.current, itemKey) ||
           editSessionRef.current
         ) {
-          const ref = normalizeBoxes(d.reference_boxes);
-          if (ref.length) useLabeler.getState().setRefBoxes(ref);
           const preds = normalizeBoxes(d.prediction_boxes);
           const state = useLabeler.getState();
           const prev = state.detail;
@@ -1193,54 +1570,167 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
           }
           // Keep left GT stable, but always merge R1/R2/R3 into the middle rail.
           if (prev && (d.reference_variants?.length ?? 0) > 0) {
+            const merged = preferReferenceVariants(
+              d.reference_variants || [],
+              prev.reference_variants,
+              [],
+            );
             state.setDetail({
               ...prev,
-              reference_variants: d.reference_variants,
-              reference_boxes: d.reference_boxes ?? prev.reference_boxes,
+              reference_variants: merged,
+              // Do not force winner reference_boxes — reapplyActiveRefVariant picks R#.
+              reference_boxes: prev.reference_boxes,
               prediction_boxes: preds.length ? preds : prev.prediction_boxes,
               record: d.record ?? prev.record,
             });
+            reapplyActiveRefVariant(useLabeler.getState().detail);
             const gt = normalizeBoxes(state.boxes);
-            if (
-              (prev.challenge?.reviewed || ch.reviewed) &&
-              gt.length &&
-              (d.reference_variants?.length ?? 0) >= 3
-            ) {
-              syncStripChecks(index, { ...ch, reviewed: true }, gt, d.reference_variants);
+            if ((prev.challenge?.reviewed || ch.reviewed) && gt.length && merged.length >= 1) {
+              syncStripChecks(index, { ...ch, reviewed: true }, gt, merged);
               bumpStripTick();
             }
+          } else {
+            reapplyActiveRefVariant(prev);
           }
           return;
         }
         const paintedReviewed = Boolean(ch.reviewed || (d.challenge as { reviewed?: boolean })?.reviewed);
         const diskLeft = normalizeBoxes(d.boxes);
-        if (paintedReviewed) {
-          if (!loadStillCurrent(seq, index, itemKey)) return;
-          applyDetail({ ...d, index, boxes: diskLeft });
-          setCachedDetail(index, {
+        // Prefer item_key over filmstrip index — Own day list can shift under us.
+        const liveApp = useLabeler.getState().appState;
+        const liveIdx =
+          liveApp?.challenges.findIndex((c) => itemKeysMatch(c.item_key, itemKey)) ?? -1;
+        const paintIdx = liveIdx >= 0 ? liveIdx : index;
+        if (paintIdx !== detailIndexRef.current) {
+          detailIndexRef.current = paintIdx;
+          openItemKeyRef.current = itemKey;
+          setViewIndex(paintIdx);
+        }
+        const serverSam3 =
+          app.review_mode === "local" &&
+          Boolean(ch.has_label || (d.challenge as { has_label?: boolean })?.has_label) &&
+          !Boolean((d.challenge as { reviewed?: boolean })?.reviewed) &&
+          !ch.reviewed;
+        if (paintedReviewed && !serverSam3) {
+          if (!loadStillCurrent(seq, paintIdx, itemKey) && !loadStillCurrent(seq, index, itemKey)) return;
+          applyDetail({ ...d, index: paintIdx, boxes: diskLeft });
+          setCachedDetail(paintIdx, {
             ...d,
-            index,
+            index: paintIdx,
             boxes: diskLeft,
             challenge: { ...d.challenge, reviewed: true },
           });
+          // Own dual-view base pane: prediction_cache may still be warming async —
+          // poll without blocking media (sync ONNX used to freeze the full image).
+          if (app.review_mode === "local" && !normalizeBoxes(d.prediction_boxes).length) {
+            const tryBase = (delayMs: number) => {
+              window.setTimeout(() => {
+                if (!loadStillCurrent(seq, paintIdx, itemKey) || controller.signal.aborted) return;
+                const prev = useLabeler.getState().detail;
+                if (normalizeBoxes(prev?.prediction_boxes).length) return;
+                void api
+                  .getChallenge(paintIdx, true, controller.signal, false, undefined, itemKey)
+                  .then((warmDetail) => {
+                    if (!loadStillCurrent(seq, paintIdx, itemKey)) return;
+                    const warm = normalizeBoxes(warmDetail.prediction_boxes || []);
+                    if (!warm.length) return;
+                    rememberWinnerPreds(itemKey, warm, normalizeBoxes(useLabeler.getState().boxes), true);
+                    const live = useLabeler.getState().detail;
+                    if (!live || !itemKeysMatch(live.challenge?.item_key, itemKey)) return;
+                    useLabeler.getState().setDetail({
+                      ...live,
+                      prediction_boxes: warm,
+                    });
+                    setCachedDetail(paintIdx, { ...live, prediction_boxes: warm });
+                    bumpStripTick();
+                  })
+                  .catch(() => undefined);
+              }, delayMs);
+            };
+            tryBase(400);
+            tryBase(1200);
+            tryBase(3000);
+            tryBase(7000);
+          }
         } else {
+          // SAM3 draft only when the server/strip says has_label && !reviewed.
+          // Do NOT treat winner preds on NEW (diskLeft.length > 0) as SAM3 — that
+          // falsely set has_label and made manual labeling save as SAM3 instead of Done.
+          if (serverSam3) {
+            // Own SAM3: left = draft labels from disk; keep winner preds for dual base pane.
+            if (!loadStillCurrent(seq, paintIdx, itemKey) && !loadStillCurrent(seq, index, itemKey)) return;
+            const sam3Preds = normalizeBoxes(d.prediction_boxes || []);
+            if (sam3Preds.length) rememberWinnerPreds(itemKey, sam3Preds, diskLeft, false);
+            applyDetail({
+              ...d,
+              index: paintIdx,
+              boxes: diskLeft,
+              prediction_boxes: sam3Preds,
+              challenge: { ...d.challenge, reviewed: false, has_label: true },
+            });
+            setCachedDetail(paintIdx, {
+              ...d,
+              index: paintIdx,
+              boxes: diskLeft,
+              prediction_boxes: sam3Preds,
+              challenge: { ...d.challenge, reviewed: false, has_label: true },
+            });
+            // Warm winner prediction_cache for dual base pane (same as Done).
+            if (!sam3Preds.length) {
+              const tryBase = (delayMs: number) => {
+                window.setTimeout(() => {
+                  if (!loadStillCurrent(seq, paintIdx, itemKey) || controller.signal.aborted) return;
+                  const prev = useLabeler.getState().detail;
+                  if (normalizeBoxes(prev?.prediction_boxes).length) return;
+                  void api
+                    .getChallenge(paintIdx, true, controller.signal, false, undefined, itemKey)
+                    .then((warmDetail) => {
+                      if (!loadStillCurrent(seq, paintIdx, itemKey)) return;
+                      const warm = normalizeBoxes(warmDetail.prediction_boxes || []);
+                      if (!warm.length) return;
+                      rememberWinnerPreds(itemKey, warm, normalizeBoxes(useLabeler.getState().boxes), false);
+                      const live = useLabeler.getState().detail;
+                      if (!live || !itemKeysMatch(live.challenge?.item_key, itemKey)) return;
+                      useLabeler.getState().setDetail({
+                        ...live,
+                        prediction_boxes: warm,
+                      });
+                      setCachedDetail(paintIdx, { ...live, prediction_boxes: warm });
+                      bumpStripTick();
+                    })
+                    .catch(() => undefined);
+                }, delayMs);
+              };
+              tryBase(400);
+              tryBase(1200);
+              tryBase(3000);
+              tryBase(7000);
+            }
+          } else {
           // NEW: always paint winner-model boxes on the left (never keep empty / top-only).
           const preds = normalizeBoxes(
             d.prediction_boxes?.length ? d.prediction_boxes : d.boxes,
           );
           let leftBoxes = preds.length ? preds : normalizeBoxes(d.boxes);
           if (!loadStillCurrent(seq, index, itemKey)) return;
-          applyDetail({ ...d, index, boxes: leftBoxes, prediction_boxes: preds.length ? preds : leftBoxes });
+          applyDetail({
+            ...d,
+            index,
+            boxes: leftBoxes,
+            prediction_boxes: preds.length ? preds : leftBoxes,
+            challenge: { ...d.challenge, reviewed: false, has_label: false },
+          });
           setCachedDetail(index, {
             ...d,
             index,
             boxes: leftBoxes,
             prediction_boxes: preds.length ? preds : leftBoxes,
+            challenge: { ...d.challenge, reviewed: false, has_label: false },
           });
           // Platform cold-cache fallback only — Own uses activate=True ONNX on the server.
           if (!leftBoxes.length && app.review_mode !== "local") {
             void api
-              .getChallenge(index, false, controller.signal, false)
+              .getChallenge(index, false, controller.signal, false, undefined, itemKey)
               .then((full) => {
                 if (!loadStillCurrent(seq, index, itemKey)) return;
                 if (useLabeler.getState().appState?.challenges[index]?.reviewed) return;
@@ -1248,8 +1738,6 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
                 const warm = normalizeBoxes(
                   full.prediction_boxes?.length ? full.prediction_boxes : full.boxes,
                 );
-                const ref = normalizeBoxes(full.reference_boxes);
-                if (ref.length) useLabeler.getState().setRefBoxes(ref);
                 const variants = full.reference_variants || [];
                 if (warm.length) {
                   applyDetail({
@@ -1258,6 +1746,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
                     prediction_boxes: warm,
                     challenge: { ...full.challenge, reviewed: false },
                   });
+                  reapplyActiveRefVariant(useLabeler.getState().detail);
                   setCachedDetail(index, { ...full, boxes: warm, prediction_boxes: warm });
                   bumpStripTick();
                 } else if (variants.length) {
@@ -1265,66 +1754,79 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
                   const prev = state.detail;
                   if (prev && prev.index === index) {
                     state.setDetail({ ...prev, reference_variants: variants });
+                    reapplyActiveRefVariant(useLabeler.getState().detail);
                   }
                 }
               })
               .catch(() => undefined);
-          } else if (!leftBoxes.length && app.review_mode === "local") {
-            // Own: backend runs winner ONNX on cold open; poll until boxes land.
-            const tryWarm = (delayMs: number) => {
-              window.setTimeout(() => {
-                if (!loadStillCurrent(seq, index, itemKey) || controller.signal.aborted) return;
-                if (useLabeler.getState().boxes.length) return;
-                void api
-                  .getChallenge(index, true, controller.signal, false)
-                  .then((warmDetail) => {
-                    if (!loadStillCurrent(seq, index, itemKey)) return;
-                    if (useLabeler.getState().appState?.challenges[index]?.reviewed) return;
-                    if (dirtyIndexRef.current === index || editSessionRef.current) return;
-                    const warm = normalizeBoxes(
-                      warmDetail.prediction_boxes?.length
-                        ? warmDetail.prediction_boxes
-                        : warmDetail.boxes,
-                    );
-                    if (!warm.length) return;
-                    rememberWinnerPreds(
-                      itemKey,
-                      warm,
-                      normalizeBoxes(useLabeler.getState().boxes),
-                      false,
-                    );
-                    applyDetail({
-                      ...warmDetail,
-                      boxes: warm,
-                      prediction_boxes: warm,
-                      challenge: {
-                        ...warmDetail.challenge,
-                        reviewed: false,
-                        source_type: "local",
-                        cached_left_boxes: warm.map((b) => ({
-                          cls_id: b.cls,
-                          x1: b.x1,
-                          y1: b.y1,
-                          x2: b.x2,
-                          y2: b.y2,
-                          conf: b.conf ?? null,
-                        })),
-                      },
-                    });
-                    setCachedDetail(index, {
-                      ...warmDetail,
-                      boxes: warm,
-                      prediction_boxes: warm,
-                    });
-                    bumpStripTick();
-                  })
-                  .catch(() => undefined);
-              }, delayMs);
+          } else if (app.review_mode === "local") {
+            // Own NEW: always poll for real winner prediction_cache (top_boxes /
+            // empty left must not freeze base detection or key-A origin).
+            const needWinnerPreds = () => {
+              const live = useLabeler.getState().detail;
+              if (!live || !itemKeysMatch(live.challenge?.item_key, itemKey)) return true;
+              return !normalizeBoxes(live.prediction_boxes).length;
             };
-            tryWarm(400);
-            tryWarm(1500);
-            tryWarm(3500);
+            if (!leftBoxes.length || needWinnerPreds()) {
+              const tryWarm = (delayMs: number) => {
+                window.setTimeout(() => {
+                  if (!loadStillCurrent(seq, index, itemKey) || controller.signal.aborted) return;
+                  if (useLabeler.getState().appState?.challenges[index]?.reviewed) return;
+                  if (!needWinnerPreds() && useLabeler.getState().boxes.length) return;
+                  void api
+                    .getChallenge(index, true, controller.signal, false, undefined, itemKey)
+                    .then((warmDetail) => {
+                      if (!loadStillCurrent(seq, index, itemKey)) return;
+                      if (useLabeler.getState().appState?.challenges[index]?.reviewed) return;
+                      if (dirtyIndexRef.current === index || editSessionRef.current) return;
+                      const warm = normalizeBoxes(
+                        warmDetail.prediction_boxes?.length
+                          ? warmDetail.prediction_boxes
+                          : warmDetail.boxes,
+                      );
+                      if (!warm.length) return;
+                      rememberWinnerPreds(
+                        itemKey,
+                        warm,
+                        normalizeBoxes(useLabeler.getState().boxes),
+                        false,
+                      );
+                      applyDetail({
+                        ...warmDetail,
+                        boxes: warm,
+                        prediction_boxes: warm,
+                        challenge: {
+                          ...warmDetail.challenge,
+                          reviewed: false,
+                          source_type: "local",
+                          cached_left_boxes: warm.map((b) => ({
+                            cls_id: b.cls,
+                            x1: b.x1,
+                            y1: b.y1,
+                            x2: b.x2,
+                            y2: b.y2,
+                            conf: b.conf ?? null,
+                          })),
+                        },
+                      });
+                      setCachedDetail(index, {
+                        ...warmDetail,
+                        boxes: warm,
+                        prediction_boxes: warm,
+                      });
+                      bumpStripTick();
+                    })
+                    .catch(() => undefined);
+                }, delayMs);
+              };
+              tryWarm(300);
+              tryWarm(900);
+              tryWarm(2000);
+              tryWarm(4500);
+              tryWarm(9000);
+            }
           }
+          } // end !isSam3Draft (true New / winner path)
         }
         if (!loadStillCurrent(seq, index, itemKey)) return;
         const liveGt = normalizeBoxes(useLabeler.getState().boxes);
@@ -1349,7 +1851,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         );
         preloadDetails(
           filteredNeighbors(index, stripFilterRef.current, 2, ownFilterRef.current),
-          (i) => api.getChallenge(i, true, undefined, false),
+          (i) => api.getChallenge(i, true, undefined, false, undefined, app.challenges[i]?.item_key),
           (i) => app.challenges[i]?.item_key,
           bumpStripTick,
         );
@@ -1357,7 +1859,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         if (controller.signal.aborted || !loadStillCurrent(seq, index, itemKey)) return;
         const msg = String(e);
         if (msg.toLowerCase().includes("abort")) return;
-        if (msg.includes("404") || msg.includes("409") || msg.toLowerCase().includes("not found")) {
+        if (isStaleChallengeError(e)) {
           setError("Image index changed — pick another block or refresh the topic.");
           return;
         }
@@ -1374,7 +1876,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         }, 1200);
       }
     },
-    [bumpStripTick, clearLoadRetry, flushSave, imageCacheToken, loadStillCurrent, setError],
+    [bumpStripTick, clearLoadRetry, flushSave, imageCacheToken, loadStillCurrent, setError, topicSlug],
   );
 
   const loadChallenge = selectChallenge;
@@ -1399,7 +1901,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       }
       if (target !== cur) {
         void loadChallenge(target, "arrow").catch((err) => {
-          if (!isAbortish(err)) setError(String(err));
+          if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
         });
       }
     });
@@ -1425,7 +1927,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       }
       if (target !== cur) {
         void loadChallenge(target, "needs").catch((err) => {
-          if (!isAbortish(err)) setError(String(err));
+          if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
         });
       }
     });
@@ -1456,7 +1958,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     useLabeler.getState().setRefBoxes([]);
     useLabeler.getState().setSelected(null);
     setRefVariantIdx(0);
+    activeRefVariantIdxGate.current = 0;
     setSyncTransform(null);
+    setLinkedBoxFocus(null);
     clearDetailCache();
     clearDecodedImages();
     clearThumbnailBlobCache();
@@ -1468,6 +1972,8 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       if (!app || workspaceFromState(app) === next || switchingWorkspaceRef.current) return;
       switchingWorkspaceRef.current = true;
       setModeBusy(true);
+      loadSeqRef.current += 1;
+      loadAbortRef.current?.abort();
       setError("");
 
       const prevMode = workspaceFromState(app);
@@ -1491,6 +1997,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
             ...cached,
             review_mode: next === "own" ? "local" : "challenge",
             workspace: next,
+            own_day: next === "own" ? null : cached.own_day ?? null,
+            challenges: next === "own" ? [] : cached.challenges,
+            current_index: next === "own" ? -1 : cached.current_index,
             platform_metrics: app.platform_metrics ?? cached.platform_metrics,
             own_metrics: app.own_metrics ?? cached.own_metrics,
             collect: next === "own" ? { running: false, message: "" } : cached.collect,
@@ -1499,6 +2008,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
             ...app,
             review_mode: next === "own" ? "local" : "challenge",
             workspace: next,
+            own_day: next === "own" ? null : app.own_day ?? null,
             challenges: [],
             current_index: -1,
             metrics:
@@ -1511,9 +2021,6 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       clearLabelerPanes();
       setOwnFilter("all");
       setStripFilter("all");
-      const nextParams = new URLSearchParams(searchParams);
-      nextParams.set("workspace", next);
-      setSearchParams(nextParams, { replace: true });
 
       // Background confirm — UI already swapped.
       void (async () => {
@@ -1521,28 +2028,48 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
           if (prevMode === "platform" && prevIdx >= 0) {
             await flushSave(prevIdx, prevKey);
           }
-          const s = await api.setWorkspace(next);
+          const preferKey =
+            next === "own" && topicSlug ? readOwnCursor(topicSlug) : null;
+          const s = await api.setWorkspace(next, preferKey);
           if (workspaceFromState(useLabeler.getState().appState || s) !== next) {
             // User flipped again while we were in flight.
             return;
           }
           workspacePoolsRef.current[next] = s;
           applyState(s);
-          const idx = s.current_index >= 0 ? s.current_index : s.challenges.findIndex((c) => c.loaded);
+          // Own day-list mode: no filmstrip until a day is entered.
+          if (next === "own" && !s.own_day) {
+            clearLabelerPanes();
+            return;
+          }
+          const preferIdx =
+            preferKey != null
+              ? s.challenges.findIndex((c) => c.loaded && itemKeysMatch(c.item_key, preferKey))
+              : -1;
+          const idx =
+            preferIdx >= 0
+              ? preferIdx
+              : s.current_index >= 0
+                ? s.current_index
+                : s.challenges.findIndex((c) => c.loaded);
           if (idx >= 0) {
+            // loadChallenge() does nothing while a workspace switch is in progress, so end the switch first —
+            // otherwise the image was never requested and "Loading image…" stayed until you clicked another one.
+            switchingWorkspaceRef.current = false;
             await loadChallenge(idx, "workspace");
+            scrollThumbIntoView(idx);
           } else {
             clearLabelerPanes();
           }
         } catch (e) {
-          setError(String(e));
+          if (!isStaleChallengeError(e)) setError(String(e));
         } finally {
           switchingWorkspaceRef.current = false;
           setModeBusy(false);
         }
       })();
     },
-    [clearLabelerPanes, flushSave, loadChallenge, searchParams, setSearchParams, setError],
+    [clearLabelerPanes, flushSave, loadChallenge, scrollThumbIntoView, setError, topicSlug],
   );
 
   const onUploadOwnDone = useCallback(
@@ -1553,11 +2080,283 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       clearThumbnailBlobCache();
       workspacePoolsRef.current.own = s;
       applyState(s);
+      // Upload / HF import auto-enters today's day cluster.
       const idx = s.current_index >= 0 ? s.current_index : s.challenges.findIndex((c) => c.loaded);
       if (idx >= 0) await loadChallenge(idx, "upload");
       else clearLabelerPanes();
     },
     [clearLabelerPanes, loadChallenge],
+  );
+
+  const enterOwnDay = useCallback(
+    async (date: string) => {
+      setError("");
+      setModeBusy(true);
+      try {
+        const preferKey = topicSlug ? readOwnCursor(topicSlug) : null;
+        const s = await api.setOwnDay(date, preferKey);
+        workspacePoolsRef.current.own = s;
+        applyState(s);
+        const preferIdx =
+          preferKey != null
+            ? s.challenges.findIndex((c) => c.loaded && itemKeysMatch(c.item_key, preferKey))
+            : -1;
+        const idx =
+          preferIdx >= 0
+            ? preferIdx
+            : s.current_index >= 0
+              ? s.current_index
+              : s.challenges.findIndex((c) => c.loaded);
+        if (idx >= 0) {
+          await loadChallenge(idx, "workspace");
+          scrollThumbIntoView(idx);
+        } else {
+          clearLabelerPanes();
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setModeBusy(false);
+      }
+    },
+    [clearLabelerPanes, loadChallenge, scrollThumbIntoView, topicSlug],
+  );
+
+  const leaveOwnDay = useCallback(async () => {
+    setError("");
+    setModeBusy(true);
+    try {
+      const idx = detailIndexRef.current;
+      const key = useLabeler.getState().detail?.challenge?.item_key || null;
+      if (idx != null && idx >= 0) await flushSave(idx, key);
+      const s = await api.setOwnDay(null);
+      workspacePoolsRef.current.own = s;
+      applyState(s);
+      clearLabelerPanes();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setModeBusy(false);
+    }
+  }, [clearLabelerPanes, flushSave]);
+
+  enterOwnDayRef.current = enterOwnDay;
+  leaveOwnDayRef.current = leaveOwnDay;
+
+  // The address bar always shows where you are, so a link can be sent to someone:
+  //   /t/<topic>  ·  /t/<topic>/own/days  ·  /t/<topic>/own/days/<date>
+  useEffect(() => {
+    if (!urlSync || !appState) return;
+    const ws = workspaceFromState(appState);
+    const wantPath =
+      ws === "own" ? `/t/${topicSlug}/own/days${appState.own_day ? `/${appState.own_day}` : ""}` : `/t/${topicSlug}`;
+    const wantSearch = ws === "own" ? "" : "?workspace=platform";
+    if (location.pathname !== wantPath || location.search !== wantSearch) {
+      navigate({ pathname: wantPath, search: wantSearch }, { replace: true });
+    }
+  }, [urlSync, appState?.own_day, appState?.workspace, appState?.review_mode, topicSlug, location.pathname, location.search, navigate]);
+
+  /** Own day list: delete every image of these days (the list page shows its own confirmation). */
+  const deleteOwnDaysFromList = useCallback(
+    async (days: string[]) => {
+      setError("");
+      const next = await api.deleteOwnDays(days);
+      workspacePoolsRef.current.own = next;
+      applyState(next);
+      clearDetailCache();
+      clearDecodedImages();
+      clearThumbnailBlobCache();
+      clearLabelerPanes();
+    },
+    [clearLabelerPanes],
+  );
+
+  const clearOwnDayNew = useCallback(async () => {
+    const app = useLabeler.getState().appState;
+    if (!app?.own_day) {
+      setError("Enter an Own day cluster first");
+      return;
+    }
+    const newCount = app.challenges.filter((c) => c.loaded && !c.reviewed).length;
+    if (newCount <= 0) {
+      setError("No New images in this day to clear");
+      return;
+    }
+    const ok = window.confirm(
+      `Clear ${newCount} New image(s) from ${app.own_day}?\n\nDone labels are kept. This cannot be undone.`,
+    );
+    if (!ok) return;
+    setError("");
+    setModeBusy(true);
+    try {
+      const idx = detailIndexRef.current;
+      const key = useLabeler.getState().detail?.challenge?.item_key || null;
+      if (idx != null && idx >= 0) await flushSave(idx, key);
+      const s = await api.clearOwnDayNew();
+      workspacePoolsRef.current.own = s;
+      applyState(s);
+      clearDetailCache();
+      clearDecodedImages();
+      clearThumbnailBlobCache();
+      if (!s.own_day) {
+        clearLabelerPanes();
+        return;
+      }
+      const nextIdx = s.current_index >= 0 ? s.current_index : s.challenges.findIndex((c) => c.loaded);
+      if (nextIdx >= 0) {
+        await loadChallenge(nextIdx, "workspace");
+        scrollThumbIntoView(nextIdx);
+      } else {
+        clearLabelerPanes();
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setModeBusy(false);
+    }
+  }, [clearLabelerPanes, flushSave, loadChallenge, scrollThumbIntoView]);
+
+  const openSam3Modal = useCallback(() => {
+    const app = useLabeler.getState().appState;
+    if (!app || app.review_mode !== "local") {
+      setError("Open an Own day cluster first");
+      return;
+    }
+    if (!app.own_day) {
+      setError("Enter an Own day cluster before running SAM3");
+      return;
+    }
+    setError("");
+    setSam3Open(true);
+  }, [setError]);
+
+  const runSam3LabelOne = useCallback(
+    async (opts: { index: number; itemKey: string }) => {
+      // The Chutes key comes from the shared key vault on the server.
+      const res = await api.ownSam3Label({
+        index: opts.index,
+        item_key: opts.itemKey,
+      });
+      // Do NOT clearDecodedImages here — closing ImageBitmaps while the canvas still
+      // holds them leaves a black pane, and loadChallenge no-ops if already on this item.
+      clearDetailCache();
+      // Prefer server row for this item_key — list index can drift after applyState.
+      const appNow = useLabeler.getState().appState;
+      const rowFromRes =
+        res.challenges.find((c) => itemKeysMatch(c.item_key, opts.itemKey)) ||
+        (typeof res.sam3?.index === "number" ? res.challenges[res.sam3.index] : undefined);
+      if (appNow && rowFromRes) {
+        applyState({
+          ...res,
+          challenges: appNow.challenges.map((c) =>
+            itemKeysMatch(c.item_key, opts.itemKey)
+              ? {
+                  ...c,
+                  ...rowFromRes,
+                  reviewed: false,
+                  has_label: true,
+                  cached_left_boxes: rowFromRes.cached_left_boxes ?? c.cached_left_boxes,
+                  image_width: rowFromRes.image_width || c.image_width,
+                  image_height: rowFromRes.image_height || c.image_height,
+                }
+              : c,
+          ),
+        });
+      } else {
+        applyState(res);
+      }
+      const liveIdx = useLabeler.getState().appState?.challenges.findIndex((c) =>
+        itemKeysMatch(c.item_key, opts.itemKey),
+      );
+      const detail = res.detail;
+      if (detail && liveIdx != null && liveIdx >= 0) {
+        const boxes = normalizeBoxes(
+          detail.boxes?.length ? detail.boxes : rowFromRes?.cached_left_boxes || [],
+        );
+        const w =
+          detail.width ||
+          rowFromRes?.image_width ||
+          useLabeler.getState().detail?.width ||
+          0;
+        const h =
+          detail.height ||
+          rowFromRes?.image_height ||
+          useLabeler.getState().detail?.height ||
+          0;
+        // Keep winner preds for dual base pane (NEW left / prediction_cache).
+        const prev = useLabeler.getState().detail;
+        const prevPreds =
+          prev && itemKeysMatch(prev.challenge?.item_key, opts.itemKey)
+            ? normalizeBoxes(prev.prediction_boxes || [])
+            : [];
+        const cachedPreds = winnerPredCache.get(opts.itemKey) || [];
+        const serverPreds = normalizeBoxes(detail.prediction_boxes || []);
+        const prediction_boxes = serverPreds.length
+          ? serverPreds
+          : prevPreds.length
+            ? prevPreds
+            : cachedPreds;
+        if (prediction_boxes.length) {
+          rememberWinnerPreds(opts.itemKey, prediction_boxes, boxes, false);
+        }
+        const painted = {
+          ...detail,
+          index: liveIdx,
+          boxes,
+          width: w,
+          height: h,
+          prediction_boxes,
+          challenge: {
+            ...detail.challenge,
+            reviewed: false,
+            has_label: true,
+            item_key: opts.itemKey,
+            image_width: w || detail.challenge?.image_width,
+            image_height: h || detail.challenge?.image_height,
+          },
+        };
+        // Paint SAM3 boxes when this image is (or becomes) the open one.
+        const curKey = useLabeler.getState().detail?.challenge?.item_key;
+        if (!curKey || itemKeysMatch(curKey, opts.itemKey)) {
+          applyDetail(painted);
+          setCachedDetail(liveIdx, painted);
+        } else {
+          setCachedDetail(liveIdx, painted);
+        }
+      }
+      bumpStripTick();
+    },
+    [bumpStripTick],
+  );
+
+  const onSam3RunComplete = useCallback(
+    async (opts: { labeled: number; failed: number; stopped: boolean; total: number }) => {
+      setSam3Busy(false);
+      if (opts.labeled <= 0 && opts.failed <= 0) return;
+      if (opts.failed > 0) {
+        setError(
+          `SAM3 labeled ${opts.labeled}/${opts.total}` +
+            (opts.stopped ? " (stopped)" : "") +
+            `; ${opts.failed} failed`,
+        );
+      } else if (opts.stopped) {
+        setError(`SAM3 stopped after ${opts.labeled}/${opts.total}`);
+      }
+      const app = useLabeler.getState().appState;
+      if (!app) return;
+      const firstSam3 = app.challenges.findIndex((c) => c.loaded && !c.reviewed && Boolean(c.has_label));
+      if (firstSam3 >= 0 && opts.labeled > 0) {
+        setOwnFilter("sam3");
+        // Force a real reload even if this image is already selected — otherwise
+        // selectChallenge early-returns and the pane can stay blank after SAM3.
+        detailIndexRef.current = null;
+        openItemKeyRef.current = null;
+        await loadChallenge(firstSam3, "sam3");
+        scrollThumbIntoView(firstSam3);
+      }
+      bumpStripTick();
+    },
+    [bumpStripTick, loadChallenge, scrollThumbIntoView, setError],
   );
 
   useEffect(() => {
@@ -1588,8 +2387,17 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     );
   }, [detail?.index, detail?.challenge?.item_key, appState?.challenges.length, appState?.review_mode, imageCacheToken, stripFilter]);
 
+  // The URL's ?workspace= is rewritten by switchWorkspace(); re-entering the topic on that
+  // change cleared all panes and raced the in-flight setWorkspace request. Only the topic
+  // itself should (re)trigger the enter effect.
+  const initialWorkspaceRef = useRef(initialWorkspace);
+  initialWorkspaceRef.current = initialWorkspace;
+
   useEffect(() => {
     if (!topicSlug) return;
+    const initialWorkspace = initialWorkspaceRef.current;
+    const prevApp = useLabeler.getState().appState;
+    const keepStrip = Boolean(prevApp && stateMatchesTopic(prevApp, topicSlug));
     pinnedTopicSlug = topicSlug;
     setTopicReady(false);
     topicReadyRef.current = false;
@@ -1606,25 +2414,49 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     useLabeler.getState().setDetail(null);
     useLabeler.getState().setBoxes([]);
     useLabeler.getState().setRefBoxes([]);
-    // Drop previous topic UI immediately so filmstrip cannot show another skill's frames.
-    // Keep decoded image/thumb caches — URLs are skill-scoped and reuse makes re-enter fast.
-    useLabeler.getState().setAppState(null);
+    // Keep strip for same topic while re-entering after refresh — avoids "No images loaded" flash.
+    if (!keepStrip) {
+      useLabeler.getState().setAppState(null);
+    }
     useLabeler.getState().setCurrentClass(0);
     setRefVariantIdx(0);
+    activeRefVariantIdxGate.current = 0;
     clearDetailCache();
-    setStripRange({ first: 0, last: 28 });
+    setStripRange({ first: 0, last: 12 });
     setStripFilter("all");
     setOwnFilter("all");
     pendingWorkspaceRef.current = initialWorkspace ?? null;
     let cancelled = false;
+    const preferOwnKey =
+      initialWorkspace === "own" ? readOwnCursor(topicSlug) : null;
     api
-      .enterTopic(topicSlug)
+      .enterTopic(topicSlug, {
+        workspace: initialWorkspace ?? undefined,
+        preferItemKey: preferOwnKey,
+      })
       .then((state) => {
         if (cancelled) return;
         applyState(state);
+        // Own-first enter already returned the right workspace — skip second switch.
+        if (initialWorkspace && workspaceFromState(state) === initialWorkspace) {
+          pendingWorkspaceRef.current = null;
+        }
         topicReadyRef.current = true;
         setTopicReady(true);
         setError("");
+        // A link to an Own day / the day page: open exactly that (each day has its own URL).
+        if (initialWorkspace === "own") {
+          const wantDay = initialOwnDayRef.current;
+          const run = async () => {
+            if (wantDay) await enterOwnDayRef.current?.(wantDay);
+            else if (ownDaysPageRef.current && state.own_day) await leaveOwnDayRef.current?.();
+          };
+          run()
+            .catch(() => undefined)
+            .finally(() => !cancelled && setUrlSync(true));
+        } else {
+          setUrlSync(true);
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -1634,8 +2466,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       });
     return () => {
       cancelled = true;
+      setUrlSync(false);
     };
-  }, [topicSlug, initialWorkspace, setError]);
+  }, [topicSlug, setError]);
 
   useEffect(() => {
     pendingWorkspaceRef.current = initialWorkspace ?? null;
@@ -1835,24 +2668,65 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   useEffect(() => {
     if (!topicReady || !appState) return;
     buildBlocksMap(appState);
-    if (filmstripRef.current) filmstripRef.current.scrollLeft = 0;
-    setStripRange({ first: 0, last: 28 });
-    window.requestAnimationFrame(() => preloadFilmstripWindow());
-  }, [topicReady, appState?.active_skill?.element_path, buildBlocksMap, preloadFilmstripWindow]);
+    // Nearby JPEG pyramid only (backend caps Own to selected ±2).
+    const prefer =
+      appState.current_index >= 0
+        ? appState.current_index
+        : appState.challenges.findIndex((c) => c.loaded);
+    if (prefer >= 0) {
+      void api.warmMediaCache(prefer).catch(() => undefined);
+      // Scroll strip near resume target; first-open will refine.
+      window.requestAnimationFrame(() => {
+        scrollThumbIntoView(prefer);
+        preloadFilmstripWindow();
+      });
+    } else {
+      window.requestAnimationFrame(() => preloadFilmstripWindow());
+    }
+  }, [
+    topicReady,
+    appState?.active_skill?.element_path,
+    appState?.review_mode,
+    buildBlocksMap,
+    preloadFilmstripWindow,
+    scrollThumbIntoView,
+    imageCacheToken,
+  ]);
 
-  // Open the first loaded image once when the pool appears — not on every SSE applyState.
+  // Open last-edited (Own) or current_index once when the pool appears — not on every SSE.
   useEffect(() => {
     if (!topicReady || !appState) return;
     if (switchingWorkspaceRef.current) return;
     if (detailIndexRef.current != null) return;
-    const first = appState.challenges.findIndex((c) => c.loaded);
-    if (first >= 0) {
-      // Pin filmstrip to left end (latest) and open that image immediately.
-      if (filmstripRef.current) filmstripRef.current.scrollLeft = 0;
-      followCollectRef.current = true;
-      loadChallenge(first, "first-open").catch((e) => setError(String(e)));
+    const preferKey =
+      appState.review_mode === "local" ? readOwnCursor(topicSlug) : null;
+    let idx =
+      preferKey != null
+        ? appState.challenges.findIndex(
+            (c) => c.loaded && itemKeysMatch(c.item_key, preferKey),
+          )
+        : -1;
+    if (idx < 0 && appState.current_index >= 0 && appState.challenges[appState.current_index]?.loaded) {
+      idx = appState.current_index;
     }
-  }, [topicReady, appState?.challenges.length, appState?.review_mode, loadChallenge, setError]);
+    if (idx < 0) idx = appState.challenges.findIndex((c) => c.loaded);
+    if (idx >= 0) {
+      followCollectRef.current = false;
+      scrollThumbIntoView(idx);
+      loadChallenge(idx, "first-open").catch((e) => {
+        if (!isStaleChallengeError(e)) setError(String(e));
+      });
+    }
+  }, [
+    topicReady,
+    topicSlug,
+    appState?.challenges.length,
+    appState?.review_mode,
+    appState?.current_index,
+    loadChallenge,
+    scrollThumbIntoView,
+    setError,
+  ]);
 
   // Collect prepends newer blocks at index 0 — keep the open image by item_key, not index.
   // If the open image is not in the active pool (Platform↔Own switch), drop it immediately.
@@ -1948,7 +2822,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   useEffect(() => {
     if (!appState) return;
     if (switchingWorkspaceRef.current) return;
-    setStripRange({ first: 0, last: 28 });
+    setStripRange({ first: 0, last: 12 });
     if (filmstripRef.current) filmstripRef.current.scrollLeft = 0;
     window.requestAnimationFrame(() => preloadFilmstripWindow());
     const cur = detailIndexRef.current ?? appState.current_index;
@@ -2002,14 +2876,17 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         setBoxes(left);
         if (ch.item_key) rememberWinnerPreds(ch.item_key, left, painted, false);
       }
-      if (ref.length) useLabeler.getState().setRefBoxes(ref);
       const current = useLabeler.getState().detail;
       if (current && (current.index === idx || itemKeysMatch(current.challenge?.item_key, ch?.item_key)) && (left.length || ref.length)) {
         useLabeler.getState().setDetail({
           ...current,
           boxes: reviewed || painted.length ? painted : left.length ? left : current.boxes,
-          reference_boxes: ref.length ? (ch.top_boxes || current.reference_boxes) : current.reference_boxes,
+          // Never force top_boxes (R1) onto the right pane — selected R2/R3 must stick.
+          reference_boxes: current.reference_boxes,
         });
+        reapplyActiveRefVariant(useLabeler.getState().detail);
+      } else if (ref.length && activeRefVariantIdxGate.current === 0) {
+        useLabeler.getState().setRefBoxes(ref);
       }
       // Keep strip n/3 aligned when server recompute lands — do not rescore here
       // (scoring all R1–R3 on every boxes_seq made labeling feel sticky).
@@ -2032,9 +2909,43 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     prevLoadedCountRef.current = loadedCount;
   }, [appState?.collect_seq, appState?.challenges.length, appState?.collect.running, onFilmstripScroll, scrollThumbIntoView]);
 
+  // Live drag boxes -> partner (only while someone else is looking at this image).
+  const draftSentAtRef = useRef(0);
+  const streamDraft = useCallback((boxesNow: DetectionBox[]) => {
+    const team = useTeam.getState();
+    const key = useLabeler.getState().detail?.challenge?.item_key;
+    if (!key) return;
+    const someoneThere =
+      team.watchers.length > 0 || team.users.some((u) => u.name !== team.me?.user && u.online && u.item_key === key);
+    if (!someoneThere) return;
+    const now = performance.now();
+    if (now - draftSentAtRef.current < 150) return;
+    draftSentAtRef.current = now;
+    void api.teamDraft(key, boxesNow).catch(() => undefined);
+  }, []);
+
+  // 409: a teammate changed this image after we opened it -> show their version.
+  const reloadOpenImageRef = useRef<((itemKey: string) => void) | null>(null);
+  reloadOpenImageRef.current = (itemKey: string) => {
+    dropCachedDetail(itemKey);
+    useTeam.getState().setNotice("Your partner changed this image — reloaded their version");
+    const app = useLabeler.getState().appState;
+    const idx = app?.challenges.findIndex((c) => c.item_key === itemKey) ?? -1;
+    if (idx < 0 || openItemKeyRef.current !== itemKey) return;
+    openItemKeyRef.current = null;
+    detailIndexRef.current = null;
+    void selectChallenge(idx, "conflict-reload").catch(() => undefined);
+  };
+  useEffect(() => {
+    setSaveConflictHandler((key) => reloadOpenImageRef.current?.(key));
+    return () => setSaveConflictHandler(null);
+  }, []);
+
   const persistBoxes = useCallback(
     (next: DetectionBox[], sel: number | null, commit = true, recordHistory = true) => {
+      if (useTeam.getState().readOnly) return; // teammate owns this image / we are watching
       const index = detailIndexRef.current;
+      if (!commit) streamDraft(next);
       const appEarly = useLabeler.getState().appState;
       const histKey =
         (index != null ? appEarly?.challenges[index]?.item_key : null) ||
@@ -2080,13 +2991,31 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
       if (current) {
         const score = scoreTopAgainstLeftGt(useLabeler.getState().refBoxes, next, current.record || {});
-        // Desktop: any committed box edit calls mark_reviewed() — Done immediately, including after A.
+        // Own SAM3 draft (strip has_label, not reviewed): keep unreviewed until M.
+        // NEW (no has_label): commit → Done. Prefer strip flags — detail.has_label can be stale.
+        const stripRow =
+          (index != null ? app?.challenges[index] : null) ||
+          (itemKey ? app?.challenges.find((c) => itemKeysMatch(c.item_key, itemKey)) : null);
+        const wasSam3 =
+          app?.review_mode === "local" &&
+          Boolean(stripRow?.has_label) &&
+          !Boolean(stripRow?.reviewed) &&
+          !pendingDoneKeys.has(itemKey || "");
+        const markDone = Boolean(commit && !wasSam3);
         const updated = {
           ...current,
           boxes: next,
           score,
           ...(commit
-            ? { challenge: { ...current.challenge, reviewed: true, tuned: false, cached_left_boxes: asDicts } }
+            ? {
+                challenge: {
+                  ...current.challenge,
+                  reviewed: markDone ? true : false,
+                  has_label: true,
+                  tuned: false,
+                  cached_left_boxes: asDicts,
+                },
+              }
             : {}),
         };
         useLabeler.getState().setDetail(updated);
@@ -2094,37 +3023,48 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       }
 
       if (commit && index != null && app) {
-        notePendingDone(itemKey);
-        const wasReviewed = Boolean(app.challenges[index]?.reviewed);
+        const stripRow = app.challenges[index];
+        const wasSam3 =
+          app.review_mode === "local" &&
+          Boolean(stripRow?.has_label) &&
+          !Boolean(stripRow?.reviewed) &&
+          !pendingDoneKeys.has(itemKey || "");
+        const markDone = !wasSam3;
+        if (markDone) notePendingDone(itemKey);
+        const wasReviewed = Boolean(stripRow?.reviewed);
         const asDictsLocal = asDicts;
         const nextLocal = next;
         const idxLocal = index;
         const variants = useLabeler.getState().detail?.reference_variants;
         const row = app.challenges[idxLocal];
-        const checksPatch = checksPatchForItem(
-          { ...row, reviewed: true, cached_left_boxes: asDictsLocal },
-          nextLocal,
-          variants,
-        );
+        const checksPatch = markDone
+          ? checksPatchForItem(
+              { ...row, reviewed: true, cached_left_boxes: asDictsLocal },
+              nextLocal,
+              variants,
+            )
+          : null;
         const rowPatch = {
-          reviewed: true as const,
+          reviewed: markDone,
+          has_label: true,
           tuned: false,
           cached_left_boxes: asDictsLocal,
-          ...checksPatch,
+          ...(checksPatch || { checks_passed: null, checks: null }),
         };
         applyState({
           ...app,
           challenges: app.challenges.map((c, i) => (i === idxLocal ? { ...c, ...rowPatch } : c)),
-          metrics: wasReviewed
-            ? app.metrics
-            : {
-                ...app.metrics,
-                ready_to_tune: (app.metrics.ready_to_tune || 0) + 1,
-                not_reviewed: Math.max(0, (app.metrics.not_reviewed || 0) - 1),
-              },
+          metrics:
+            wasReviewed || !markDone
+              ? app.metrics
+              : {
+                  ...app.metrics,
+                  ready_to_tune: (app.metrics.ready_to_tune || 0) + 1,
+                  not_reviewed: Math.max(0, (app.metrics.not_reviewed || 0) - 1),
+                },
         });
         bumpStripTick();
-        if (checksPatch.checks_passed == null && itemKey) {
+        if (markDone && checksPatch && checksPatch.checks_passed == null && itemKey) {
           window.setTimeout(() => {
             const live = useLabeler.getState();
             const v = live.detail?.reference_variants;
@@ -2148,17 +3088,35 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       dirtyItemKeyRef.current = itemKey;
       const snapshot = next.map((b) => ({ ...b }));
       const gen = ++saveGenRef.current;
-      saveSnapshotRef.current = { index, itemKey, boxes: snapshot, gen };
+      const appNow = useLabeler.getState().appState;
+      const rowNow = appNow?.challenges[index];
+      // NEW → Done; SAM3 draft (has_label, !reviewed) stays draft until M.
+      const saveAsDone =
+        pendingDoneKeys.has(itemKey) ||
+        !(
+          appNow?.review_mode === "local" &&
+          rowNow &&
+          !rowNow.reviewed &&
+          Boolean(rowNow.has_label)
+        );
+      saveSnapshotRef.current = { index, itemKey, boxes: snapshot, gen, done: saveAsDone };
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       const runSave = () => {
         const snap = saveSnapshotRef.current;
         if (!snap || snap.gen !== gen || !itemKeysMatch(snap.itemKey, itemKey)) return;
         const target = resolveSaveTarget(snap.index, snap.itemKey);
         if (!target) return;
+        const teamKey = target.itemKey || itemKey;
+        // A fresh edit supersedes any older failed save still waiting to retry.
+        dropPendingSave(teamKey);
+        useTeam.getState().setSave("saving");
         api
-          .saveBoxes(target.index, snap.boxes, true, target.itemKey || undefined)
-          .then(() => {
+          .saveBoxes(target.index, snap.boxes, saveAsDone, target.itemKey || undefined, useTeam.getState().revs[teamKey])
+          .then((res) => {
+            useTeam.getState().noteRev(teamKey, res.rev);
+            useTeam.getState().noteLabel(teamKey, res.labeled_by, res.rev);
             if (saveGenRef.current !== gen) return;
+            if (!hasPendingSaves()) useTeam.getState().setSave("saved");
             if (saveSnapshotRef.current?.gen && saveSnapshotRef.current.gen > gen) return;
             if (itemKeysMatch(saveSnapshotRef.current?.itemKey, itemKey)) {
               saveSnapshotRef.current = null;
@@ -2168,7 +3126,22 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               dirtyIndexRef.current = null;
             }
           })
-          .catch(() => undefined);
+          .catch((err) => {
+            if (saveGenRef.current !== gen) return; // a newer edit owns the status now
+            const status = err instanceof HttpError ? err.status : 0;
+            const msg = err instanceof Error ? err.message : String(err);
+            if (status === 423) {
+              useTeam.getState().setSave("locked", msg);
+              useTeam.getState().setNotice(msg);
+              return;
+            }
+            if (status === 409) {
+              useTeam.getState().setSave("conflict", msg);
+              reloadOpenImageRef.current?.(teamKey);
+              return;
+            }
+            retrySave(teamKey, target.index, snap.boxes, saveAsDone);
+          });
       };
       // Coalesce rapid commits (draw/resize/delete/hotkeys) into one network write.
       saveTimer.current = window.setTimeout(runSave, 120);
@@ -2232,6 +3205,10 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   }, []);
 
   const resetToWinnerOrigin = useCallback(() => {
+    if (useTeam.getState().readOnly) {
+      useTeam.getState().setNotice("Read-only — you can't change this image right now");
+      return;
+    }
     const app = useLabeler.getState().appState;
     const current = useLabeler.getState().detail;
     const index = detailIndexRef.current;
@@ -2244,40 +3221,26 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     const gen = ++againGenRef.current;
     setError("");
 
-    // Desktop Again (A): winner-model predictions, NOT right-pane top_boxes.
+    // Desktop Again (A): always re-run current base miner.py — do not paint stale
+    // winnerPredCache / prediction_cache from a previous model.
     const itemKey = ch.item_key;
     const prev = useLabeler.getState().boxes;
-    const origin = resolveWinnerOrigin(itemKey, current, ch, prev);
-    if (origin.length && !boxesEqual(prev, origin)) {
-      const hist = historyRef.current.get(itemKey) ?? { undo: [], redo: [] };
-      hist.undo.push(cloneBoxes(prev));
-      if (hist.undo.length > 80) hist.undo.shift();
-      hist.redo = [];
-      historyRef.current.set(itemKey, hist);
-    }
+    if (itemKey) winnerPredCache.delete(itemKey);
 
     clearPendingSaveFor(index, itemKey);
 
-    const originDicts = origin.map((b) => ({
-      cls: b.cls,
-      x1: b.x1,
-      y1: b.y1,
-      x2: b.x2,
-      y2: b.y2,
-      conf: b.conf ?? null,
-    }));
-
-    // Instant filmstrip: Done → New (do not wait for the API).
+    // Instant filmstrip: Done/SAM3 → New (do not wait for the API).
     notePendingNew(itemKey);
     const challenges = app.challenges.map((c, i) =>
       i === index
         ? {
             ...c,
             reviewed: false,
+            has_label: false,
             tuned: false,
             checks_passed: null,
             checks: null,
-            ...(originDicts.length ? { cached_left_boxes: originDicts } : {}),
+            cached_left_boxes: [],
           }
         : c,
     );
@@ -2292,33 +3255,25 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     });
 
     bumpStripTick();
-    if (origin.length) {
-      rememberWinnerPreds(itemKey, origin, prev, true);
-      setBoxes(origin);
-      setSelected(null);
-      const score = scoreTopAgainstLeftGt(useLabeler.getState().refBoxes, origin, current.record || {});
-      const updated = {
-        ...current,
-        boxes: origin,
-        prediction_boxes: origin,
-        score,
-        challenge: { ...current.challenge, reviewed: false, tuned: false },
-      };
-      useLabeler.getState().setDetail(updated);
-      setCachedDetail(index, updated);
-    } else {
-      // No trusted warm preds — clear stale GT immediately; winner boxes arrive from API.
-      setBoxes([]);
-      setSelected(null);
-      const updated = {
-        ...current,
-        boxes: [],
-        score: null,
-        challenge: { ...current.challenge, reviewed: false, tuned: false },
-      };
-      useLabeler.getState().setDetail(updated);
-      setCachedDetail(index, updated);
+    // Clear left pane until fresh miner.py result arrives (usually <100ms).
+    if (prev.length) {
+      const hist = historyRef.current.get(itemKey) ?? { undo: [], redo: [] };
+      hist.undo.push(cloneBoxes(prev));
+      if (hist.undo.length > 80) hist.undo.shift();
+      hist.redo = [];
+      if (itemKey) historyRef.current.set(itemKey, hist);
     }
+    setBoxes([]);
+    setSelected(null);
+    const pending = {
+      ...current,
+      boxes: [],
+      prediction_boxes: [],
+      score: null,
+      challenge: { ...current.challenge, reviewed: false, has_label: false, tuned: false },
+    };
+    useLabeler.getState().setDetail(pending);
+    setCachedDetail(index, pending);
 
     const mergeAgainState = (resultState: AppState) => {
       const appNow = useLabeler.getState().appState;
@@ -2339,7 +3294,8 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
           i === index
             ? {
                 ...c,
-                reviewed: row.reviewed,
+                reviewed: false,
+                has_label: false,
                 tuned: row.tuned,
                 cached_left_boxes: row.cached_left_boxes,
               }
@@ -2360,8 +3316,16 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
         const boxes = normalizeBoxes(result.detail.prediction_boxes || result.detail.boxes);
         rememberWinnerPreds(itemKey, boxes, boxes, false);
-        applyDetail({ ...result.detail, boxes, challenge: { ...result.detail.challenge, reviewed: false } });
-        setCachedDetail(index, { ...result.detail, boxes, challenge: { ...result.detail.challenge, reviewed: false } });
+        applyDetail({
+          ...result.detail,
+          boxes,
+          challenge: { ...result.detail.challenge, reviewed: false, has_label: false },
+        });
+        setCachedDetail(index, {
+          ...result.detail,
+          boxes,
+          challenge: { ...result.detail.challenge, reviewed: false, has_label: false },
+        });
         bumpStripTick();
       })
       .catch((e) => {
@@ -2375,7 +3339,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       reviewActionBusyRef.current = false;
       if (next >= 0) {
         void loadChallenge(next, "mark-next").catch((err) => {
-          if (!isAbortish(err)) setError(String(err));
+          if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
         });
       }
     },
@@ -2384,6 +3348,10 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
   /** Desktop mark_current_as_reviewed (M): save left boxes, mark reviewed, advance. */
   const markReviewedAndNext = useCallback(() => {
+    if (useTeam.getState().readOnly) {
+      useTeam.getState().setNotice("Read-only — you can't change this image right now");
+      return;
+    }
     if (reviewActionBusyRef.current) return;
     const app = useLabeler.getState().appState;
     const detail = useLabeler.getState().detail;
@@ -2471,6 +3439,10 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
   /** Desktop accept_reference_labels_and_next (H): copy selected right reference → left, save, advance. */
   const acceptRefAndNext = useCallback(() => {
+    if (useTeam.getState().readOnly) {
+      useTeam.getState().setNotice("Read-only — you can't change this image right now");
+      return;
+    }
     if (reviewActionBusyRef.current) return;
     const app = useLabeler.getState().appState;
     const detail = useLabeler.getState().detail;
@@ -2597,6 +3569,100 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     [appState?.model_class_names.length, persistBoxes, setCurrentClass],
   );
 
+  // Never lose labels on tab close / hide: warn if something is unsaved, flush with keepalive.
+  useEffect(() => {
+    const unsaved = () =>
+      hasPendingSaves() || saveSnapshotRef.current != null || dirtyItemKeyRef.current != null;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!unsaved()) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    const flushNow = () => {
+      const snap = saveSnapshotRef.current;
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      flushOnUnload(
+        snap && !useTeam.getState().readOnly
+          ? { itemKey: snap.itemKey, index: snap.index, boxes: snap.boxes, reviewed: snap.done !== false }
+          : undefined,
+      );
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden" && unsaved()) flushNow();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", flushNow);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", flushNow);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  // ---- Team: watch a partner (G), follow their image, show their live boxes -------------
+  const watchReturnKeyRef = useRef<string | null>(null);
+  const openByItemKey = useCallback(
+    (itemKey: string | null | undefined, reason: string) => {
+      if (!itemKey) return;
+      const app = useLabeler.getState().appState;
+      if (!app) return;
+      const idx = app.challenges.findIndex((c) => c.loaded && c.item_key === itemKey);
+      if (idx < 0 || openItemKeyRef.current === itemKey) return;
+      void selectChallenge(idx, reason).catch((err) => {
+        if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
+      });
+    },
+    [selectChallenge, setError],
+  );
+
+  const toggleWatch = useCallback(() => {
+    const team = useTeam.getState();
+    if (team.watching || team.watchIntent === "start") {
+      team.setWatchIntent("stop");
+      // Back to the image we were on before we jumped to the partner's.
+      const back = watchReturnKeyRef.current;
+      watchReturnKeyRef.current = null;
+      if (back) openByItemKey(back, "watch-return");
+    } else {
+      watchReturnKeyRef.current = useLabeler.getState().detail?.challenge?.item_key ?? null;
+      team.setNotice("");
+      team.setWatchIntent("start");
+    }
+  }, [openByItemKey]);
+
+  // Follow the watched person: whenever they open another image, so do we.
+  const feedItemKey = useTeam((s) => (s.watching ? s.feed?.item_key ?? null : null));
+  useEffect(() => {
+    if (feedItemKey) openByItemKey(feedItemKey, "watch-follow");
+  }, [feedItemKey, openByItemKey]);
+
+  // Read-only live view: paint the owner's current boxes (drag-level while they edit).
+  const feedSeq = useTeam((s) => s.feed?.draft?.seq ?? 0);
+  const feedFor = useTeam((s) => s.feed?.item_key ?? null);
+  useEffect(() => {
+    const team = useTeam.getState();
+    if (!team.readOnly || !team.feed?.draft) return;
+    const openKey = useLabeler.getState().detail?.challenge?.item_key;
+    if (!openKey || team.feed.item_key !== openKey) return;
+    useLabeler.getState().setBoxes(normalizeBoxes(team.feed.draft.boxes as unknown as Array<Record<string, unknown>>));
+    useLabeler.getState().setSelected(null);
+  }, [feedSeq, feedFor, detail?.challenge?.item_key]);
+
+  // A teammate saved an image: drop our cached copy so opening it shows their labels.
+  const seenRevsRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    const me = useTeam.getState().me?.user;
+    for (const [key, info] of Object.entries(teamLabels)) {
+      if (seenRevsRef.current[key] === info.rev) continue;
+      seenRevsRef.current[key] = info.rev;
+      if (info.e && info.e !== me) dropCachedDetail(key);
+    }
+  }, [teamLabels]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const app = useLabeler.getState().appState;
@@ -2618,13 +3684,19 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         return;
       }
       if (mod) return;
-      if (e.key === "n" || e.key === "N") {
+      if (e.key === "g" || e.key === "G") {
         e.preventDefault();
+        if (e.repeat) return;
+        toggleWatch();
+        return;
+      }
+      if (e.key === "n" || e.key === "N" || e.key === "Tab") {
+        e.preventDefault(); // Tab = same as N: next
         requestNeedsWorkNav(1);
         return;
       }
-      if (e.key === "b" || e.key === "B") {
-        e.preventDefault();
+      if (e.key === "b" || e.key === "B" || e.key === "q" || e.key === "Q") {
+        e.preventDefault(); // Q = same as B: back
         requestNeedsWorkNav(-1);
         return;
       }
@@ -2676,6 +3748,26 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         handleClassHotkey(parseInt(e.key, 10) - 1);
         return;
       }
+      if (e.key === "Delete" && e.shiftKey) {
+        // Shift+Delete: remove the whole image from the dataset (asks first; Enter confirms).
+        e.preventDefault();
+        if (e.repeat) return;
+        const lab = useLabeler.getState();
+        const st = lab.appState;
+        const idx = detailIndexRef.current ?? st?.current_index ?? -1;
+        const ch = st && idx >= 0 ? st.challenges[idx] : null;
+        if (!st || !ch) return;
+        if (workspaceFromState(st) !== "own") {
+          lab.setError("Platform images come from the validator and can't be deleted. Shift+Delete works for Own images.");
+          return;
+        }
+        if (useTeam.getState().readOnly) {
+          lab.setError("A teammate has this image open — you can't delete it now.");
+          return;
+        }
+        setDeleteImageAsk({ key: ch.item_key, index: idx, name: ch.display_name || ch.item_key, hasLabel: Boolean(ch.has_label || ch.reviewed) });
+        return;
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
         const sel = useLabeler.getState().selected;
         if (sel != null) {
@@ -2686,7 +3778,18 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [acceptRefAndNext, handleClassHotkey, markReviewedAndNext, persistBoxes, redoBoxes, requestNeedsWorkNav, requestRelativeNav, resetToWinnerOrigin, undoBoxes]);
+  }, [
+    acceptRefAndNext,
+    handleClassHotkey,
+    markReviewedAndNext,
+    persistBoxes,
+    redoBoxes,
+    requestNeedsWorkNav,
+    requestRelativeNav,
+    resetToWinnerOrigin,
+    toggleWatch,
+    undoBoxes,
+  ]);
 
   const navIdx = detail?.index ?? appState?.current_index ?? -1;
   const navChallenge = navIdx >= 0 ? appState?.challenges[navIdx] : detail?.challenge;
@@ -2703,17 +3806,20 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     );
     const clamped = variants.length ? Math.max(0, Math.min(refVariantIdx, variants.length - 1)) : 0;
     const variant = variants[clamped];
+    const baseRecord =
+      detail?.record && Object.keys(detail.record).length
+        ? detail.record
+        : navIdx >= 0 && appState?.challenges[navIdx]
+          ? appState.challenges[navIdx].record || {}
+          : {};
     const rec = variant
       ? {
           total_weighted: variant.total_weighted,
           map50: variant.map50,
           false_positive: variant.false_positive,
+          score_pillars: (baseRecord as Record<string, unknown>).score_pillars,
         }
-      : (() => {
-          const fromChallenge =
-            navIdx >= 0 && appState?.challenges[navIdx] ? appState.challenges[navIdx].record || {} : {};
-          return detail?.record && Object.keys(detail.record).length ? detail.record : fromChallenge;
-        })();
+      : baseRecord;
     return scoreTopAgainstLeftGt(
       refBoxes,
       boxes,
@@ -2731,7 +3837,14 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
 
   const refCompare = useMemo(() => {
     if (!boxes.length || !refBoxes.length || !detail) {
-      return { roles: undefined, missedGt: undefined, wrongCount: 0 };
+      return {
+        roles: undefined,
+        missedGt: undefined,
+        missedGtIndices: undefined,
+        predToGt: undefined,
+        gtToPred: undefined,
+        wrongCount: 0,
+      };
     }
     // Never compare across images (common race when pressing N before paint settles).
     const liveKey = appState?.challenges[detail.index]?.item_key;
@@ -2740,13 +3853,25 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       !itemKeysMatch(detail.challenge?.item_key, liveKey) ||
       detailIndexRef.current !== detail.index
     ) {
-      return { roles: undefined, missedGt: undefined, wrongCount: 0 };
+      return {
+        roles: undefined,
+        missedGt: undefined,
+        missedGtIndices: undefined,
+        predToGt: undefined,
+        gtToPred: undefined,
+        wrongCount: 0,
+      };
     }
     const imgW = detail.width || detail.challenge?.image_width;
     const imgH = detail.height || detail.challenge?.image_height;
-    const { roles, missedGt } = comparePredToGt(refBoxes, boxes, imgW, imgH);
+    const { roles, missedGt, missedGtIndices, predToGt, gtToPred } = comparePredToGt(
+      refBoxes,
+      boxes,
+      imgW,
+      imgH,
+    );
     const wrongCount = roles.filter((r) => r !== "tp").length + missedGt.length;
-    return { roles, missedGt, wrongCount };
+    return { roles, missedGt, missedGtIndices, predToGt, gtToPred, wrongCount };
   }, [
     appState?.challenges,
     boxes,
@@ -2761,6 +3886,199 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     refVariantIdx,
   ]);
 
+  const onGtHoverFocus = useCallback(
+    (payload: { boxIdx: number | null; ghostIdx: number | null }) => {
+      // Keyboard / click explore owns focus — ignore hover so C/V stays stable.
+      if (boxInspectIdxRef.current != null) return;
+      const gi = payload.boxIdx;
+      if (gi == null) {
+        setLinkedBoxFocus(null);
+        return;
+      }
+      const gtIdxs = [gi];
+      const predIdxs: number[] = [];
+      const ghostIdxs: number[] = [];
+      const predMatch = refCompare.gtToPred?.[gi];
+      if (predMatch != null) predIdxs.push(predMatch);
+      // Wrong-class preds that overlap this GT.
+      refCompare.predToGt?.forEach((mappedGi, pi) => {
+        if (mappedGi === gi && refCompare.roles?.[pi] === "wrong_class" && !predIdxs.includes(pi)) {
+          predIdxs.push(pi);
+        }
+      });
+      // Missed ghost for this GT (no miner match).
+      const missAt = refCompare.missedGtIndices?.indexOf(gi) ?? -1;
+      if (missAt >= 0) ghostIdxs.push(missAt);
+      setLinkedBoxFocus({ gtIdxs, predIdxs, ghostIdxs });
+    },
+    [refCompare],
+  );
+
+  const applyGtLinkedFocus = useCallback(
+    (gi: number) => {
+      const gtIdxs = [gi];
+      const predIdxs: number[] = [];
+      const ghostIdxs: number[] = [];
+      const predMatch = refCompare.gtToPred?.[gi];
+      if (predMatch != null) predIdxs.push(predMatch);
+      refCompare.predToGt?.forEach((mappedGi, pi) => {
+        if (mappedGi === gi && refCompare.roles?.[pi] === "wrong_class" && !predIdxs.includes(pi)) {
+          predIdxs.push(pi);
+        }
+      });
+      const missAt = refCompare.missedGtIndices?.indexOf(gi) ?? -1;
+      if (missAt >= 0) ghostIdxs.push(missAt);
+      setLinkedBoxFocus({ gtIdxs, predIdxs, ghostIdxs });
+    },
+    [refCompare],
+  );
+
+  const beginBoxInspect = useCallback(
+    (idx: number, opts?: { zoom?: boolean }) => {
+      if (idx < 0 || idx >= boxes.length) return;
+      boxInspectIdxRef.current = idx;
+      applyGtLinkedFocus(idx);
+      setSelected(idx);
+      if (opts?.zoom === false) return;
+      setBoxInspect((prev) => ({ idx, seq: (prev?.seq ?? 0) + 1 }));
+    },
+    [applyGtLinkedFocus, boxes.length, setSelected],
+  );
+
+  const onGtSelect = useCallback(
+    (idx: number | null) => {
+      setSelected(idx);
+      if (idx == null) {
+        // Click empty space — end explore (same as Esc).
+        boxInspectIdxRef.current = null;
+        setBoxInspect(null);
+        setLinkedBoxFocus(null);
+        return;
+      }
+      // Click only anchors C/V — do not auto-zoom (scroll zoom must keep working).
+      beginBoxInspect(idx, { zoom: false });
+    },
+    [beginBoxInspect, setSelected],
+  );
+
+  const cycleBoxInspect = useCallback(
+    (dir: -1 | 1) => {
+      if (!boxes.length) return;
+      const center = (b: (typeof boxes)[number]) => ({
+        cx: (b.x1 + b.x2) / 2,
+        cy: (b.y1 + b.y2) / 2,
+      });
+      const order = boxes
+        .map((_, i) => i)
+        .sort((a, b) => {
+          const ca = center(boxes[a]);
+          const cb = center(boxes[b]);
+          if (Math.abs(ca.cx - cb.cx) > 0.5) return ca.cx - cb.cx;
+          return ca.cy - cb.cy;
+        });
+      const sel = useLabeler.getState().selected;
+      const anchor = boxInspectIdxRef.current ?? sel ?? null;
+      let pos = anchor == null ? (dir > 0 ? -1 : 0) : order.indexOf(anchor);
+      if (pos < 0) pos = dir > 0 ? -1 : 0;
+      let nextPos = pos + dir;
+      if (nextPos < 0) nextPos = order.length - 1;
+      if (nextPos >= order.length) nextPos = 0;
+      beginBoxInspect(order[nextPos]);
+    },
+    [beginBoxInspect, boxes],
+  );
+
+  const clearBoxInspect = useCallback(() => {
+    boxInspectIdxRef.current = null;
+    setBoxInspect(null);
+    setLinkedBoxFocus(null);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.key === "c" || e.key === "C") {
+        e.preventDefault();
+        cycleBoxInspect(-1);
+        return;
+      }
+      if (e.key === "v" || e.key === "V") {
+        e.preventDefault();
+        cycleBoxInspect(1);
+        return;
+      }
+      const app = useLabeler.getState().appState;
+      const inOwn = Boolean(app && workspaceFromState(app) === "own");
+      if (inOwn) {
+        if (e.key === "e" || e.key === "E") {
+          e.preventDefault();
+          setOwnDualView((prev) => !prev);
+          return;
+        }
+        if (e.key === "r" || e.key === "R") {
+          e.preventDefault();
+          setOwnGuides((prev) => !prev);
+          return;
+        }
+      } else {
+        if (e.key === "w" || e.key === "W") {
+          e.preventDefault();
+          setMinerAlertFilter((prev) => (prev === "wrong" ? null : "wrong"));
+          return;
+        }
+        if (e.key === "e" || e.key === "E") {
+          e.preventDefault();
+          setMinerAlertFilter((prev) => (prev === "extra" ? null : "extra"));
+          return;
+        }
+        if (e.key === "r" || e.key === "R") {
+          e.preventDefault();
+          setMinerAlertFilter((prev) => (prev === "missed" ? null : "missed"));
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        if (!inOwn && minerAlertFilter != null) {
+          e.preventDefault();
+          setMinerAlertFilter(null);
+          return;
+        }
+        if (boxInspectIdxRef.current == null) return;
+        e.preventDefault();
+        clearBoxInspect();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [clearBoxInspect, cycleBoxInspect, minerAlertFilter]);
+
+  const onMinerHoverFocus = useCallback(
+    (payload: { boxIdx: number | null; ghostIdx: number | null }) => {
+      // Same as GT: don't let hover steal explore cursor / clear inspect.
+      if (boxInspectIdxRef.current != null) return;
+      if (payload.boxIdx == null && payload.ghostIdx == null) {
+        setLinkedBoxFocus(null);
+        return;
+      }
+      const gtIdxs: number[] = [];
+      const predIdxs: number[] = [];
+      const ghostIdxs: number[] = [];
+      if (payload.ghostIdx != null) {
+        ghostIdxs.push(payload.ghostIdx);
+        const gi = refCompare.missedGtIndices?.[payload.ghostIdx];
+        if (gi != null) gtIdxs.push(gi);
+      }
+      if (payload.boxIdx != null) {
+        predIdxs.push(payload.boxIdx);
+        const gi = refCompare.predToGt?.[payload.boxIdx];
+        if (gi != null && !gtIdxs.includes(gi)) gtIdxs.push(gi);
+      }
+      setLinkedBoxFocus({ gtIdxs, predIdxs, ghostIdxs });
+    },
+    [refCompare],
+  );
+
   function setReferenceVariant(nextIdx: number) {
     const current = useLabeler.getState().detail;
     const navI = current?.index ?? useLabeler.getState().appState?.current_index ?? -1;
@@ -2774,7 +4092,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     if (!variants.length) return;
     const clamped = Math.max(0, Math.min(nextIdx, variants.length - 1));
     const selectedVariant = variants[clamped];
+    if (!selectedVariant.boxes.length) return;
     setRefVariantIdx(clamped);
+    activeRefVariantIdxGate.current = clamped;
     setRefBoxes(selectedVariant.boxes);
     if (current) {
       useLabeler.getState().setDetail({
@@ -2835,6 +4155,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   const idx = viewIndex ?? detail?.index ?? appState.current_index;
   void stripTick;
   const isPlatform = workspaceFromState(appState) === "platform";
+  const ownDayListMode = !isPlatform && !appState.own_day;
   // Hard isolation: never paint a detail that isn't in the active workspace pool.
   // Own: accept local OR missing source_type (instant paint / thin summaries).
   const inActivePool = Boolean(
@@ -2851,9 +4172,15 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         ? detail.challenge?.source_type === "local"
           ? null
           : detail
-        : detail.challenge?.source_type === "challenge"
-          ? null
-          : { ...detail, challenge: { ...detail.challenge, source_type: detail.challenge?.source_type || "local" } }
+        : // Own: always accept the open detail. Never leave "Loading image…" because of a
+          // stale/missing source_type on thin summaries or instant paint.
+          {
+            ...detail,
+            challenge: {
+              ...detail.challenge,
+              source_type: "local",
+            },
+          }
       : null;
   if (detail && !activeDetail && detailIndexRef.current != null) {
     // Sync clear on the next tick if a stale Platform detail survived the switch.
@@ -2879,21 +4206,85 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
   }
   const platformMetrics = appState.platform_metrics ?? defaultWorkspaceMetrics();
   const ownMetrics = appState.own_metrics ?? defaultWorkspaceMetrics();
+  // Own: progress of the open day cluster (not the whole pool); per-person counts for that day.
+  const dayScope = (() => {
+    if (isPlatform || !appState.own_day) return null;
+    let total = 0;
+    let done = 0;
+    const perUser: Record<string, number> = {};
+    for (const c of appState.challenges) {
+      if (!c.loaded) continue;
+      total += 1;
+      if (!c.reviewed) continue;
+      done += 1;
+      const who = teamLabels[c.item_key]?.u;
+      if (who) perUser[who] = (perUser[who] ?? 0) + 1;
+    }
+    return { day: appState.own_day, total, done, perUser };
+  })();
   const loadedChallenges = appState.challenges.filter((c) => c.loaded);
   const ownCounts = {
     all: loadedChallenges.length,
-    new: loadedChallenges.filter((c) => !c.reviewed).length,
+    new: loadedChallenges.filter((c) => !c.reviewed && !c.has_label).length,
+    sam3: loadedChallenges.filter((c) => !c.reviewed && Boolean(c.has_label)).length,
     done: loadedChallenges.filter((c) => c.reviewed).length,
   };
   const viewItem = (c: (typeof appState.challenges)[number], i: number) =>
     isPlatform ? challengeForStrip(c, i) : c;
-  const names = appState.model_class_names;
+  // Per-image status for the thin overview bar — same list/filter as the filmstrip.
+  const computeStripCodes = (): StripCodes => {
+    const codes: number[] = [];
+    const idxs: number[] = [];
+    appState.challenges.forEach((raw, i) => {
+      const c = viewItem(raw, i);
+      if (!matchesFilmstripFilter(appState, c, stripFilter, ownFilter)) return;
+      let code: number;
+      if (!isPlatform) {
+        code = c.reviewed ? STRIP_CODE.PASS : c.has_label ? STRIP_CODE.SAM3 : STRIP_CODE.NEW;
+      } else {
+        const b = stripBucket(c);
+        code = b === "new" ? STRIP_CODE.NEW : b === "pass" ? STRIP_CODE.PASS : b === "fail" ? STRIP_CODE.FAIL : STRIP_CODE.MID;
+      }
+      codes.push(code);
+      idxs.push(i);
+    });
+    return { codes: Int8Array.from(codes), idxs: Int32Array.from(idxs) };
+  };
+  const guidesToggle = (
+    <button
+      type="button"
+      onClick={() => setOwnGuides((v) => !v)}
+      title="Dotted guide lines that follow the pointer and snap to nearby box edges (R in Own)"
+      className={cn(
+        "shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-bold",
+        ownGuides ? "border-sky-500 bg-sky-500/15 text-sky-700 dark:text-sky-300" : "border-slate-300 text-slate-400 dark:border-slate-600",
+      )}
+    >
+      Guides {ownGuides ? "on" : "off"}
+    </button>
+  );
+
+  const statusTagFor = (layout: "rail" | "inline") =>
+    activeDetail ? (
+      <ImageStatusBar
+        layout={layout}
+        itemKey={activeDetail.challenge?.item_key ?? null}
+        reviewed={Boolean(activeDetail.challenge?.reviewed)}
+        onToggleWatch={toggleWatch}
+      />
+    ) : null;
+  const names =
+    activeDetail?.class_names?.length
+      ? activeDetail.class_names
+      : appState.model_class_names;
   const refNames =
     activeDetail?.reference_class_names?.length
       ? activeDetail.reference_class_names
       : names.length
         ? names
-        : appState.miner_class_names;
+        : appState.model_class_names.length
+          ? appState.model_class_names
+          : appState.miner_class_names;
   const reviewedCount = appState.challenges.filter((c) => c.reviewed).length;
   const stripCounts = { all: 0, new: 0, fail: 0, mid: 0, pass: 0 };
   appState.challenges.forEach((raw, i) => {
@@ -2902,6 +4293,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
     stripCounts.all += 1;
     stripCounts[stripBucket(c)] += 1;
   });
+  const showBeverageHfImport = !isPlatform && /beverage/i.test(topicSlug || "");
+  const showBeverageSam3 = showBeverageHfImport;
+  const showBeverageSendGt = isPlatform && /beverage/i.test(topicSlug || "");
   const renderFooterActions = () => (
     <FooterActions
       downloadBusy={downloadBusy}
@@ -2922,21 +4316,54 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         }
       }}
       onDownload={() => setDownloadOpen(true)}
+      onSendGt={showBeverageSendGt ? () => setSendGtOpen(true) : undefined}
       onUploadLabels={() => setUploadLabelsOpen(true)}
       onUploadUltralytics={() => setUltralyticsOpen(true)}
       onDeepPostProc={() => setDppOpen(true)}
-      onSubmit={() => setFindBestOpen(true)}
+      onCompareHfModels={() => setHfCompareOpen(true)}
+      onSelectBaseModel={() => setBaseModelOpen(true)}
+      onSubmit={() => setSubmitModeOpen(true)}
       theme={theme}
       onToggleTheme={toggleTheme}
       ownMode={!isPlatform}
       uploadImagesBusy={false}
       onUploadImages={!isPlatform ? () => setOwnUploadOpen(true) : undefined}
-      onDeleteRange={!isPlatform ? () => setOwnDeleteOpen(true) : undefined}
+      onHfImport={showBeverageHfImport ? () => setOwnHfImportOpen(true) : undefined}
+      onSam3={showBeverageSam3 ? () => openSam3Modal() : undefined}
+      sam3Busy={sam3Busy}
+      dayListMode={ownDayListMode}
+      onDeleteRange={!isPlatform && !ownDayListMode ? () => setOwnDeleteOpen(true) : undefined}
+      onClearNew={!isPlatform && appState.own_day ? () => void clearOwnDayNew() : undefined}
+      clearNewCount={!isPlatform && appState.own_day ? ownCounts.new : 0}
+      clearNewBusy={modeBusy}
     />
   );
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-1.5 bg-slate-50 p-1.5 dark:bg-ink-950">
+      <TeamBar
+        total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
+        reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
+        scopeLabel={dayScope ? `Day ${dayScope.day}` : !isPlatform ? "All Own days" : undefined}
+        perUser={dayScope?.perUser}
+        onLogout={() => {
+          void api.logout().finally(() => window.location.reload());
+        }}
+      />
+      {ownDayListMode ? (
+        <OwnDayList
+          onEnterDay={enterOwnDay}
+          busy={modeBusy}
+          selected={daySel}
+          onSelectedChange={setDaySel}
+          onSendDays={(days) => {
+            setDaySel(days);
+            setUltralyticsOpen(true);
+          }}
+          onDeleteDays={deleteOwnDaysFromList}
+        />
+      ) : (
+      <>
       <div className="flex min-h-[84px] w-full min-w-0 items-stretch gap-1.5">
         {isPlatform ? (
         <div className="flex h-[80px] w-[4.7rem] shrink-0 flex-col justify-between py-px">
@@ -2976,10 +4403,20 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         </div>
         ) : (
         <div className="flex h-[80px] w-[4.7rem] shrink-0 flex-col justify-between py-px">
+          <button
+            type="button"
+            onClick={() => void leaveOwnDay()}
+            disabled={modeBusy}
+            title="Back to Own day list"
+            className="flex h-[12px] items-center justify-center rounded border border-violet-400 bg-violet-50 px-1 text-[7px] font-extrabold uppercase leading-none tracking-wide text-violet-800 hover:bg-violet-100 disabled:opacity-50 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-200"
+          >
+            Days
+          </button>
           {(
             [
               ["all", "All", ownCounts.all, "border-violet-300 text-violet-800 dark:border-violet-700 dark:text-violet-200", "border-violet-500 bg-violet-500 text-white"],
               ["new", "New", ownCounts.new, "border-amber-300 text-amber-800 dark:border-amber-700 dark:text-amber-200", "border-amber-400 bg-amber-400 text-amber-950"],
+              ["sam3", "SAM3", ownCounts.sam3, "border-sky-300 text-sky-800 dark:border-sky-700 dark:text-sky-200", "border-sky-500 bg-sky-500 text-white"],
               ["done", "Done", ownCounts.done, "border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-200", "border-emerald-500 bg-emerald-500 text-white"],
             ] as const
           ).map(([id, label, count, idle, active]) => (
@@ -2989,13 +4426,15 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               onClick={() => setOwnFilter(id)}
               title={
                 id === "all"
-                  ? `All Own images (${ownCounts.all})`
+                  ? `All Own images (${ownCounts.all}) · ${appState.own_day || ""}`
                   : id === "new"
                     ? "Unlabeled (new)"
-                    : "Labeled Done"
+                    : id === "sam3"
+                      ? "SAM3 draft — review then Done"
+                      : "Labeled Done"
               }
               className={cn(
-                "flex h-[22px] items-center justify-between rounded border px-1 text-[8px] font-extrabold uppercase leading-none tracking-wide",
+                "flex h-[12px] items-center justify-between rounded border px-1 text-[7px] font-extrabold uppercase leading-none tracking-wide",
                 ownFilter === id ? active : idle,
               )}
             >
@@ -3035,7 +4474,9 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
                 {!isPlatform
                   ? ownFilter === "all"
                     ? "Upload images to start labeling"
-                    : `No ${ownFilter} images`
+                    : ownFilter === "sam3"
+                      ? "No SAM3 drafts — run SAM3 on New images"
+                      : `No ${ownFilter} images`
                   : stripFilter === "new"
                     ? "No unlabeled images"
                     : stripFilter === "fail"
@@ -3064,8 +4505,11 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
                   ? stripBadge(c)
                   : reviewed
                     ? { text: "done", className: "bg-emerald-500 text-white", title: `${c.display_name} · Done` }
-                    : { text: "new", className: "bg-amber-400 text-amber-950", title: `${c.display_name} · New` };
+                    : c.has_label
+                      ? { text: "sam3", className: "bg-sky-500 text-white", title: `${c.display_name} · SAM3 draft` }
+                      : { text: "new", className: "bg-amber-400 text-amber-950", title: `${c.display_name} · New` };
                 const passed = c.checks_passed;
+                const passComplete = checksPassComplete(c);
                 return (
           <button
             key={`${imageCacheToken}:${c.item_key}`}
@@ -3078,25 +4522,14 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               e.preventDefault();
               filmstripPickAtRef.current = performance.now();
               primeDecodedThumbnail(challengeThumbnailUrl(i, appState.review_mode, c.block, true, imageCacheToken, c.item_key, c.media_rev));
-              preloadChallengeUrgent(i, appState.review_mode, c.block, imageCacheToken, c.item_key, c.media_rev);
+              preloadChallengeUrgent(i, appState.review_mode, c.block, imageCacheToken, c.item_key, c.media_rev, { full: true });
               void selectChallenge(i, "filmstrip").catch((err) => {
-                if (!isAbortish(err)) setError(String(err));
+                if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
               });
             }}
             onMouseEnter={() => {
+              // Thumb-only prefetch — full getChallenge/image on hover saturated the server.
               preloadChallengeUrgent(i, appState.review_mode, c.block, imageCacheToken, c.item_key, c.media_rev);
-              const pos = loaded.findIndex((row) => row.i === i);
-              const neighborIdx = [i];
-              if (pos >= 0) {
-                if (loaded[pos + 1]) neighborIdx.push(loaded[pos + 1].i);
-                if (loaded[pos - 1]) neighborIdx.push(loaded[pos - 1].i);
-              }
-              preloadDetails(
-                neighborIdx.filter((j) => appState.challenges[j]?.loaded),
-                (j) => api.getChallenge(j, true, undefined, false),
-                (j) => appState.challenges[j]?.item_key,
-                bumpStripTick,
-              );
             }}
             title={badge.title}
             className={cn(
@@ -3105,7 +4538,7 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
                 ? "scale-[1.03] border-sky-400 ring-2 ring-sky-200 dark:border-sky-500 dark:ring-sky-900"
                 : !reviewed
                   ? "border-amber-300 bg-amber-50/70 hover:border-amber-400 dark:border-amber-700/80 dark:bg-amber-950/20"
-                  : passed === 3
+                  : passComplete
                     ? "border-emerald-400/80 bg-emerald-50/80 hover:border-emerald-500 dark:border-emerald-700 dark:bg-emerald-950/30"
                     : passed === 0
                       ? "border-rose-400/80 bg-rose-50/80 hover:border-rose-500 dark:border-rose-800 dark:bg-rose-950/30"
@@ -3128,13 +4561,40 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               >
                 {badge.text}
               </span>
+              {(() => {
+                const claimedBy = teamClaims[c.item_key];
+                const lb = teamLabels[c.item_key]?.u;
+                if (claimedBy) {
+                  return (
+                    <span
+                      className="absolute left-1 top-1 inline-flex max-w-[70px] animate-pulse items-center gap-0.5 truncate rounded px-1 py-0.5 text-[8px] font-extrabold text-slate-900 shadow-sm"
+                      style={{ backgroundColor: teamColors[claimedBy] ?? "#94a3b8" }}
+                      title={`${claimedBy} is working on this image`}
+                    >
+                      ✎ {claimedBy}
+                    </span>
+                  );
+                }
+                if (lb) {
+                  return (
+                    <span
+                      className="absolute left-1 top-1 inline-flex max-w-[70px] items-center truncate rounded px-1 py-0.5 text-[8px] font-extrabold text-slate-900 shadow-sm"
+                      style={{ backgroundColor: teamColors[lb] ?? "#94a3b8" }}
+                      title={`Labeled by ${lb}`}
+                    >
+                      {lb}
+                    </span>
+                  );
+                }
+                return null;
+              })()}
             </div>
             <span
               className={cn(
                 "absolute bottom-0 left-1 right-1 truncate pb-0.5 pt-2 text-[9px] font-bold leading-none",
                 !reviewed
                   ? "text-amber-900 dark:text-amber-200"
-                  : passed === 3
+                  : passComplete
                     ? "text-emerald-800 dark:text-emerald-300"
                     : passed === 0
                       ? "text-rose-800 dark:text-rose-300"
@@ -3153,10 +4613,24 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
       </div>
       </div>
 
+      <StripStatusBar
+        challenges={appState.challenges}
+        compute={computeStripCodes}
+        version={`${stripFilter}:${ownFilter}:${stripTick}:${appState.review_mode}:${appState.own_day ?? ""}:${appState.challenges.length}`}
+        currentIdx={idx}
+        visible={stripRange}
+        onJump={(i) => {
+          void selectChallenge(i, "overview-bar")
+            .then(() => scrollThumbIntoView(i))
+            .catch((err) => {
+              if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
+            });
+        }}
+      />
       {activeDetail ? (
         isPlatform ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row lg:items-stretch">
-          <Pane title={`Your GT · ${boxes.length} boxes`} hint={`Left pane is ground truth · draw · scroll zoom · T ${showBoxLabels ? "hides" : "shows"} labels`}>
+          <Pane title={`Your GT · ${boxes.length} boxes`} headerExtra={guidesToggle} hint={`Left pane is ground truth · draw · Space/right/middle-drag to pan · right-click a box = delete · scroll / Z·X zoom · C/V inspect · T ${showBoxLabels ? "hides" : "shows"} labels`}>
             <AnnotationCanvas
               sceneId={`gt:${activeDetail.challenge.item_key}`}
               fullUrl={challengeImageUrl(idx, appState!.review_mode, activeDetail.challenge.block, imageCacheToken, activeDetail.challenge.item_key, activeDetail.challenge.media_rev)}
@@ -3167,17 +4641,23 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               boxes={boxes}
               classNames={names}
               currentClass={currentClass}
-              editable
+              editable={!teamReadOnly}
               selectedIndex={selected}
               onBoxesChange={persistBoxes}
-              onSelect={setSelected}
+              onSelect={onGtSelect}
+              showGuides={ownGuides}
               syncTransform={syncTransform}
               onTransformChange={setSyncTransform}
               canvasBg={theme === "dark" ? "#0b1220" : "#f1f5f9"}
               showLabels={showBoxLabels}
+              linkedFocusIdxs={linkedBoxFocus?.gtIdxs ?? null}
+              onHoverFocus={onGtHoverFocus}
+              inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
+              inspectSeq={boxInspect?.seq ?? 0}
             />
           </Pane>
           <MiddleRail
+            topSlot={statusTagFor("rail")}
             classNames={names.length ? names : refNames}
             leftBoxes={boxes}
             rightBoxes={refBoxes}
@@ -3188,10 +4668,19 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
             onSelectClass={setCurrentClass}
             imageWidth={activeDetail.width || activeDetail.challenge?.image_width || undefined}
             imageHeight={activeDetail.height || activeDetail.challenge?.image_height || undefined}
+            scoreRecord={(activeDetail.record || activeDetail.challenge?.record || {}) as Record<string, unknown>}
           />
           <Pane
-            title={`Miner R${activeRefVariantIdx + 1} · ${refBoxes.length} boxes${refCompare.wrongCount ? ` · ${refCompare.wrongCount} wrong` : ""}`}
-            hint={`Scored vs your GT · ${activeRefVariant?.is_winner ? "winner" : "alt"} · rose EXTRA · amber WRONG · cyan MISSED`}
+            title={`Miner R${activeRefVariantIdx + 1} · ${refBoxes.length} boxes${refCompare.wrongCount ? ` · ${refCompare.wrongCount} wrong` : ""}${
+              minerAlertFilter === "wrong"
+                ? " · W only"
+                : minerAlertFilter === "extra"
+                  ? " · E only"
+                  : minerAlertFilter === "missed"
+                    ? " · R only"
+                    : ""
+            }`}
+            hint={`Scored vs your GT · W wrong · E extra · R missed (toggle) · rose EXTRA · amber WRONG · cyan MISSED`}
           >
             <AnnotationCanvas
               sceneId={`ref:${activeDetail.challenge.item_key}:${activeRefVariantIdx}`}
@@ -3210,35 +4699,147 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               boxCompare={boxes.length ? refCompare.roles : undefined}
               ghostBoxes={boxes.length ? refCompare.missedGt : undefined}
               showLabels={showBoxLabels}
+              linkedFocusIdxs={linkedBoxFocus?.predIdxs ?? null}
+              linkedGhostIdxs={linkedBoxFocus?.ghostIdxs ?? null}
+              onHoverFocus={onMinerHoverFocus}
+              alertFilter={minerAlertFilter}
             />
           </Pane>
         </div>
         ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
-          <Pane
-            title={`Own · ${boxes.length} boxes`}
-            hint="Your pool — draw boxes · scroll zoom · N/B next/prev NEW · M accept winner & Done · ←/→ all images"
-          >
-            <AnnotationCanvas
-              sceneId={`own:${activeDetail.challenge.item_key}`}
-              fullUrl={challengeImageUrl(idx, appState!.review_mode, activeDetail.challenge.block, imageCacheToken, activeDetail.challenge.item_key, activeDetail.challenge.media_rev)}
-              previewUrl={challengePreviewUrl(idx, appState!.review_mode, activeDetail.challenge.block, imageCacheToken, activeDetail.challenge.item_key, activeDetail.challenge.media_rev)}
-              thumbUrl={challengeThumbnailUrl(idx, appState!.review_mode, activeDetail.challenge.block, true, imageCacheToken, activeDetail.challenge.item_key, activeDetail.challenge.media_rev)}
-              width={activeDetail.width}
-              height={activeDetail.height}
-              boxes={boxes}
-              classNames={names}
-              currentClass={currentClass}
-              editable
-              selectedIndex={selected}
-              onBoxesChange={persistBoxes}
-              onSelect={setSelected}
-              syncTransform={syncTransform}
-              onTransformChange={setSyncTransform}
-              canvasBg={theme === "dark" ? "#0b1220" : "#f1f5f9"}
-              showLabels={showBoxLabels}
-            />
-          </Pane>
+          {(() => {
+            const ownReviewed = Boolean(activeDetail.challenge.reviewed);
+            const ownSam3 = Boolean(activeDetail.challenge.has_label) && !ownReviewed;
+            // Dual: GT/SAM3 labels (left) + winner base detection (right). NEW stays single-pane.
+            const showDual = ownDualView && (ownReviewed || ownSam3);
+            const itemKey = activeDetail.challenge.item_key;
+            const fromDetail = normalizeBoxes(activeDetail.prediction_boxes || []);
+            if (itemKey && fromDetail.length) {
+              rememberWinnerPreds(
+                itemKey,
+                fromDetail,
+                normalizeBoxes(boxes),
+                ownReviewed,
+              );
+            }
+            const ownBaseBoxes =
+              (itemKey && winnerPredCache.get(itemKey)) || fromDetail;
+            const ownHint =
+              `C/V inspect · R guides${ownGuides ? " on" : ""} · E dual${ownDualView ? " on" : " off"} · Z/X zoom · N·Tab next / B·Q back (NEW) · M Done · ←/→ navigate`;
+            const ownUrls = {
+              fullUrl: challengeImageUrl(
+                idx,
+                appState!.review_mode,
+                activeDetail.challenge.block,
+                imageCacheToken,
+                activeDetail.challenge.item_key,
+                activeDetail.challenge.media_rev,
+              ),
+              previewUrl: challengePreviewUrl(
+                idx,
+                appState!.review_mode,
+                activeDetail.challenge.block,
+                imageCacheToken,
+                activeDetail.challenge.item_key,
+                activeDetail.challenge.media_rev,
+              ),
+              thumbUrl: challengeThumbnailUrl(
+                idx,
+                appState!.review_mode,
+                activeDetail.challenge.block,
+                true,
+                imageCacheToken,
+                activeDetail.challenge.item_key,
+                activeDetail.challenge.media_rev,
+              ),
+            };
+            const canvasBg = theme === "dark" ? "#0b1220" : "#f1f5f9";
+            if (showDual) {
+              const leftTitle = ownSam3
+                ? `SAM3 · ${boxes.length} boxes`
+                : `Own labeled · ${boxes.length} boxes`;
+              return (
+                <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row lg:items-stretch">
+                  <Pane title={leftTitle} hint={ownHint} headerExtra={<>{statusTagFor("inline")}{guidesToggle}</>}>
+                    <AnnotationCanvas
+                      sceneId={`own:${activeDetail.challenge.item_key}`}
+                      {...ownUrls}
+                      width={activeDetail.width}
+                      height={activeDetail.height}
+                      boxes={boxes}
+                      classNames={names}
+                      currentClass={currentClass}
+                      editable={!teamReadOnly}
+                      selectedIndex={selected}
+                      onBoxesChange={persistBoxes}
+                      onSelect={onGtSelect}
+                              syncTransform={syncTransform}
+                      onTransformChange={setSyncTransform}
+                      canvasBg={canvasBg}
+                      showLabels={showBoxLabels}
+                      inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
+                      inspectSeq={boxInspect?.seq ?? 0}
+                      showGuides={ownGuides}
+                    />
+                  </Pane>
+                  <Pane
+                    title={`Base detection · ${ownBaseBoxes.length} boxes`}
+                    hint="Winner-model detections (read-only) · Space/right/middle-drag to pan · synced zoom · Z/X toward cursor"
+                  >
+                    <AnnotationCanvas
+                      sceneId={`own-base:${activeDetail.challenge.item_key}`}
+                      {...ownUrls}
+                      width={activeDetail.width}
+                      height={activeDetail.height}
+                      boxes={ownBaseBoxes}
+                      classNames={names}
+                      currentClass={0}
+                      editable={false}
+                      syncTransform={syncTransform}
+                      onTransformChange={setSyncTransform}
+                      canvasBg={canvasBg}
+                      showLabels={showBoxLabels}
+                    />
+                  </Pane>
+                </div>
+              );
+            }
+            return (
+              <Pane
+                title={
+                  ownReviewed
+                    ? `Own · ${boxes.length} boxes`
+                    : ownSam3
+                      ? `SAM3 · ${boxes.length} boxes`
+                      : `Own · base detection · ${boxes.length} boxes`
+                }
+                hint={ownHint}
+                headerExtra={<>{statusTagFor("inline")}{guidesToggle}</>}
+              >
+                <AnnotationCanvas
+                  sceneId={`own:${activeDetail.challenge.item_key}`}
+                  {...ownUrls}
+                  width={activeDetail.width}
+                  height={activeDetail.height}
+                  boxes={boxes}
+                  classNames={names}
+                  currentClass={currentClass}
+                  editable={!teamReadOnly}
+                  selectedIndex={selected}
+                  onBoxesChange={persistBoxes}
+                  onSelect={onGtSelect}
+                      syncTransform={syncTransform}
+                  onTransformChange={setSyncTransform}
+                  canvasBg={canvasBg}
+                  showLabels={showBoxLabels}
+                  inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
+                  inspectSeq={boxInspect?.seq ?? 0}
+                  showGuides={ownGuides}
+                />
+              </Pane>
+            );
+          })()}
           <div className="flex flex-wrap items-center gap-1.5 px-1">
             {names.map((name, classId) => (
               <button
@@ -3263,13 +4864,24 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
           {appState.challenges.some((c) => c.loaded) ? (
             <>
               <span className="h-8 w-8 animate-spin rounded-full border-2 border-sky-200 border-t-sky-500" />
-              <p>{appState.collect.running ? appState.collect.message || "Loading first image…" : "Loading image…"}</p>
+              <p>
+                {isPlatform && appState.collect.running
+                  ? appState.collect.message || "Loading first image…"
+                  : "Loading image…"}
+              </p>
             </>
           ) : !isPlatform ? (
-            <>
-              <p>Upload images to start labeling in Own mode.</p>
-              <p className="text-xs text-slate-400">Click Upload in the footer to open the Own upload window.</p>
-            </>
+            topicReady ? (
+              <>
+                <span className="h-8 w-8 animate-spin rounded-full border-2 border-sky-200 border-t-sky-500" />
+                <p>Loading Own pool…</p>
+              </>
+            ) : (
+              <>
+                <p>Upload images to start labeling in Own mode.</p>
+                <p className="text-xs text-slate-400">Click Upload in the footer to open the Own upload window.</p>
+              </>
+            )
           ) : appState.collect.running ? (
             <>
               <span className="h-8 w-8 animate-spin rounded-full border-2 border-sky-200 border-t-sky-500" />
@@ -3302,6 +4914,8 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
           )}
         </div>
       )}
+      </>
+      )}
 
       <footer className="mt-auto shrink-0 rounded-lg border border-slate-200 bg-white/95 px-1.5 py-0.5 shadow-soft dark:border-slate-700/60 dark:bg-ink-900/90">
         <div className="flex flex-wrap items-center gap-1.5 lg:flex-nowrap">
@@ -3318,7 +4932,6 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               onSwitchOwn={() => void switchWorkspace("own")}
             />
             <LabeledProgress left={appState.metrics.not_reviewed} labeled={appState.metrics.ready_to_tune} />
-            <ChutesBalanceChip snap={chutesSnap} error={chutesError} onClick={() => setChutesOpen(true)} />
             <div className="lg:hidden">{renderFooterActions()}</div>
           </div>
 
@@ -3346,6 +4959,28 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
               >
                 Topics
               </Link>
+              {!isPlatform && appState.own_day ? (
+                <button
+                  type="button"
+                  onClick={() => void leaveOwnDay()}
+                  disabled={modeBusy}
+                  title="Back to Own day list"
+                  className="shrink-0 rounded-full border border-violet-300 bg-violet-50 px-2 py-0.5 text-[10px] font-bold tabular-nums text-violet-800 hover:bg-violet-100 disabled:opacity-50 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-200"
+                >
+                  {appState.own_day}
+                </button>
+              ) : null}
+              {!isPlatform && appState.own_day && ownCounts.new > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void clearOwnDayNew()}
+                  disabled={modeBusy}
+                  title={`Delete all ${ownCounts.new} New images in ${appState.own_day} (keeps Done)`}
+                  className="shrink-0 rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-[10px] font-bold text-rose-700 hover:bg-rose-100 disabled:opacity-50 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+                >
+                  Clear new ({ownCounts.new})
+                </button>
+              ) : null}
               {appState.skills.map((s) => {
                 const slug = topicSlugFromSkill(s.element_path);
                 if (!slug) return null;
@@ -3384,125 +5019,251 @@ export default function App({ topicSlug, initialWorkspace }: { topicSlug: string
         </div>
         {error && <div className="mt-1 text-[10px] font-semibold text-rose-500 dark:text-rose-400">{error}</div>}
       </footer>
-      <ChutesModal
-        open={chutesOpen}
-        onClose={() => setChutesOpen(false)}
-        onStatus={onChutesStatus}
+      <SubmitModeModal
+        open={submitModeOpen}
+        onClose={() => setSubmitModeOpen(false)}
+        onAuto={() => setFindBestOpen(true)}
+        onManual={() => setManualMergeOpen(true)}
       />
-      <FindBestModal
-        open={findBestOpen}
-        onClose={() => setFindBestOpen(false)}
-        reviewedCount={reviewedCount}
-        defaultElement={(appState.active_skill?.element_id || topicSlug || "")
-          .replace(/^manak0\/Detect-/i, "")
-          .replace(/^manak0\//i, "")
-          .replace(/-/g, " ")
-          .trim()}
-        onMinerLoaded={(state) => {
-          applyState(state);
-          const idx = state.current_index ?? 0;
-          void selectChallenge(idx);
-        }}
-        challenges={appState.challenges}
-        ownMode={!isPlatform}
-      />
-      <OwnUploadModal
-        open={ownUploadOpen}
-        onClose={() => setOwnUploadOpen(false)}
-        onDone={onUploadOwnDone}
-        imageCacheToken={imageCacheToken}
-      />
-      <OwnDeleteRangeModal
-        open={ownDeleteOpen}
-        onClose={() => setOwnDeleteOpen(false)}
-        challenges={appState.challenges}
-        onDelete={async (opts) => {
-          setError("");
-          const prevKey = useLabeler.getState().detail?.challenge?.item_key || null;
-          const prevIdx = detailIndexRef.current ?? appState.current_index ?? -1;
-          const next = await api.deleteOwnRange({ blockMin: opts.blockMin, blockMax: opts.blockMax });
-          workspacePoolsRef.current.own = next;
-          applyState(next);
-          clearDetailCache();
-          clearDecodedImages();
-          clearThumbnailBlobCache();
-          const keepIdx =
-            prevKey != null ? next.challenges.findIndex((c) => itemKeysMatch(c.item_key, prevKey)) : -1;
-          const idx = keepIdx >= 0 ? keepIdx : Math.min(prevIdx, next.challenges.length - 1);
-          if (idx >= 0 && next.challenges[idx]?.loaded) await loadChallenge(idx);
-          else clearLabelerPanes();
-        }}
-      />
-      <UploadLabelsModal
-        open={uploadLabelsOpen}
-        onClose={() => setUploadLabelsOpen(false)}
-        classCount={names.length || appState.model_class_names.length}
-        reviewMode={appState.review_mode}
-        onApplied={(state) => {
-          for (const c of state.challenges) {
-            if (c.reviewed) notePendingDone(c.item_key);
-          }
-          applyState(state);
-          void api
-            .getState()
-            .then((fresh) => applyState(fresh))
-            .catch(() => undefined);
-          const idx = detailIndexRef.current ?? state.current_index ?? 0;
-          void selectChallenge(idx);
-        }}
-      />
-      <DownloadGtModal
-        open={downloadOpen}
-        onClose={() => setDownloadOpen(false)}
-        challenges={appState.challenges}
-        ownMode={!isPlatform}
-        onDownload={async (opts) => {
-          setDownloadBusy(true);
-          setError("");
-          try {
+      <MountOnOpen open={findBestOpen}>
+        <FindBestModal
+          open={findBestOpen}
+          onClose={() => setFindBestOpen(false)}
+          reviewedCount={reviewedCount}
+          defaultElement={(appState.active_skill?.element_id || topicSlug || "")
+            .replace(/^manak0\/Detect-/i, "")
+            .replace(/^manak0\//i, "")
+            .replace(/-/g, " ")
+            .trim()}
+          onMinerLoaded={(state) => {
+            applyState(state);
+            const idx = state.current_index ?? 0;
+            void selectChallenge(idx);
+          }}
+          challenges={appState.challenges}
+          ownMode={!isPlatform}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={manualMergeOpen}>
+        <ManualMergeModal
+          open={manualMergeOpen}
+          onClose={() => setManualMergeOpen(false)}
+          challenges={appState.challenges}
+          ownMode={!isPlatform}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={ownUploadOpen}>
+        <OwnUploadModal
+          open={ownUploadOpen}
+          onClose={() => setOwnUploadOpen(false)}
+          onDone={onUploadOwnDone}
+          imageCacheToken={imageCacheToken}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={ownHfImportOpen}>
+        <OwnHfImportModal
+          open={ownHfImportOpen}
+          onClose={() => setOwnHfImportOpen(false)}
+          onDone={async (state) => {
+            setOwnHfImportOpen(false);
+            await onUploadOwnDone(state);
+          }}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={sam3Open}>
+        <OwnSam3Modal
+          open={sam3Open}
+          onClose={() => setSam3Open(false)}
+          challenges={appState.challenges}
+          day={appState.own_day}
+          onLabelOne={async (opts) => {
+            setSam3Busy(true);
+            await runSam3LabelOne(opts);
+          }}
+          onRunComplete={onSam3RunComplete}
+        />
+      </MountOnOpen>
+      {deleteImageAsk ? (
+        <DeleteImageConfirm
+          name={deleteImageAsk.name}
+          hasLabel={deleteImageAsk.hasLabel}
+          onCancel={() => setDeleteImageAsk(null)}
+          onConfirm={async () => {
+            const ask = deleteImageAsk;
+            clearPendingSaveFor(ask.index, ask.key);
+            const next = await api.deleteOwnRange({ itemKeys: [ask.key] });
+            workspacePoolsRef.current.own = next;
+            applyState(next);
+            clearDetailCache();
+            clearDecodedImages();
+            clearThumbnailBlobCache();
+            setDeleteImageAsk(null);
+            setError("");
+            const idx = Math.min(ask.index, next.challenges.length - 1);
+            if (idx >= 0 && next.challenges[idx]?.loaded) await loadChallenge(idx);
+            else clearLabelerPanes();
+          }}
+        />
+      ) : null}
+      <MountOnOpen open={ownDeleteOpen}>
+        <OwnDeleteRangeModal
+          open={ownDeleteOpen}
+          onClose={() => setOwnDeleteOpen(false)}
+          challenges={appState.challenges}
+          onDelete={async (opts) => {
+            setError("");
+            const prevKey = useLabeler.getState().detail?.challenge?.item_key || null;
+            const prevIdx = detailIndexRef.current ?? appState.current_index ?? -1;
+            const next = await api.deleteOwnRange({ blockMin: opts.blockMin, blockMax: opts.blockMax, itemKeys: opts.itemKeys });
+            workspacePoolsRef.current.own = next;
+            applyState(next);
+            clearDetailCache();
+            clearDecodedImages();
+            clearThumbnailBlobCache();
+            const keepIdx =
+              prevKey != null ? next.challenges.findIndex((c) => itemKeysMatch(c.item_key, prevKey)) : -1;
+            const idx = keepIdx >= 0 ? keepIdx : Math.min(prevIdx, next.challenges.length - 1);
+            if (idx >= 0 && next.challenges[idx]?.loaded) await loadChallenge(idx);
+            else clearLabelerPanes();
+          }}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={uploadLabelsOpen}>
+        <UploadLabelsModal
+          open={uploadLabelsOpen}
+          onClose={() => setUploadLabelsOpen(false)}
+          classCount={names.length || appState.model_class_names.length}
+          reviewMode={appState.review_mode}
+          onApplied={(state) => {
+            for (const c of state.challenges) {
+              if (c.reviewed) notePendingDone(c.item_key);
+            }
+            applyState(state);
+            void api
+              .getState()
+              .then((fresh) => applyState(fresh))
+              .catch(() => undefined);
+            const idx = detailIndexRef.current ?? state.current_index ?? 0;
+            void selectChallenge(idx);
+          }}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={downloadOpen}>
+        <DownloadGtModal
+          open={downloadOpen}
+          onClose={() => setDownloadOpen(false)}
+          challenges={appState.challenges}
+          ownMode={!isPlatform}
+          onDownload={async (opts) => {
+            setDownloadBusy(true);
+            setError("");
+            try {
+              const downloadIdx = detailIndexRef.current;
+              if (downloadIdx != null) await flushSave(downloadIdx);
+              await api.downloadReviewedGt(
+                {
+                  blockMin: opts.blockMin,
+                  blockMax: opts.blockMax,
+                  quality: opts.quality,
+                  itemKeys: opts.itemKeys,
+                },
+                opts.onProgress,
+              );
+            } catch (e) {
+              setError(String(e));
+              throw e;
+            } finally {
+              setDownloadBusy(false);
+            }
+          }}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={sendGtOpen}>
+        <SendGtModal
+          open={sendGtOpen}
+          onClose={() => setSendGtOpen(false)}
+          challenges={appState.challenges}
+          onSend={async (opts) => {
+            setError("");
             const downloadIdx = detailIndexRef.current;
             if (downloadIdx != null) await flushSave(downloadIdx);
-            await api.downloadReviewedGt(
-              {
-                blockMin: opts.blockMin,
-                blockMax: opts.blockMax,
-                quality: opts.quality,
-              },
-              opts.onProgress,
-            );
-          } catch (e) {
-            setError(String(e));
-            throw e;
-          } finally {
-            setDownloadBusy(false);
-          }
-        }}
-      />
-      <UploadUltralyticsModal
-        open={ultralyticsOpen}
-        onClose={() => setUltralyticsOpen(false)}
-        challenges={appState.challenges}
-        ownMode={!isPlatform}
-      />
-      <DeepPostProcModal
-        open={dppOpen}
-        onClose={() => setDppOpen(false)}
-        challenges={appState.challenges}
-        ownMode={!isPlatform}
-      />
+            return api.sendReviewedGt({
+              blockMin: opts.blockMin,
+              blockMax: opts.blockMax,
+              quality: opts.quality,
+              itemKeys: opts.itemKeys,
+            });
+          }}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={ultralyticsOpen}>
+        <UploadUltralyticsModal
+          open={ultralyticsOpen}
+          onClose={() => setUltralyticsOpen(false)}
+          challenges={appState.challenges}
+          ownMode={!isPlatform}
+          dayMode={ownDayListMode ? { preselect: daySel } : undefined}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={dppOpen}>
+        <DeepPostProcModal
+          open={dppOpen}
+          onClose={() => setDppOpen(false)}
+          challenges={appState.challenges}
+          ownMode={!isPlatform}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={hfCompareOpen}>
+        <CompareHfModelsModal
+          open={hfCompareOpen}
+          onClose={() => setHfCompareOpen(false)}
+          challenges={appState.challenges}
+          ownMode={!isPlatform}
+        />
+      </MountOnOpen>
+      <MountOnOpen open={baseModelOpen}>
+        <SelectBaseModelModal
+          open={baseModelOpen}
+          onClose={() => setBaseModelOpen(false)}
+          onApplied={async () => {
+            winnerPredCache.clear();
+            try {
+              applyState(await api.getState());
+            } catch {
+              /* ignore */
+            }
+          }}
+        />
+      </MountOnOpen>
     </div>
   );
 }
 
-function plausibilityOf(score: {
-  pS: number | null;
-  pM: number | null;
-  pF: number | null;
-  tS: number | null;
-  tM: number | null;
-  tF: number | null;
-}): { label: string; tone: string } {
+/** Mount a lazily-loaded modal on first open, then keep it mounted so its state survives close. */
+function MountOnOpen({ open, children }: { open: boolean; children: ReactNode }) {
+  const [seen, setSeen] = useState(open);
+  if (open && !seen) setSeen(true);
+  return seen ? <Suspense fallback={null}>{children}</Suspense> : null;
+}
+
+function plausibilityOf(
+  score: {
+    pS: number | null;
+    pM: number | null;
+    pF: number | null;
+    tS: number | null;
+    tM: number | null;
+    tF: number | null;
+  },
+  opts?: { hasPredBoxes?: boolean },
+): { label: string; tone: string } {
   if (score.tS == null || score.tM == null || score.tF == null) {
+    if (
+      opts?.hasPredBoxes === false &&
+      (score.pS != null || score.pM != null || score.pF != null)
+    ) {
+      return { label: "no preds", tone: "text-slate-500" };
+    }
     return { label: "label GT", tone: "text-slate-500" };
   }
   if (score.pS == null || score.pM == null || score.pF == null) {
@@ -3696,6 +5457,22 @@ function PtCompareCard({
   const icon = compact ? "h-2.5 w-2.5" : "h-3 w-3";
   return (
     <div className={cn("w-full", compact ? "text-[9px]" : "text-[10px]")}>
+      {compact ? (
+        // Narrow rail: title left, grade right, no filler lines — nothing gets clipped.
+        <div className="flex items-baseline justify-between gap-1 leading-none">
+          {title ? <span className="shrink-0 text-[10px] font-extrabold tracking-tight">{title}</span> : <span />}
+          <span
+            key={grade.label}
+            className={cn(
+              "min-w-0 truncate text-[8px] font-black uppercase tracking-tight transition-colors duration-300 animate-[metricGradeIn_0.35s_ease-out]",
+              grade.tone,
+            )}
+            title={grade.label}
+          >
+            {grade.label}
+          </span>
+        </div>
+      ) : (
       <div className="flex items-center gap-1">
         {title ? <span className="shrink-0 text-[10px] font-extrabold tracking-tight">{title}</span> : null}
         <span className="h-px min-w-1 flex-1 bg-slate-300 dark:bg-slate-600" />
@@ -3710,6 +5487,7 @@ function PtCompareCard({
         </span>
         <span className="h-px min-w-1 flex-1 bg-slate-300 dark:bg-slate-600" />
       </div>
+      )}
       <div className="mt-0.5 grid grid-cols-4 items-center gap-x-0.5 gap-y-px font-black tabular-nums">
         <span />
         {metrics.map((metric) => (
@@ -3771,6 +5549,7 @@ function countByClass(boxes: DetectionBox[], classCount: number): number[] {
 }
 
 function MiddleRail({
+  topSlot,
   classNames,
   leftBoxes,
   rightBoxes,
@@ -3781,7 +5560,10 @@ function MiddleRail({
   onSelectClass,
   imageWidth,
   imageHeight,
+  scoreRecord,
 }: {
+  /** Labeled-by tag / read-only banner / save status, pinned at the very top of the rail. */
+  topSlot?: ReactNode;
   classNames: string[];
   leftBoxes: DetectionBox[];
   rightBoxes: DetectionBox[];
@@ -3792,6 +5574,7 @@ function MiddleRail({
   onSelectClass: (cls: number) => void;
   imageWidth?: number;
   imageHeight?: number;
+  scoreRecord?: Record<string, unknown>;
 }) {
   const variantSummaries = useMemo(
     () =>
@@ -3807,6 +5590,7 @@ function MiddleRail({
                 total_weighted: variant.total_weighted,
                 map50: variant.map50,
                 false_positive: variant.false_positive,
+                score_pillars: scoreRecord?.score_pillars,
               },
               imageWidth,
               imageHeight,
@@ -3815,7 +5599,7 @@ function MiddleRail({
         const tS = scored?.composite ?? null;
         const tM = scored?.map50 ?? null;
         const tF = scored?.false_positive ?? null;
-        const grade = plausibilityOf({ pS, pM, pF, tS, tM, tF });
+        const grade = plausibilityOf({ pS, pM, pF, tS, tM, tF }, { hasPredBoxes: variant.boxes.length > 0 });
         const passed = minerPasses(pS, pM, pF, tS, tM, tF);
         const cls =
           grade.label === "plausible" || grade.label === "close"
@@ -3840,11 +5624,12 @@ function MiddleRail({
           isWinner: Boolean(variant.is_winner),
         };
       }),
-    [imageHeight, imageWidth, leftBoxes, referenceVariants],
+    [imageHeight, imageWidth, leftBoxes, referenceVariants, scoreRecord],
   );
   return (
-    <aside className="flex w-full shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-soft lg:h-full lg:min-h-0 lg:w-[12rem] lg:max-w-[12rem] dark:border-slate-800 dark:bg-ink-900">
+    <aside className="flex w-full shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-soft lg:h-full lg:min-h-0 lg:w-[7.2rem] lg:max-w-[7.2rem] dark:border-slate-800 dark:bg-ink-900">
       <div className="flex min-h-0 flex-1 flex-col justify-around px-1.5 py-2">
+        {topSlot && <section className="shrink-0">{topSlot}</section>}
         <section className="shrink-0 space-y-1">
           <div className="text-center text-[9px] font-black uppercase tracking-wide text-sky-600 dark:text-sky-400">
             p vs t
@@ -3936,16 +5721,26 @@ function FooterActions({
   stopCollectBusy,
   onStopCollect,
   onDownload,
+  onSendGt,
   onUploadLabels,
   onUploadUltralytics,
   onDeepPostProc,
+  onCompareHfModels,
+  onSelectBaseModel,
   onSubmit,
   theme,
   onToggleTheme,
   ownMode = false,
   uploadImagesBusy = false,
   onUploadImages,
+  onHfImport,
+  onSam3,
+  sam3Busy = false,
   onDeleteRange,
+  dayListMode = false,
+  onClearNew,
+  clearNewCount = 0,
+  clearNewBusy = false,
 }: {
   downloadBusy: boolean;
   reviewedCount: number;
@@ -3954,16 +5749,27 @@ function FooterActions({
   stopCollectBusy: boolean;
   onStopCollect: () => void | Promise<void>;
   onDownload: () => void;
+  onSendGt?: () => void;
   onUploadLabels: () => void;
   onUploadUltralytics: () => void;
   onDeepPostProc: () => void;
+  onCompareHfModels: () => void;
+  onSelectBaseModel: () => void;
   onSubmit: () => void;
   theme: string;
   onToggleTheme: () => void;
   ownMode?: boolean;
   uploadImagesBusy?: boolean;
   onUploadImages?: () => void;
+  onHfImport?: () => void;
+  onSam3?: () => void;
+  sam3Busy?: boolean;
+  /** Own day list page (no day open): the Ultralytics button works on whole days. */
+  dayListMode?: boolean;
   onDeleteRange?: () => void;
+  onClearNew?: () => void;
+  clearNewCount?: number;
+  clearNewBusy?: boolean;
 }) {
   return (
     <div className="flex h-7 shrink-0 items-center overflow-hidden rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-ink-800">
@@ -3992,6 +5798,47 @@ function FooterActions({
           <Upload className={cn("h-3.5 w-3.5", uploadImagesBusy && "animate-pulse")} />
         </button>
       )}
+      {ownMode && onHfImport && (
+        <button
+          type="button"
+          onClick={onHfImport}
+          title="Import images+labels from Hugging Face .tar.gz"
+          aria-label="Import from Hugging Face"
+          className="inline-flex items-center justify-center border-r border-slate-200 px-1.5 text-violet-600 hover:bg-violet-50 dark:border-slate-700 dark:text-violet-300 dark:hover:bg-violet-950/40"
+        >
+          <CloudDownload className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {ownMode && onSam3 && (
+        <button
+          type="button"
+          disabled={sam3Busy}
+          onClick={onSam3}
+          title="SAM3-label all New images in this day (one Chutes call per image: cup+can+bottle) → SAM3 state"
+          aria-label="SAM3 label day"
+          className="inline-flex items-center gap-1 border-r border-slate-200 px-1.5 text-[10px] font-black tracking-wide text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 dark:border-slate-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+        >
+          {sam3Busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+          SAM3
+        </button>
+      )}
+      {ownMode && onClearNew && (
+        <button
+          type="button"
+          disabled={clearNewBusy || clearNewCount <= 0}
+          onClick={onClearNew}
+          title={
+            clearNewCount > 0
+              ? `Clear all ${clearNewCount} New images in this day (keeps Done)`
+              : "No New images in this day"
+          }
+          aria-label="Clear New images in day"
+          className="inline-flex items-center gap-1 border-r border-slate-200 px-1.5 text-[10px] font-black tracking-wide text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-rose-300 dark:hover:bg-rose-950/40"
+        >
+          <Trash2 className={cn("h-3.5 w-3.5", clearNewBusy && "animate-pulse")} />
+          Clear new
+        </button>
+      )}
       {ownMode && onDeleteRange && (
         <button
           type="button"
@@ -4017,6 +5864,19 @@ function FooterActions({
       >
         <Download className={cn("h-3.5 w-3.5", downloadBusy && "animate-pulse")} />
       </button>
+      {!ownMode && onSendGt && (
+        <button
+          type="button"
+          disabled={reviewedCount <= 0}
+          onClick={onSendGt}
+          title="Send Platform Done GT to beverage-studio VM — pick block range"
+          aria-label="Send GT"
+          className="inline-flex items-center gap-1 border-r border-slate-200 px-1.5 text-[10px] font-black tracking-wide text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+        >
+          <Send className="h-3.5 w-3.5" />
+          Send
+        </button>
+      )}
       <button
         type="button"
         onClick={onUploadLabels}
@@ -4032,7 +5892,7 @@ function FooterActions({
       </button>
       <button
         type="button"
-        disabled={reviewedCount <= 0}
+        disabled={reviewedCount <= 0 && !dayListMode}
         onClick={onUploadUltralytics}
         title={
           ownMode
@@ -4057,6 +5917,29 @@ function FooterActions({
         className="inline-flex items-center justify-center border-r border-slate-200 px-1.5 text-fuchsia-600 hover:bg-fuchsia-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-fuchsia-300 dark:hover:bg-fuchsia-950/40"
       >
         <Sparkles className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        disabled={reviewedCount <= 0}
+        onClick={onCompareHfModels}
+        title={
+          ownMode
+            ? "Compare several Hugging Face models on Own Done GT"
+            : "Compare several Hugging Face models on selected Done range"
+        }
+        aria-label="Compare HF models"
+        className="inline-flex items-center justify-center border-r border-slate-200 px-1.5 text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-indigo-300 dark:hover:bg-indigo-950/40"
+      >
+        <GitCompareArrows className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onSelectBaseModel}
+        title="Select base detection model from Hugging Face (test, then apply; Default restores manak0 winner)"
+        aria-label="Select base model"
+        className="inline-flex items-center justify-center border-r border-slate-200 px-1.5 text-teal-600 hover:bg-teal-50 dark:border-slate-700 dark:text-teal-300 dark:hover:bg-teal-950/40"
+      >
+        <Crosshair className="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
@@ -4198,10 +6081,10 @@ function ClassCompareRail({
                 className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
                 style={{ backgroundColor: color }}
               />
-              <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-slate-800 dark:text-slate-100">
+              <span className="min-w-0 flex-1 truncate text-[10px] font-bold text-slate-800 dark:text-slate-100" title={row.name}>
                 {row.name}
               </span>
-              <span className="shrink-0 font-mono text-[11px] font-black tabular-nums leading-none">
+              <span className="shrink-0 font-mono text-[10px] font-black tabular-nums leading-none">
                 <TweenNum
                   value={row.left}
                   format={(n) => `${Math.round(n)}`}
@@ -4213,7 +6096,7 @@ function ClassCompareRail({
                   format={(n) => `${Math.round(n)}`}
                   className={cn(mismatch && row.right > row.left ? "text-rose-500" : "text-slate-700 dark:text-slate-200")}
                 />
-                <span className="pl-1 text-[11px]">{mismatch ? "✗" : "✓"}</span>
+                <span className="pl-0.5 text-[10px]">{mismatch ? "✗" : "✓"}</span>
               </span>
             </button>
           );
@@ -4223,12 +6106,23 @@ function ClassCompareRail({
   );
 }
 
-function Pane({ title, hint, children }: { title: string; hint: string; children: ReactNode }) {
+function Pane({
+  title,
+  hint,
+  headerExtra,
+  children,
+}: {
+  title: string;
+  hint: string;
+  headerExtra?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <section className="flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white p-2 shadow-soft dark:border-slate-800 dark:bg-ink-900">
-      <div className="mb-1 flex shrink-0 items-center justify-between px-1">
-        <h2 className="text-xs font-bold text-slate-800 dark:text-slate-100">{title}</h2>
-        <span className="text-[10px] text-slate-400">{hint}</span>
+      <div className="mb-1 flex shrink-0 items-center gap-2 px-1">
+        <h2 className="shrink-0 text-xs font-bold text-slate-800 dark:text-slate-100">{title}</h2>
+        {headerExtra}
+        <span className="ml-auto truncate text-[10px] text-slate-400">{hint}</span>
       </div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
     </section>

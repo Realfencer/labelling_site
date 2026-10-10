@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .app_state import ReviewAppState
 from . import core
+from . import completed_topics
 
 COOKIE_NAME = "labeler_sid"
 SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 hours idle
@@ -44,10 +45,27 @@ class SessionManager:
         self._sessions: dict[str, SessionEntry] = {}
         self._listeners: dict[str, set[tuple[asyncio.Event, asyncio.AbstractEventLoop]]] = {}
         self._listeners_lock = threading.Lock()
-        self._shared_skills = core.discover_skills_from_index(
-            core.INDEX_URL,
-            self.review_dir / "score_index_cache",
-        )
+        self._shared_skills = completed_topics.load_merged_skills(self.review_dir)
+
+    def refresh_shared_skills(self) -> list[core.Skill]:
+        """Reload turbo index + Score Studio catalog and sync every open session."""
+        # Build the list outside the lock: it can hit the network (Score Studio) and every
+        # request needs this lock via get_or_create().
+        merged = completed_topics.load_merged_skills(self.review_dir)
+        with self._lock:
+            self._shared_skills = merged
+            for entry in self._sessions.values():
+                state = entry.state
+                previous_path = (
+                    state.active_skill.element_path if state.active_skill is not None else None
+                )
+                state.skills = list(self._shared_skills)
+                if previous_path is not None:
+                    for skill in self._shared_skills:
+                        if skill.element_path == previous_path:
+                            state.active_skill = skill
+                            break
+            return list(self._shared_skills)
 
     def subscribe_event(self, sid: str, event: asyncio.Event, loop: asyncio.AbstractEventLoop) -> None:
         with self._listeners_lock:

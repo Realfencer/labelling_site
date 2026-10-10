@@ -40,6 +40,7 @@ export function boxFromDict(raw: Record<string, unknown>): {
   x2: number;
   y2: number;
   conf?: number;
+  raw_conf?: number;
 } {
   return {
     cls: Number(raw.cls_id ?? raw.cls ?? 0),
@@ -48,6 +49,7 @@ export function boxFromDict(raw: Record<string, unknown>): {
     x2: Number(raw.x2),
     y2: Number(raw.y2),
     conf: raw.conf != null ? Number(raw.conf) : undefined,
+    raw_conf: raw.raw_conf != null ? Number(raw.raw_conf) : undefined,
   };
 }
 

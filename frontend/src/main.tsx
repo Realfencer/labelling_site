@@ -1,19 +1,35 @@
-import { StrictMode, useCallback, useEffect, useState } from "react";
+import { StrictMode, Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes, useParams, useSearchParams } from "react-router-dom";
 import App from "./App";
 import AuthGate from "./components/AuthGate";
-import ChutesBalanceToast from "./components/ChutesBalanceToast";
+import KeysModal from "./components/KeysModal";
+import { useKeys } from "./store/useKeys";
 import TopicsPage from "./TopicsPage";
+const CollectedPage = lazy(() => import("./pages/CollectedPage"));
 import { api, type AuthStatus } from "./api";
 import "./index.css";
 
+/**
+ * /t/<topic>                      Platform
+ * /t/<topic>/own                  Own workspace (as you left it)
+ * /t/<topic>/own/days             Own: the day-selection page
+ * /t/<topic>/own/days/2026-10-07  Own: that day (every day has its own link)
+ * (?workspace=own|platform on /t/<topic> keeps working.) One route with a splat, so moving between these
+ * does not remount the labeler.
+ */
 function LabelerRoute() {
-  const { slug } = useParams();
+  const { slug, "*": rest } = useParams();
   const [searchParams] = useSearchParams();
-  const workspace = searchParams.get("workspace");
   if (!slug) return <Navigate to="/" replace />;
-  return <App topicSlug={slug} initialWorkspace={workspace === "own" || workspace === "platform" ? workspace : undefined} />;
+  const parts = (rest || "").split("/").filter(Boolean);
+  const pathOwn = parts[0] === "own";
+  const q = searchParams.get("workspace");
+  const workspace = pathOwn ? "own" : q === "own" || q === "platform" ? q : undefined;
+  const dayPart = pathOwn && parts[1] === "days" ? parts[2] : undefined;
+  const day = dayPart && /^\d{4}-\d{2}-\d{2}$/.test(dayPart) ? dayPart : undefined;
+  const daysPage = pathOwn && parts[1] === "days" && !day;
+  return <App topicSlug={slug} initialWorkspace={workspace} initialOwnDay={day} ownDaysPage={daysPage} />;
 }
 
 function Root() {
@@ -30,8 +46,6 @@ function Root() {
       setAuth({
         enabled: true,
         authenticated: false,
-        admin_email: "matthewsliger0302@gmail.com",
-        smtp_configured: false,
       });
     }
   }, []);
@@ -40,12 +54,18 @@ function Root() {
     void refreshAuth();
   }, [refreshAuth]);
 
+  // Shared API keys (masked status only) — loaded once we are signed in.
+  const signedIn = Boolean(auth && (!auth.enabled || auth.authenticated));
+  useEffect(() => {
+    if (signedIn) void useKeys.getState().refresh();
+  }, [signedIn]);
+
   useEffect(() => {
     const onNeedAuth = () => {
       setAuth((prev) =>
         prev
           ? { ...prev, authenticated: false, email: null }
-          : { enabled: true, authenticated: false, admin_email: "matthewsliger0302@gmail.com" },
+          : { enabled: true, authenticated: false },
       );
     };
     window.addEventListener("labeler-auth-required", onNeedAuth);
@@ -77,11 +97,19 @@ function Root() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<TopicsPage />} />
+        <Route
+          path="/collected"
+          element={
+            <Suspense fallback={<div className="flex min-h-screen items-center justify-center bg-[#0b1220] text-sm text-slate-400">Loading…</div>}>
+              <CollectedPage />
+            </Suspense>
+          }
+        />
         <Route path="/:slug" element={<LabelerRoute />} />
-        <Route path="/t/:slug" element={<LabelerRoute />} />
+        <Route path="/t/:slug/*" element={<LabelerRoute />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <ChutesBalanceToast />
+      <KeysModal />
     </BrowserRouter>
   );
 }

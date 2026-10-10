@@ -32,6 +32,10 @@ export function setCachedDetail(index: number, detail: ChallengeDetail) {
   }
 }
 
+export function dropCachedDetail(itemKey: string | null | undefined) {
+  if (itemKey) cache.delete(itemKey);
+}
+
 export function clearDetailCache() {
   cache.clear();
 }

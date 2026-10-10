@@ -1,3 +1,4 @@
+import HfPushTarget from "./HfPushTarget";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -9,7 +10,9 @@ import {
   Play,
   Rocket,
   Square,
+  Trash2,
   Trophy,
+  Upload,
   X,
 } from "lucide-react";
 import {
@@ -22,9 +25,11 @@ import {
 } from "../api";
 import EvaluateMergedModal from "./EvaluateMergedModal";
 import type { ChallengeItem } from "../types";
+import { checksFailComplete, checksPassComplete } from "../labelChecks";
 import { cn } from "../lib/utils";
+import ImageSelectionField from "./ImageSelectionField";
 
-const FALLBACK_MIN_REVIEWED = 100;
+const FALLBACK_MIN_REVIEWED = 1;
 
 function formatBytes(n: number | undefined): string {
   if (!n || n <= 0) return "—";
@@ -72,7 +77,7 @@ function ElementTopicCard({
         <Trophy className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
         <div className="min-w-0">
           <div className="font-semibold text-slate-700 dark:text-slate-200">Final compare vs step-4 top miner</div>
-          <div className="text-[10px] text-slate-500">Official HF winner is not used</div>
+          <div className="text-[10px] text-slate-500">Class filter: count only · authors: site-wide store</div>
         </div>
       </div>
       {queries.length > 0 && (
@@ -117,10 +122,12 @@ function ElementTopicCard({
 
 function StepCard({
   step,
+  stepTotal,
   selected,
   onSelect,
 }: {
   step: FindBestJobStep;
+  stepTotal: number;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -128,11 +135,18 @@ function StepCard({
   const active = step.status === "running";
   const failed = step.status === "error";
   const summary = step.summary;
+  const canInspect = done || active || failed || Boolean(summary?.headline || summary?.rows?.length);
 
   return (
     <button
       type="button"
       onClick={onSelect}
+      disabled={!canInspect && step.status === "pending"}
+      title={
+        canInspect
+          ? "Click to inspect this step (stays pinned while later steps run)"
+          : "Waiting for this step to start"
+      }
       className={cn(
         "w-full rounded-xl border px-3 py-2.5 text-left transition",
         selected && "ring-2 ring-sky-400/70",
@@ -140,6 +154,7 @@ function StepCard({
         active && "border-sky-400 bg-sky-50 dark:border-sky-700 dark:bg-sky-950/40",
         failed && "border-rose-300 bg-rose-50 dark:border-rose-800/60 dark:bg-rose-950/30",
         !done && !active && !failed && "border-slate-200 bg-white dark:border-slate-700 dark:bg-ink-900",
+        !canInspect && step.status === "pending" && "cursor-not-allowed opacity-60",
       )}
     >
       <div className="flex items-start gap-2.5">
@@ -156,7 +171,7 @@ function StepCard({
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-[12px] font-bold text-slate-900 dark:text-slate-50">
-            [{step.n}/8] {step.label}
+            [{step.n}/{stepTotal}] {step.label}
           </div>
           {summary?.headline ? (
             <div className="mt-0.5 truncate text-[11px] text-slate-600 dark:text-slate-300">{summary.headline}</div>
@@ -186,14 +201,29 @@ function StepCard({
   );
 }
 
+const FALLBACK_STEP_LABELS = [
+  "Commitments + known-author scan",
+  "Historical unique ONNX snaps",
+  "Download miner packs",
+  "Score packs on GT",
+  "Cluster by ONNX cosine",
+  "N-way soup / merge",
+  "Force top-1 × top-7",
+  "Deep post-process",
+  "Compare vs top scored miner",
+  "Result report",
+];
+
 function StepDetailPanel({
   step,
   liveStep,
+  stepTotal,
   pinned,
   onFollowLive,
 }: {
   step: FindBestJobStep | null;
   liveStep: number;
+  stepTotal: number;
   pinned: boolean;
   onFollowLive: () => void;
 }) {
@@ -211,7 +241,7 @@ function StepDetailPanel({
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              Step {step.n} result
+              Step {step.n}/{stepTotal} result
               {step.status === "done" ? " · complete" : step.status === "running" ? " · live" : ""}
             </div>
             <div className="mt-0.5 text-sm font-extrabold text-slate-900 dark:text-white">{step.label}</div>
@@ -225,7 +255,7 @@ function StepDetailPanel({
               onClick={onFollowLive}
               className="shrink-0 rounded-md border border-sky-300 bg-sky-50 px-2 py-1 text-[10px] font-bold text-sky-700 hover:bg-sky-100 dark:border-sky-700 dark:bg-sky-950/50 dark:text-sky-300"
             >
-              Follow live · {liveStep}/8
+              Follow live · {liveStep}/{stepTotal}
             </button>
           )}
         </div>
@@ -256,16 +286,53 @@ function StepDetailPanel({
           </div>
         ) : (
           <ul className="space-y-1.5">
-            {rows.map((r, i) => (
-              <li
-                key={`${r.title}-${i}`}
-                className="rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-ink-900"
-              >
-                <div className="truncate text-[12px] font-bold text-slate-900 dark:text-slate-50">{r.title}</div>
-                {r.subtitle && <div className="truncate text-[11px] text-slate-500">{r.subtitle}</div>}
-                {r.meta && <div className="mt-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-300">{r.meta}</div>}
-              </li>
-            ))}
+            {rows.map((r, i) => {
+              const hasScore = typeof r.score === "number";
+              const rank = r.rank ?? (hasScore ? i + 1 : null);
+              const bar = typeof r.bar === "number" ? Math.max(0, Math.min(100, r.bar)) : null;
+              return (
+                <li
+                  key={`${r.title}-${i}`}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-700 dark:bg-ink-900"
+                >
+                  <div className="flex items-baseline gap-2">
+                    {rank != null && (
+                      <span className="w-5 shrink-0 text-[10px] font-bold tabular-nums text-slate-400">
+                        {rank}
+                      </span>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <div className="truncate text-[12px] font-bold text-slate-900 dark:text-slate-50">
+                          {r.title}
+                        </div>
+                        {hasScore && (
+                          <div className="shrink-0 text-[12px] font-extrabold tabular-nums text-sky-700 dark:text-sky-300">
+                            {r.score!.toFixed(4)}
+                          </div>
+                        )}
+                      </div>
+                      {r.subtitle && (
+                        <div className="truncate text-[11px] text-slate-500">{r.subtitle}</div>
+                      )}
+                      {bar != null && (
+                        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-sky-500 to-emerald-400"
+                            style={{ width: `${bar}%` }}
+                          />
+                        </div>
+                      )}
+                      {r.meta && (
+                        <div className="mt-0.5 text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+                          {r.meta}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
@@ -296,22 +363,38 @@ export default function FindBestModal({
   const [historyCount, setHistoryCount] = useState(0);
   const [bestScore, setBestScore] = useState<number | null>(null);
   const [paramSource, setParamSource] = useState("defaults");
-  const [days, setDays] = useState("14");
-  const [topK, setTopK] = useState("15");
+  const [authorsStoreCount, setAuthorsStoreCount] = useState<number | null>(null);
+  const [days, setDays] = useState("7");
+  const [topK, setTopK] = useState("30");
   const [minCosine, setMinCosine] = useState("0.9");
   const [fromBlock, setFromBlock] = useState("");
   const [toBlock, setToBlock] = useState("");
   const [quality, setQuality] = useState<"all" | "pass" | "fail">("all");
+  const [picked, setPicked] = useState<string[] | null>(null);
   const [reviewedAvailable, setReviewedAvailable] = useState(reviewedCount);
   const [minReviewed, setMinReviewed] = useState(FALLBACK_MIN_REVIEWED);
   const [job, setJob] = useState<FindBestJob | null>(null);
   const [history, setHistory] = useState<FindBestHistoryEntry[]>([]);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [clearMsg, setClearMsg] = useState("");
   const [error, setError] = useState("");
   const [alarm, setAlarm] = useState("");
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [loadId, setLoadId] = useState<string | null>(null);
+  const [pushFormId, setPushFormId] = useState<string | null>(null);
+  const [pushId, setPushId] = useState<string | null>(null);
+  const [pushAccount, setPushAccount] = useState("");
+  const [pushFull, setPushFull] = useState("");
+  const [pushRepo, setPushRepo] = useState(() => {
+    try {
+      return sessionStorage.getItem("find_best_hf_repo") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [pushMsg, setPushMsg] = useState("");
   const [evalEntry, setEvalEntry] = useState<FindBestHistoryEntry | null>(null);
   const [selectedStep, setSelectedStep] = useState<number>(1);
   /** When set, keep showing this step even while a later step runs. */
@@ -340,9 +423,9 @@ export default function FindBestModal({
   const hi = Math.max(rawLo, rawHi);
   const span = Math.max(1, maxBlock - minBlock);
   const inRange = labeled.filter((c) => c.block >= lo && c.block <= hi);
-  const passCount = inRange.filter((c) => c.checks_passed === 3).length;
-  const failCount = inRange.filter((c) => c.checks_passed === 0).length;
-  const selectedCount = quality === "pass" ? passCount : quality === "fail" ? failCount : inRange.length;
+  const passCount = inRange.filter((c) => checksPassComplete(c)).length;
+  const failCount = inRange.filter((c) => checksFailComplete(c)).length;
+  const selectedCount = picked ? picked.length : quality === "pass" ? passCount : quality === "fail" ? failCount : inRange.length;
   const hist = useMemo(() => {
     const bins = new Array(48).fill(0);
     for (const c of labeled) {
@@ -383,6 +466,7 @@ export default function FindBestModal({
       setHistoryCount(data.history_count ?? (data.history || []).length);
       setBestScore(typeof data.best_score === "number" ? data.best_score : null);
       setParamSource(data.param_source || "defaults");
+      if (typeof data.authors_store_count === "number") setAuthorsStoreCount(data.authors_store_count);
       if (data.days != null) setDays(String(data.days));
       if (data.top_k != null) setTopK(String(data.top_k));
       if (data.min_cosine != null) setMinCosine(String(data.min_cosine));
@@ -428,6 +512,7 @@ export default function FindBestModal({
       const isRunning = live?.status === "running" || live?.status === "queued";
       if (!isRunning) {
         setQuality("all");
+        setPicked(null);
         setFromBlock("");
         setToBlock("");
       }
@@ -474,6 +559,30 @@ export default function FindBestModal({
     return () => window.clearInterval(t);
   }, [open, job?.status, pinnedStep, viewSource]);
 
+  const clearHistoryDisk = async () => {
+    if (clearBusy) return;
+    const ok = window.confirm(
+      "Clear Find Best history and pipeline run files?\n\n" +
+        "This frees large disk usage (runs/soups). Active running jobs are kept.\n" +
+        "Labels and Own images are never deleted.",
+    );
+    if (!ok) return;
+    setClearBusy(true);
+    setClearMsg("");
+    try {
+      const res = await api.clearFindBestHistory();
+      setHistory([]);
+      setSelectedHistoryId(null);
+      setHistoryProgress(null);
+      setHistoryCount(0);
+      setClearMsg(`Freed ${res.freed_human || "disk"} · removed ${res.runs_removed ?? 0} runs + ${res.history_removed ?? 0} history packs`);
+    } catch (e) {
+      setClearMsg(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setClearBusy(false);
+    }
+  };
+
   const topicHistory = useMemo(() => {
     return history.filter((h) => {
       const a = (h.element || "").trim().toLowerCase().replace(/-/g, " ");
@@ -489,24 +598,17 @@ export default function FindBestModal({
   const displayJob = viewingHistory ? historyProgress : job;
 
   const steps: FindBestJobStep[] = useMemo(() => {
-    if (displayJob?.steps?.length === 8) return displayJob.steps;
-    return Array.from({ length: 8 }, (_, i) => ({
+    const fromJob = displayJob?.steps;
+    if (fromJob && fromJob.length > 0) return fromJob;
+    return Array.from({ length: FALLBACK_STEP_LABELS.length }, (_, i) => ({
       n: i + 1,
-      label: [
-        "Scan Hugging Face models",
-        "Filter structure + class match",
-        "Download miner packs",
-        "Score packs on GT",
-        "Cluster by ONNX cosine",
-        "N-way soup / merge",
-        "Deep post-process",
-        "Compare vs top scored miner",
-      ][i],
-      status: "pending",
+      label: FALLBACK_STEP_LABELS[i],
+      status: "pending" as const,
       summary: null,
     }));
   }, [displayJob?.steps]);
 
+  const stepTotal = steps.length || FALLBACK_STEP_LABELS.length;
   const activeStep = steps.find((s) => s.n === selectedStep) || steps[0] || null;
   const liveStepN = viewingHistory ? displayJob?.step ?? 0 : job?.step ?? 0;
   const isPinnedAway = !viewingHistory && pinnedStep !== null && liveStepN > 0 && pinnedStep !== liveStepN;
@@ -548,13 +650,14 @@ export default function FindBestModal({
     try {
       const res = await api.startFindBest({
         element: element.trim(),
-        days: Number(days) || 14,
-        top_k: Number(topK) || 15,
+        days: Number(days) || 7,
+        top_k: Number(topK) || 30,
         min_cosine: Number(minCosine) || 0.9,
-        n_images: ownMode ? inRange.length : selectedCount,
+        n_images: picked ? picked.length : ownMode ? inRange.length : selectedCount,
         blockMin: lo,
         blockMax: hi,
-        quality: ownMode ? "all" : quality,
+        itemKeys: picked ?? undefined,
+        quality: ownMode || picked ? "all" : quality,
       });
       setJob(res.job);
       setViewSource("live");
@@ -574,7 +677,7 @@ export default function FindBestModal({
         if (live && (live.status === "running" || live.status === "queued")) {
           setError("");
           setAlarm(
-            `Pipeline already running (step ${live.step || "?"}/8). Progress below — use Stop to cancel.`,
+            `Pipeline already running (step ${live.step || "?"}/${stepTotal}). Progress below — use Stop to cancel.`,
           );
         } else {
           setError(msg);
@@ -624,6 +727,35 @@ export default function FindBestModal({
       setError(String(e));
     } finally {
       setLoadId(null);
+    }
+  };
+
+  const pushToHf = async (id: string) => {
+    const repo = pushFull.trim();
+    if (!repo) {
+      setError("Choose a Hugging Face account and a repo name");
+      return;
+    }
+    setPushId(id);
+    setError("");
+    setPushMsg("");
+    try {
+      try {
+        sessionStorage.setItem("find_best_hf_repo", pushRepo.trim());
+      } catch {
+        /* ignore */
+      }
+      const res = await api.pushFindBestToHf(id, { token: "", repo });
+      setPushMsg(
+        res.created
+          ? `Created and pushed → ${res.url}`
+          : `Updated → ${res.url}`,
+      );
+      setPushFormId(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPushId(null);
     }
   };
 
@@ -680,12 +812,12 @@ export default function FindBestModal({
               {topicMismatch ? (
                 <>
                   Merge running for <span className="font-bold">{job?.element || "another topic"}</span> (step{" "}
-                  {liveStepN || "?"}/8) while you are on <span className="font-bold">{element || defaultElement}</span>.
+                  {liveStepN || "?"}/{stepTotal}) while you are on <span className="font-bold">{element || defaultElement}</span>.
                   Progress below still updates. Labeling may feel slow until the merge finishes.
                 </>
               ) : (
                 <>
-                  Merge running — step {liveStepN || "?"}/8. Labeling may feel slow until this finishes.
+                  Merge running — step {liveStepN || "?"}/{stepTotal}. Labeling may feel slow until this finishes.
                 </>
               )}
             </div>
@@ -701,6 +833,11 @@ export default function FindBestModal({
               bestScore={bestScore}
               paramSource={paramSource}
             />
+            {authorsStoreCount != null && (
+              <p className="text-xs text-zinc-500 mt-1">
+                Known SN44 authors: {authorsStoreCount} (shared across topics; class filter = count only)
+              </p>
+            )}
 
             <div className="grid grid-cols-2 gap-2">
               <label className="block">
@@ -713,7 +850,9 @@ export default function FindBestModal({
                 />
               </label>
               <label className="block">
-                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Top-k</span>
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                  Top-k (merge)
+                </span>
                 <input
                   value={topK}
                   onChange={(e) => setTopK(e.target.value)}
@@ -734,6 +873,8 @@ export default function FindBestModal({
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 dark:border-slate-700 dark:bg-ink-950">
               <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">GT images for merge</div>
+              <ImageSelectionField suggest={inRange.map((c) => c.item_key)} challenges={challenges} ownMode={ownMode} value={picked} onChange={setPicked} verb="use" minCount={minReviewed} disabled={running} className="mb-2" />
+              <div className={cn(picked && "pointer-events-none opacity-40")}>
               <div className="mb-2 flex h-8 items-end gap-px">
                 {hist.map((h, i) => {
                   const binLo = minBlock + (i / 48) * span;
@@ -818,9 +959,12 @@ export default function FindBestModal({
                   ))}
                 </div>
               )}
+              </div>
               <div className="mt-2 text-[11px] text-slate-500">
-                Will use <span className="font-bold tabular-nums text-slate-800 dark:text-slate-100">{ownMode ? inRange.length : selectedCount}</span> images
-                {ownMode
+                Will use <span className="font-bold tabular-nums text-slate-800 dark:text-slate-100">{picked ? picked.length : ownMode ? inRange.length : selectedCount}</span> images
+                {picked
+                  ? " · hand-picked"
+                  : ownMode
                   ? " · every Done in range"
                   : quality === "pass"
                     ? " · R1–R3 all close to p"
@@ -831,7 +975,7 @@ export default function FindBestModal({
             </div>
 
             <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
-              Same picker as Download labels. Requires at least {minReviewed} selected Done images before start.
+              Same picker as Download labels. Uses every selected Done image in range (no max cap).
             </p>
 
             {belowMin && !running && (
@@ -895,8 +1039,23 @@ export default function FindBestModal({
             )}
 
             <div className="min-h-0 flex-1">
-              <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Merged model history</h3>
-              <p className="mb-1.5 text-[10px] text-slate-400">Click a run to inspect its 8-step merge progress.</p>
+              <div className="mb-1.5 flex items-center gap-2">
+                <h3 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Merged model history</h3>
+                <button
+                  type="button"
+                  disabled={clearBusy}
+                  onClick={() => void clearHistoryDisk()}
+                  className="ml-auto inline-flex items-center gap-1 rounded-md border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900/50 dark:text-rose-300 dark:hover:bg-rose-950/40"
+                  title="Delete Find Best history + pipeline run intermediates to free disk"
+                >
+                  {clearBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                  Clear history
+                </button>
+              </div>
+              <p className="mb-1.5 text-[10px] text-slate-400">Click a run to inspect its merge pipeline progress.</p>
+              {clearMsg && (
+                <p className="mb-1.5 text-[10px] text-slate-600 dark:text-slate-300">{clearMsg}</p>
+              )}
               <ul className="max-h-52 space-y-1.5 overflow-auto">
                 {topicHistory.length === 0 && <li className="text-[11px] text-slate-400">No merged models yet for this topic.</li>}
                 {topicHistory.map((h) => (
@@ -919,11 +1078,14 @@ export default function FindBestModal({
                       >
                         <div className="flex items-center gap-1.5">
                           {loadingHistoryId === h.id && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-500" />}
-                          <div className="truncate font-semibold text-slate-800 dark:text-slate-100">{h.element}</div>
+                          <div className="truncate font-semibold text-slate-800 dark:text-slate-100">
+                            {h.label || h.element}
+                          </div>
                         </div>
                         <div className="truncate text-slate-500">
                           {formatHistoryWhen(h.created_at)}
                           {h.score != null && ` · ${Number(h.score).toFixed(4)}`}
+                          {h.label ? ` · ${h.element}` : ""}
                           {` · ${formatBytes(h.onnx_size)}`}
                         </div>
                       </button>
@@ -957,11 +1119,60 @@ export default function FindBestModal({
                           <Download className="h-3 w-3" />
                           {downloadId === h.id ? "…" : "ZIP"}
                         </button>
+                        <button
+                          type="button"
+                          disabled={!h.has_onnx || pushId === h.id}
+                          onClick={() => {
+                            setPushMsg("");
+                            setPushFormId((cur) => (cur === h.id ? null : h.id));
+                          }}
+                          className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-800 disabled:opacity-40 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                          title="Push ship pack to Hugging Face"
+                        >
+                          <Upload className="h-3 w-3" />
+                          {pushId === h.id ? "…" : "Push"}
+                        </button>
                       </div>
                     </div>
+                    {pushFormId === h.id && (
+                      <div className="mt-2 space-y-1.5 rounded-md border border-amber-200/80 bg-amber-50/60 p-2 dark:border-amber-900 dark:bg-amber-950/30">
+                        <HfPushTarget
+                          accountId={pushAccount}
+                          repoName={pushRepo}
+                          onChange={(v) => {
+                            setPushAccount(v.accountId);
+                            setPushRepo(v.repoName);
+                            setPushFull(v.repo);
+                          }}
+                        />
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setPushFormId(null)}
+                            className="rounded px-2 py-0.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            disabled={pushId === h.id || !pushFull.trim()}
+                            onClick={() => void pushToHf(h.id)}
+                            className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900 disabled:opacity-40 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-100"
+                          >
+                            <Upload className="h-3 w-3" />
+                            {pushId === h.id ? "Pushing…" : "Push to HF"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
+              {pushMsg && (
+                <p className="mt-1.5 truncate text-[10px] font-medium text-emerald-700 dark:text-emerald-300" title={pushMsg}>
+                  {pushMsg}
+                </p>
+              )}
             </div>
           </div>
 
@@ -1006,7 +1217,7 @@ export default function FindBestModal({
                   {displayJob && (
                     <span className="text-[10px] font-semibold text-slate-500">
                       {displayJob.status}
-                      {displayJob.step > 0 ? ` · ${displayJob.step}/8` : ""}
+                      {displayJob.step > 0 ? ` · ${displayJob.step}/${stepTotal}` : ""}
                     </span>
                   )}
                 </div>
@@ -1014,13 +1225,14 @@ export default function FindBestModal({
               <p className="mb-2 text-[10px] text-slate-400">
                 {viewingHistory
                   ? "Click any step to inspect that merge stage for this saved run."
-                  : "Click any finished step to inspect its results while later steps run."}
+                  : "Click any finished step to inspect its results — it stays pinned while later steps run."}
               </p>
               <div className="min-h-0 flex-1 space-y-1.5 overflow-auto pr-1">
                 {steps.map((s) => (
                   <StepCard
                     key={s.n}
                     step={s}
+                    stepTotal={stepTotal}
                     selected={selectedStep === s.n}
                     onSelect={() => selectStep(s.n, s.status)}
                   />
@@ -1030,6 +1242,7 @@ export default function FindBestModal({
             <StepDetailPanel
               step={activeStep}
               liveStep={liveStepN}
+              stepTotal={stepTotal}
               pinned={viewingHistory ? false : isPinnedAway}
               onFollowLive={followLive}
             />
@@ -1039,7 +1252,7 @@ export default function FindBestModal({
       <EvaluateMergedModal
         open={evalEntry != null}
         historyId={evalEntry?.id || ""}
-        title={evalEntry?.element || "merged model"}
+        title={evalEntry?.label || evalEntry?.element || "merged model"}
         score={evalEntry?.score}
         onClose={() => setEvalEntry(null)}
       />

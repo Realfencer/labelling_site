@@ -5,6 +5,8 @@ export interface DetectionBox {
   x2: number;
   y2: number;
   conf?: number | null;
+  /** The network's own confidence before the miner's gate / cluster boost (display only). */
+  raw_conf?: number | null;
 }
 
 export interface ChallengeItem {
@@ -19,11 +21,14 @@ export interface ChallengeItem {
   item_key: string;
   /** File mtime (ns) — busts image URL caches when Own pixels change. */
   media_rev?: number;
+  /** Own: YOLO label file exists (SAM3 draft or Done). */
+  has_label?: boolean;
   image_width?: number;
   image_height?: number;
   top_boxes?: Record<string, unknown>[];
   cached_left_boxes?: Record<string, unknown>[];
   checks_passed?: number | null;
+  checks_total?: number | null;
   checks?: { r1?: boolean | null; r2?: boolean | null; r3?: boolean | null } | null;
   checks_kind?: string;
 }
@@ -75,6 +80,8 @@ export interface AppState {
   status: string;
   review_mode: string;
   workspace?: "platform" | "own";
+  /** Own calendar-day cluster (YYYY-MM-DD); null/undefined = day-list mode. */
+  own_day?: string | null;
   project_id: string;
   project_root: string;
   session_id?: string | null;
@@ -91,6 +98,8 @@ export interface AppState {
   metrics: WorkspaceMetrics;
   platform_metrics?: WorkspaceMetrics;
   own_metrics?: WorkspaceMetrics;
+  /** Day-scoped metrics when own_day is set. */
+  own_day_metrics?: WorkspaceMetrics;
   challenges: ChallengeItem[];
   current_index: number;
   collect: { running: boolean; message: string };

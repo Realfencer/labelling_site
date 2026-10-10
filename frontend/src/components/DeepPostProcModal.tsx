@@ -1,14 +1,17 @@
+import HfPushTarget from "./HfPushTarget";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronRight,
   Download,
   FlaskConical,
+  History,
   ImagePlus,
   Loader2,
   Sparkles,
   Square,
   Swords,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -16,11 +19,15 @@ import {
   api,
   type DppCompareResult,
   type DppEvalImageResult,
+  type DppHistoryEntry,
   type DppJob,
 } from "../api";
+import EvaluateMergedModal from "./EvaluateMergedModal";
 import type { ChallengeItem, DetectionBox } from "../types";
+import { checksFailComplete, checksPassComplete } from "../labelChecks";
 import { colorForClass } from "../utils/colors";
 import { cn } from "../lib/utils";
+import ImageSelectionField from "./ImageSelectionField";
 
 const HIST_BINS = 48;
 const IMAGE_RE = /\.(jpe?g|png|webp|bmp)$/i;
@@ -29,14 +36,32 @@ const WEIGHT_RE = /\.(onnx|pt)$/i;
 type Tab = "process" | "compare" | "image";
 type Quality = "all" | "pass" | "fail";
 
+function formatBytes(n: number | undefined): string {
+  if (!n || n <= 0) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatHistoryWhen(iso: string | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch {
+    return iso.length > 19 ? iso.slice(0, 19) : iso;
+  }
+}
+
 function MetricPill({
   label,
   value,
   tone = "slate",
+  hint,
 }: {
   label: string;
   value: string;
   tone?: "slate" | "emerald" | "rose" | "sky" | "amber";
+  hint?: string;
 }) {
   const tones = {
     slate: "border-slate-200 bg-white text-slate-800 dark:border-slate-700 dark:bg-ink-950 dark:text-slate-100",
@@ -49,6 +74,7 @@ function MetricPill({
     <div className={cn("rounded-xl border px-3 py-2", tones[tone])}>
       <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
       <div className="mt-0.5 font-mono text-lg font-black tabular-nums leading-none">{value}</div>
+      {hint && <div className="mt-1 text-[9px] font-semibold leading-tight opacity-70">{hint}</div>}
     </div>
   );
 }
@@ -100,7 +126,7 @@ function OverlaySide({
           ctx.lineWidth = Math.max(2, Math.round(w / 380));
           ctx.strokeRect(x1, y1, bw, bh);
           const name = classNames[box.cls] ?? `cls ${box.cls}`;
-          const label = box.conf != null ? `${name} ${Math.round(box.conf * 100)}%` : name;
+          const label = (box.raw_conf ?? box.conf) != null ? `${name} ${Math.round(((box.raw_conf ?? box.conf) as number) * 100)}%` : name;
           const fontPx = Math.max(10, Math.round(w / 72));
           ctx.font = `600 ${fontPx}px Inter, Segoe UI, sans-serif`;
           const tw = ctx.measureText(label).width;
@@ -151,11 +177,32 @@ export default function DeepPostProcModal({
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [quality, setQuality] = useState<Quality>("all");
+  const [picked, setPicked] = useState<string[] | null>(null);
   const [hfRepo, setHfRepo] = useState("Alexei999/carwash004");
   const [compare, setCompare] = useState<DppCompareResult | null>(null);
   const [imgFile, setImgFile] = useState<File | null>(null);
   const [imgResult, setImgResult] = useState<DppEvalImageResult | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [history, setHistory] = useState<DppHistoryEntry[]>([]);
+  const [topicSlug, setTopicSlug] = useState("");
+  const [historyDownloadId, setHistoryDownloadId] = useState("");
+  const [historyLoadId, setHistoryLoadId] = useState("");
+  const [clearBusy, setClearBusy] = useState(false);
+  const [clearMsg, setClearMsg] = useState("");
+  const [pushFormId, setPushFormId] = useState<string | null>(null);
+  const [pushId, setPushId] = useState<string | null>(null);
+  const [pushAccount, setPushAccount] = useState("");
+  const [pushFull, setPushFull] = useState("");
+  const [pushRepo, setPushRepo] = useState(() => {
+    try {
+      return sessionStorage.getItem("find_best_hf_repo") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [pushMsg, setPushMsg] = useState("");
+  const [evalEntry, setEvalEntry] = useState<DppHistoryEntry | null>(null);
 
   const labeled = useMemo(
     () => challenges.filter((c) => c.loaded && c.reviewed),
@@ -178,21 +225,80 @@ export default function DeepPostProcModal({
     setFrom(minBlock ? String(minBlock) : "");
     setTo(maxBlock ? String(maxBlock) : "");
     setQuality("all");
-    void api.dppDefaults().then((d) => setMinGt(d.min_gt)).catch(() => undefined);
+    setPicked(null);
+    void api
+      .dppDefaults()
+      .then((d) => {
+        setMinGt(d.min_gt);
+        setTopicSlug(d.topic_slug || "");
+      })
+      .catch(() => undefined);
+    void api
+      .dppHistory()
+      .then((res) => {
+        setHistory(res.history || []);
+        setTopicSlug(res.topic_slug || "");
+      })
+      .catch(() => setHistory([]));
   }, [open, minBlock, maxBlock]);
 
   // Poll while running
   useEffect(() => {
     if (!open || !job?.id) return;
     if (job.status !== "running" && job.status !== "comparing") return;
+    // One status request at a time: while the server is busy with the search itself, a new request every
+    // 0.8 s only piles up. A slow/timed-out check is normal then — keep trying quietly, and clear a
+    // "timed out" banner as soon as a check goes through.
+    let inflight = false;
     const t = window.setInterval(() => {
+      if (inflight) return;
+      inflight = true;
       void api
         .dppStatus(job.id)
-        .then((r) => setJob(r.job))
-        .catch(() => undefined);
-    }, 1500);
+        .then((r) => {
+          setJob(r.job);
+          setError((cur) => (/timed out|Lost connection/i.test(cur) ? "" : cur));
+        })
+        .catch((e) => {
+          const msg = String(e).replace(/^Error:\s*/i, "");
+          if (!/timed out|Failed to fetch|NetworkError|aborted/i.test(msg)) setError(msg || "Lost connection to job status");
+        })
+        .finally(() => {
+          inflight = false;
+        });
+    }, 800);
     return () => window.clearInterval(t);
   }, [open, job?.id, job?.status]);
+
+  useEffect(() => {
+    if (!open || job?.status !== "done") return;
+    void api
+      .dppHistory()
+      .then((res) => setHistory(res.history || []))
+      .catch(() => undefined);
+  }, [open, job?.status, job?.id]);
+
+  const clearHistoryDisk = async () => {
+    if (clearBusy) return;
+    const ok = window.confirm(
+      "Clear Deep Post-Process history on disk?\n\n" +
+        "Deletes finished DPP job folders. Running jobs are kept.\n" +
+        "Labels and Own images are never deleted.",
+    );
+    if (!ok) return;
+    setClearBusy(true);
+    setClearMsg("");
+    try {
+      const res = await api.dppClearHistory(job?.id);
+      const hist = await api.dppHistory().catch(() => ({ history: [] as typeof history }));
+      setHistory(hist.history || []);
+      setClearMsg(`Freed ${res.freed_human || "disk"} · removed ${res.removed ?? 0} jobs`);
+    } catch (e) {
+      setClearMsg(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setClearBusy(false);
+    }
+  };
 
   const fromN = Number(from);
   const toN = Number(to);
@@ -202,9 +308,10 @@ export default function DeepPostProcModal({
   const hi = Math.max(rawLo, rawHi);
   const span = Math.max(1, maxBlock - minBlock);
   const inRange = labeled.filter((c) => c.block >= lo && c.block <= hi);
-  const passCount = inRange.filter((c) => c.checks_passed === 3).length;
-  const failCount = inRange.filter((c) => c.checks_passed === 0).length;
-  const count = quality === "pass" ? passCount : quality === "fail" ? failCount : inRange.length;
+  const passCount = inRange.filter((c) => checksPassComplete(c)).length;
+  const failCount = inRange.filter((c) => checksFailComplete(c)).length;
+  const rangeCount = quality === "pass" ? passCount : quality === "fail" ? failCount : inRange.length;
+  const count = picked ? picked.length : rangeCount;
 
   const hist = useMemo(() => {
     const bins = new Array(HIST_BINS).fill(0);
@@ -245,7 +352,8 @@ export default function DeepPostProcModal({
         job_id: job.id,
         block_min: lo,
         block_max: hi,
-        quality,
+        item_keys: picked ?? undefined,
+        quality: picked ? "all" : quality,
         n_images: 0,
       });
       setJob(res.job);
@@ -266,7 +374,8 @@ export default function DeepPostProcModal({
         hf_repo: hfRepo.trim(),
         block_min: lo,
         block_max: hi,
-        quality,
+        item_keys: picked ?? undefined,
+        quality: picked ? "all" : quality,
       });
       setJob(res.job);
       setCompare(res.compare);
@@ -302,6 +411,74 @@ export default function DeepPostProcModal({
 
   const verified = Boolean(job?.verify?.ok);
   const shipReady = Boolean(job?.ship_ready);
+
+  const downloadShip = async () => {
+    if (!job?.id) return;
+    setDownloadBusy(true);
+    setError("");
+    try {
+      await api.dppDownload(job.id);
+      await new Promise((r) => window.setTimeout(r, 400));
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setDownloadBusy(false);
+    }
+  };
+
+  const downloadHistory = async (id: string) => {
+    setHistoryDownloadId(id);
+    setError("");
+    try {
+      await api.dppDownload(id);
+      // Native <a download> returns immediately; brief busy state for click feedback.
+      await new Promise((r) => window.setTimeout(r, 400));
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setHistoryDownloadId("");
+    }
+  };
+
+  const loadHistoryJob = async (id: string) => {
+    setHistoryLoadId(id);
+    setError("");
+    try {
+      const res = await api.dppStatus(id);
+      setJob(res.job);
+      setCompare(res.job.compare || null);
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setHistoryLoadId("");
+    }
+  };
+
+  const pushToHf = async (id: string) => {
+    const repo = pushFull.trim();
+    if (!repo) {
+      setError("Choose a Hugging Face account and a repo name");
+      return;
+    }
+    setPushId(id);
+    setError("");
+    setPushMsg("");
+    try {
+      try {
+        sessionStorage.setItem("find_best_hf_repo", pushRepo.trim());
+      } catch {
+        /* ignore */
+      }
+      const res = await api.dppPushToHf(id, { token: "", repo });
+      setPushMsg(res.created ? `Created and pushed → ${res.url}` : `Updated → ${res.url}`);
+      setPushFormId(null);
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/i, ""));
+    } finally {
+      setPushId(null);
+    }
+  };
+
   const running = job?.status === "running" || job?.status === "comparing";
   const delta =
     job?.baseline_score && job?.postproc?.final_live
@@ -431,7 +608,8 @@ export default function DeepPostProcModal({
                 </div>
               )}
 
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 pb-3 pt-3 dark:border-slate-700 dark:bg-ink-950">
+              <ImageSelectionField suggest={inRange.map((c) => c.item_key)} challenges={challenges} ownMode={ownMode} value={picked} onChange={setPicked} verb="use" minCount={minGt} disabled={running} />
+              <div className={cn("rounded-xl border border-slate-200 bg-slate-50 px-3 pb-3 pt-3 dark:border-slate-700 dark:bg-ink-950", picked && "pointer-events-none opacity-40")}>
                 <div className="mb-2 flex h-8 items-end gap-px">
                   {hist.map((h, i) => {
                     const binLo = minBlock + (i / HIST_BINS) * span;
@@ -483,13 +661,13 @@ export default function DeepPostProcModal({
                     ))}
                   </div>
                 )}
-                <p className="mt-2 text-[11px] text-slate-500">
-                  {ownMode ? inRange.length : count} Done images in range · need ≥{minGt} for deep post-process
-                </p>
               </div>
+              <p className="text-[11px] text-slate-500">
+                {picked ? `${picked.length} hand-picked images` : `${ownMode ? inRange.length : count} Done images in range`} · need ≥{minGt} for deep post-process
+              </p>
 
               {(job?.baseline_score || job?.postproc) && (
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                   <MetricPill label="Before" value={job.baseline_score?.score != null ? Number(job.baseline_score.score).toFixed(4) : "—"} />
                   <MetricPill
                     label="After"
@@ -508,6 +686,26 @@ export default function DeepPostProcModal({
                     tone={delta != null && delta >= 0 ? "emerald" : "rose"}
                   />
                   <MetricPill label="mAP50" value={job.postproc?.map50 != null ? Number(job.postproc.map50).toFixed(4) : "—"} tone="sky" />
+                  <MetricPill
+                    label="p95 lat"
+                    value={
+                      job.postproc?.latency?.p95_ms != null
+                        ? `${Number(job.postproc.latency.p95_ms).toFixed(0)}ms`
+                        : "—"
+                    }
+                    hint={
+                      job.postproc?.latency?.normalized
+                        ? `idle-equivalent · measured ${Number(job.postproc.latency.p95_raw_ms).toFixed(0)}ms while busy (winner ${Number(job.postproc.latency.ref_ms).toFixed(0)}ms)`
+                        : undefined
+                    }
+                    tone={
+                      job.postproc?.latency?.passed === true
+                        ? "emerald"
+                        : job.postproc?.latency?.passed === false
+                          ? "rose"
+                          : "amber"
+                    }
+                  />
                 </div>
               )}
 
@@ -517,6 +715,180 @@ export default function DeepPostProcModal({
                   {job.message}
                 </div>
               )}
+
+              {running && job?.progress && (
+                <div className="rounded-xl border border-violet-200 bg-violet-50/80 px-3 py-3 dark:border-violet-800 dark:bg-violet-950/30">
+                  <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px] font-semibold text-violet-800 dark:text-violet-200">
+                    <span className="truncate">
+                      Live search
+                      {job.progress.style ? ` · ${job.progress.style}` : ""}
+                      {job.progress.phase ? ` · ${job.progress.phase}` : ""}
+                    </span>
+                    <span className="shrink-0 font-mono tabular-nums">
+                      {job.progress.trial ?? 0}/{job.progress.total ?? "?"}
+                      {job.progress.pct != null ? ` · ${Number(job.progress.pct).toFixed(0)}%` : ""}
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-violet-200/80 dark:bg-violet-900/60">
+                    <div
+                      className="h-full rounded-full bg-violet-500 transition-[width] duration-300 ease-out dark:bg-violet-400"
+                      style={{ width: `${Math.max(2, Math.min(100, Number(job.progress.pct) || 0))}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <div className="rounded-lg border border-violet-200/80 bg-white/80 px-2 py-1.5 dark:border-violet-800 dark:bg-ink-950/60">
+                      <div className="text-[9px] font-bold uppercase tracking-wider text-violet-500">Trial score</div>
+                      <div className="font-mono text-sm font-black tabular-nums text-slate-800 dark:text-slate-100">
+                        {job.progress.score != null ? Number(job.progress.score).toFixed(4) : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-emerald-200/80 bg-white/80 px-2 py-1.5 dark:border-emerald-800 dark:bg-ink-950/60">
+                      <div className="text-[9px] font-bold uppercase tracking-wider text-emerald-600">Best so far</div>
+                      <div className="font-mono text-sm font-black tabular-nums text-emerald-700 dark:text-emerald-300">
+                        {job.progress.best != null ? Number(job.progress.best).toFixed(4) : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-sky-200/80 bg-white/80 px-2 py-1.5 dark:border-sky-800 dark:bg-ink-950/60">
+                      <div className="text-[9px] font-bold uppercase tracking-wider text-sky-600">mAP50</div>
+                      <div className="font-mono text-sm font-black tabular-nums text-slate-800 dark:text-slate-100">
+                        {job.progress.map50 != null ? Number(job.progress.map50).toFixed(4) : "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-3 dark:border-slate-700 dark:bg-ink-950">
+                <div className="mb-1.5 flex items-center gap-2">
+                  <History className="h-3.5 w-3.5 text-violet-500" />
+                  <h3 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    Post-process history{topicSlug ? ` · ${topicSlug}` : ""}
+                  </h3>
+                  <button
+                    type="button"
+                    disabled={clearBusy}
+                    onClick={() => void clearHistoryDisk()}
+                    className="ml-auto inline-flex items-center gap-1 rounded-md border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900/50 dark:text-rose-300"
+                    title="Delete finished deep-pp jobs to free disk"
+                  >
+                    {clearBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                    Clear history
+                  </button>
+                </div>
+                <p className="mb-2 text-[10px] text-slate-400">
+                  Eval, push to HF, or download ship packs from earlier deep post-process runs for this topic.
+                </p>
+                {clearMsg && <p className="mb-2 text-[10px] text-slate-600 dark:text-slate-300">{clearMsg}</p>}
+                <ul className="max-h-52 space-y-1.5 overflow-auto">
+                  {history.length === 0 && (
+                    <li className="text-[11px] text-slate-400">No completed post-process runs yet for this topic.</li>
+                  )}
+                  {history.map((h) => (
+                    <li
+                      key={h.id}
+                      className={cn(
+                        "rounded-lg border px-2.5 py-2 text-[11px]",
+                        job?.id === h.id
+                          ? "border-violet-400 bg-violet-50 ring-1 ring-violet-300 dark:border-violet-700 dark:bg-violet-950/30 dark:ring-violet-800"
+                          : "border-slate-200 dark:border-slate-700",
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          disabled={historyLoadId === h.id}
+                          onClick={() => void loadHistoryJob(h.id)}
+                          className="min-w-0 flex-1 text-left disabled:opacity-60"
+                          title="Load this run in the modal"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            {historyLoadId === h.id && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-violet-500" />}
+                            <div className="truncate font-mono font-semibold text-slate-800 dark:text-slate-100">{h.id}</div>
+                          </div>
+                          <div className="truncate text-slate-500">
+                            {formatHistoryWhen(h.updated_at)}
+                            {h.score != null && ` · ${Number(h.score).toFixed(4)}`}
+                            {h.delta != null && ` · Δ ${h.delta >= 0 ? "+" : ""}${Number(h.delta).toFixed(4)}`}
+                            {` · ${formatBytes(h.onnx_size)}`}
+                            {h.n_gt ? ` · ${h.n_gt} imgs` : ""}
+                          </div>
+                        </button>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={!h.has_ship}
+                            onClick={() => setEvalEntry(h)}
+                            className="inline-flex items-center gap-1 rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 font-semibold text-violet-700 disabled:opacity-40 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300"
+                            title="Evaluate on uploaded test images"
+                          >
+                            <FlaskConical className="h-3 w-3" />
+                            Eval
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!h.has_ship || historyDownloadId === h.id}
+                            onClick={() => void downloadHistory(h.id)}
+                            className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-semibold text-emerald-700 disabled:opacity-40 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                            title="Download ship zip"
+                          >
+                            <Download className="h-3 w-3" />
+                            {historyDownloadId === h.id ? "…" : "ZIP"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!h.has_ship || pushId === h.id}
+                            onClick={() => {
+                              setPushMsg("");
+                              setPushFormId((cur) => (cur === h.id ? null : h.id));
+                            }}
+                            className="inline-flex items-center gap-1 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-semibold text-amber-800 disabled:opacity-40 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                            title="Push ship pack to Hugging Face"
+                          >
+                            <Upload className="h-3 w-3" />
+                            {pushId === h.id ? "…" : "Push"}
+                          </button>
+                        </div>
+                      </div>
+                      {pushFormId === h.id && (
+                        <div className="mt-2 space-y-1.5 rounded-md border border-amber-200/80 bg-amber-50/60 p-2 dark:border-amber-900 dark:bg-amber-950/30">
+                          <HfPushTarget
+                            accountId={pushAccount}
+                            repoName={pushRepo}
+                            onChange={(v) => {
+                              setPushAccount(v.accountId);
+                              setPushRepo(v.repoName);
+                              setPushFull(v.repo);
+                            }}
+                          />
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPushFormId(null)}
+                              className="rounded px-2 py-0.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              disabled={pushId === h.id || !pushFull.trim()}
+                              onClick={() => void pushToHf(h.id)}
+                              className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900 disabled:opacity-40 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-100"
+                            >
+                              <Upload className="h-3 w-3" />
+                              {pushId === h.id ? "Pushing…" : "Push to HF"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {pushMsg && (
+                  <p className="mt-1.5 truncate text-[10px] font-medium text-emerald-700 dark:text-emerald-300" title={pushMsg}>
+                    {pushMsg}
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
@@ -687,16 +1059,25 @@ export default function DeepPostProcModal({
             {shipReady && (
               <button
                 type="button"
-                onClick={() => job?.id && void api.dppDownload(job.id)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white"
+                disabled={downloadBusy}
+                onClick={() => void downloadShip()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
               >
-                <Download className="h-3.5 w-3.5" />
+                {downloadBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                 Download ship zip
               </button>
             )}
           </div>
         </div>
       </div>
+      <EvaluateMergedModal
+        open={Boolean(evalEntry)}
+        historyId={evalEntry?.id || ""}
+        title={evalEntry?.id || "post-processed model"}
+        score={evalEntry?.score}
+        mode="dpp"
+        onClose={() => setEvalEntry(null)}
+      />
     </div>
   );
 }

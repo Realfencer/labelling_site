@@ -51,6 +51,25 @@ export function getDecodedImage(url: string): ImageSource | null {
   return hit;
 }
 
+/** Drop a decoded entry (e.g. closed ImageBitmap) so the next load re-fetches. */
+export function forgetDecodedImage(src: ImageSource | null | undefined) {
+  if (!src) return;
+  for (const [url, entry] of decoded) {
+    if (entry === src) {
+      decoded.delete(url);
+      inflight.delete(url);
+      if (entry instanceof ImageBitmap) {
+        try {
+          entry.close();
+        } catch {
+          /* already closed */
+        }
+      }
+      return;
+    }
+  }
+}
+
 /** Put an already-decoded source into the cache (filmstrip blob snapshot). */
 export function adoptDecodedImage(url: string, src: ImageSource) {
   if (!url || !src || decoded.has(url)) return;
@@ -105,6 +124,17 @@ function isAbort(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
+const aborters = new Map<string, AbortController>();
+
+/** Stop downloading an image nobody is waiting for any more (the user moved on): frees the
+ *  connection and the bandwidth for the image on screen. No-op once it is decoded. */
+export function abortImageLoad(url: string) {
+  if (!url || decoded.has(url)) return;
+  const i = queue.findIndex((j) => j.url === url);
+  if (i >= 0) queue.splice(i, 1);
+  aborters.get(url)?.abort();
+}
+
 export async function decodeUrl(url: string, fetchPriority: "high" | "low" | "auto" = "auto"): Promise<ImageSource> {
   const hit = decoded.get(url);
   if (hit) return hit;
@@ -112,21 +142,27 @@ export async function decodeUrl(url: string, fetchPriority: "high" | "low" | "au
   let pending = inflight.get(url);
   if (pending) return pending;
 
+  const ac = new AbortController();
+  aborters.set(url, ac);
   pending = (async () => {
-    // no-cache: revalidate with ETag so Own file replaces / synthetic block reuse
-    // cannot keep showing another frame's pixels from the HTTP cache.
+    // Strip thumbs + versioned media URLs are content-addressed via `v=` / immutable
+    // Cache-Control. Prefer HTTP cache (Ultralytics-style instant revisit). Keep
+    // no-cache only for unversioned / Own paths that can replace pixels in place.
+    const immutable =
+      url.includes("strip=1") ||
+      /[?&]v=/.test(url) ||
+      url.includes("/api/media/");
     const init = {
-      cache: "no-cache",
+      cache: immutable ? "force-cache" : "no-cache",
       credentials: "include",
       priority: fetchPriority,
+      signal: ac.signal,
     } as RequestInit;
     try {
       let res = await fetch(url, init);
       if (!res.ok) {
-        if (res.status === 404 || res.status === 409) {
-          signalStaleIndex(res.status);
-          throw new Error(`Image fetch failed: ${res.status}`);
-        }
+        // Ask the server once more, bypassing the browser cache: with "force-cache" a stored error answer
+        // (e.g. a 404 from just after a server restart) would otherwise be served again and again.
         const retry = await fetch(url, { ...init, cache: "reload" } as RequestInit);
         if (!retry.ok) {
           if (retry.status === 404 || retry.status === 409) signalStaleIndex(retry.status);
@@ -151,6 +187,7 @@ export async function decodeUrl(url: string, fetchPriority: "high" | "low" | "au
     return await pending;
   } finally {
     inflight.delete(url);
+    aborters.delete(url);
   }
 }
 
@@ -315,7 +352,8 @@ export function preloadChallenge(
   mediaRev?: number | string,
 ) {
   preloadImage(challengeThumbnailUrl(index, mode, block, true, cacheToken, itemKey, mediaRev), priority + 12);
-  preloadImage(challengeImageUrl(index, mode, block, cacheToken, itemKey, mediaRev), priority);
+  // Full image only at lower priority — thumb paints first.
+  preloadImage(challengeImageUrl(index, mode, block, cacheToken, itemKey, mediaRev), Math.max(1, priority - 8));
 }
 
 export function preloadChallengeUrgent(
@@ -325,12 +363,17 @@ export function preloadChallengeUrgent(
   cacheToken?: string,
   itemKey?: string,
   mediaRev?: number | string,
+  opts?: { full?: boolean },
 ) {
   const thumb = challengeThumbnailUrl(index, mode, block, true, cacheToken, itemKey, mediaRev);
-  const full = challengeImageUrl(index, mode, block, cacheToken, itemKey, mediaRev);
-  preferImageUrls([full, thumb]);
+  preferImageUrls([thumb]);
   loadImageImmediate(thumb);
-  loadImageImmediate(full);
+  // Default: thumb only (hover). Selected open passes { full: true }.
+  if (opts?.full) {
+    const full = challengeImageUrl(index, mode, block, cacheToken, itemKey, mediaRev);
+    preferImageUrls([full, thumb]);
+    loadImageImmediate(full);
+  }
 }
 
 /** Preload the next few images while the user labels the current one. */
@@ -354,6 +397,9 @@ export function preloadChallengeForward(
       challengeThumbnailUrl(i, mode, ch.block, true, cacheToken, ch.item_key, ch.media_rev),
       pri + 10,
     );
-    preloadImage(challengeImageUrl(i, mode, ch.block, cacheToken, ch.item_key, ch.media_rev), pri);
+    // Only the immediate next neighbor gets a full-image prefetch.
+    if (d === 0) {
+      preloadImage(challengeImageUrl(i, mode, ch.block, cacheToken, ch.item_key, ch.media_rev), pri);
+    }
   });
 }

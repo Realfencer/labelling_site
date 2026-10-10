@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import re
 import shutil
 import threading
@@ -53,10 +54,29 @@ CANONICAL_SKILL_CLASSES: dict[str, list[str]] = {
     "manak0/detect-crime": ["balaclava", "hoodie", "glove", "bat", "spray paint", "graffiti"],
     "manak0/detect-fire": ["fire", "fire extinguisher", "smoke"],
     "manak0/detect-road-signs": ["road sign"],
+    "manak0/detect-person": ["person"],
+    "manak0/detect-person-2": ["person"],
+    "manak0/detect-beverage-detect": ["cup", "can", "bottle"],
+    "manak0/detect-detect-vehicle": ["bus", "car", "truck", "motorcycle"],
+    # New public element (Score Studio Active): car/bus swapped vs completed detect-vehicle.
+    "manak0/detect-vehicle": ["car", "bus", "truck", "motorcycle"],
+    "manak0/detect-number-plates": ["numberplate"],
+    "manak0/detect-petrol-station": ["petrol hose", "petrol pump", "price board", "roof canopy"],
+    "manak0/detect-number-plates-1-0": ["numberplate"],
+    "manak0/detect-petrol-station-1-0": ["petrol hose", "petrol pump", "price board", "roof canopy"],
     "manak0_detect-car-wash": ["broom", "drainage gate", "nozzle", "track"],
     "manak0_detect-crime": ["balaclava", "hoodie", "glove", "bat", "spray paint", "graffiti"],
     "manak0_detect-fire": ["fire", "fire extinguisher", "smoke"],
     "manak0_detect-road-signs": ["road sign"],
+    "manak0_detect-person": ["person"],
+    "manak0_detect-person-2": ["person"],
+    "manak0_detect-beverage-detect": ["cup", "can", "bottle"],
+    "manak0_detect-detect-vehicle": ["bus", "car", "truck", "motorcycle"],
+    "manak0_detect-vehicle": ["car", "bus", "truck", "motorcycle"],
+    "manak0_detect-number-plates": ["numberplate"],
+    "manak0_detect-petrol-station": ["petrol hose", "petrol pump", "price board", "roof canopy"],
+    "manak0_detect-number-plates-1-0": ["numberplate"],
+    "manak0_detect-petrol-station-1-0": ["petrol hose", "petrol pump", "price board", "roof canopy"],
 }
 
 
@@ -72,6 +92,115 @@ def canonical_objects_for_skill(element_path_or_id: str | None) -> list[str]:
     return []
 
 
+DEFAULT_SCORE_PILLARS = {"map50": 0.6, "false_positive": 0.4}
+
+
+def element_manifest_cache_path(cache_root: Path, skill: Skill) -> Path:
+    return cache_root / safe_filename(skill.element_path) / "element_manifest.json"
+
+
+def save_element_manifest(cache_root: Path, skill: Skill, dataset: dict) -> dict | None:
+    """Persist track_history element_manifest for per-block class + score weights."""
+    element_manifest = dataset.get("element_manifest")
+    if not isinstance(element_manifest, dict):
+        return None
+    versions = element_manifest.get("manifest_versions")
+    if not isinstance(versions, list) or not versions:
+        return None
+    payload = {
+        "element_id": element_manifest.get("element_id"),
+        "manifest_versions": versions,
+    }
+    write_json_atomic(element_manifest_cache_path(cache_root, skill), payload)
+    return payload
+
+
+def load_element_manifest(cache_root: Path, skill: Skill) -> dict | None:
+    data = read_json(element_manifest_cache_path(cache_root, skill))
+    return data if isinstance(data, dict) else None
+
+
+def manifest_for_block(manifest_versions: list[dict], block: int) -> dict | None:
+    """Latest manifest version that applies to this block (by first_block / manifest_block)."""
+    if not manifest_versions:
+        return None
+    candidates: list[tuple[int, dict]] = []
+    for entry in manifest_versions:
+        if not isinstance(entry, dict):
+            continue
+        element = entry.get("element") if isinstance(entry.get("element"), dict) else {}
+        manifest_block = int(entry.get("manifest_block") or 0)
+        first_block = element.get("first_block")
+        if first_block is None or int(first_block) <= block:
+            candidates.append((manifest_block, entry))
+    if not candidates:
+        return manifest_versions[-1] if isinstance(manifest_versions[-1], dict) else None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def manifest_snapshot_for_block(manifest_versions: list[dict], block: int) -> dict:
+    entry = manifest_for_block(manifest_versions, block)
+    element = entry.get("element") if isinstance(entry, dict) and isinstance(entry.get("element"), dict) else {}
+    metrics = element.get("metrics") if isinstance(element.get("metrics"), dict) else {}
+    pillars = metrics.get("pillars") if isinstance(metrics.get("pillars"), dict) else {}
+    objects = [str(item) for item in (element.get("objects") or []) if isinstance(item, str)]
+    map50_w = pillars.get("map50", DEFAULT_SCORE_PILLARS["map50"])
+    fp_w = pillars.get("false_positive", DEFAULT_SCORE_PILLARS["false_positive"])
+    return {
+        "manifest_block": int(entry.get("manifest_block") or 0) if isinstance(entry, dict) else 0,
+        "manifest_path": str(entry.get("manifest_path") or "") if isinstance(entry, dict) else "",
+        "objects": objects,
+        "score_pillars": {
+            "map50": float(map50_w),
+            "false_positive": float(fp_w),
+        },
+    }
+
+
+def objects_from_manifest_cache(cache_root: Path, skill: Skill, block: int | None = None) -> list[str]:
+    payload = load_element_manifest(cache_root, skill)
+    if not payload:
+        return []
+    versions = payload.get("manifest_versions")
+    if not isinstance(versions, list) or not versions:
+        return []
+    if block is not None and block > 0:
+        return list(manifest_snapshot_for_block(versions, block).get("objects") or [])
+    latest = max(versions, key=lambda item: int(item.get("manifest_block") or 0) if isinstance(item, dict) else 0)
+    element = latest.get("element") if isinstance(latest, dict) and isinstance(latest.get("element"), dict) else {}
+    return [str(item) for item in (element.get("objects") or []) if isinstance(item, str)]
+
+
+def attach_manifest_to_record(record: dict, snapshot: dict) -> None:
+    if not isinstance(record, dict) or not isinstance(snapshot, dict):
+        return
+    objects = snapshot.get("objects")
+    if isinstance(objects, list) and objects:
+        record["manifest_objects"] = [str(item) for item in objects if isinstance(item, str)]
+    pillars = snapshot.get("score_pillars")
+    if isinstance(pillars, dict) and pillars:
+        record["score_pillars"] = {
+            "map50": float(pillars.get("map50", DEFAULT_SCORE_PILLARS["map50"])),
+            "false_positive": float(pillars.get("false_positive", DEFAULT_SCORE_PILLARS["false_positive"])),
+        }
+    if snapshot.get("manifest_block") is not None:
+        record["manifest_block"] = int(snapshot.get("manifest_block") or 0)
+    if snapshot.get("manifest_path"):
+        record["manifest_path"] = str(snapshot.get("manifest_path"))
+
+
+def score_pillars_from_record(record: dict | None) -> dict[str, float]:
+    if not isinstance(record, dict):
+        return dict(DEFAULT_SCORE_PILLARS)
+    raw = record.get("score_pillars")
+    if not isinstance(raw, dict):
+        return dict(DEFAULT_SCORE_PILLARS)
+    return {
+        "map50": float(raw.get("map50", DEFAULT_SCORE_PILLARS["map50"])),
+        "false_positive": float(raw.get("false_positive", DEFAULT_SCORE_PILLARS["false_positive"])),
+    }
+
+
 @dataclass
 class DetectionBox:
     cls: int
@@ -80,6 +209,9 @@ class DetectionBox:
     x2: float
     y2: float
     conf: float | None = None
+    # The network's own confidence before the miner's calibration gate / cluster boost (display only — the
+    # validator, and every score here, use ``conf``, which is what miner.py reports).
+    raw_conf: float | None = None
 
     def normalized(self, width: int, height: int) -> str:
         x1 = min(max(self.x1, 0.0), float(width))
@@ -117,7 +249,7 @@ class DetectionBox:
         top, bottom = sorted((y1, y2))
         if right - left < 1.0 or bottom - top < 1.0:
             return None
-        return DetectionBox(self.cls, left, top, right, bottom, self.conf)
+        return DetectionBox(self.cls, left, top, right, bottom, self.conf, self.raw_conf)
 
     def to_dict(self) -> dict:
         return {
@@ -127,6 +259,7 @@ class DetectionBox:
             "x2": self.x2,
             "y2": self.y2,
             "conf": self.conf,
+            "raw_conf": self.raw_conf,
         }
 
 
@@ -197,6 +330,9 @@ class Skill:
     first_block: int = 0
     latest_block: int = 0
     evaluation_count: int = 0
+    status: str = "active"
+    label_source: str = "live_index"
+    subtitle: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -206,6 +342,9 @@ class Skill:
             "first_block": self.first_block,
             "latest_block": self.latest_block,
             "evaluation_count": self.evaluation_count,
+            "status": self.status,
+            "label_source": self.label_source,
+            "subtitle": self.subtitle,
         }
 
 
@@ -229,6 +368,7 @@ class ChallengeRecord:
     top_boxes: list[dict] = field(default_factory=list)
     cached_left_boxes: list[dict] = field(default_factory=list)
     reviewed: bool = False
+    has_label: bool = False
     tuned: bool = False
     loaded: bool = False
     error: str = ""
@@ -236,6 +376,7 @@ class ChallengeRecord:
     image_height: int = 0
     skill_path: str = ""
     checks_passed: int | None = None
+    checks_total: int | None = None
     checks_s: bool | None = None
     checks_m: bool | None = None
     checks_f: bool | None = None
@@ -243,7 +384,12 @@ class ChallengeRecord:
 
     @property
     def block(self) -> int:
-        return int(self.record.get("block", self.record.get("index_eval_block", 0)))
+        # Hot path (called ~100k times per topic enter): avoid evaluating the default eagerly.
+        rec = self.record
+        value = rec.get("block")
+        if value is None:
+            value = rec.get("index_eval_block", 0)
+        return int(value)
 
     @property
     def display_name(self) -> str:
@@ -259,12 +405,22 @@ class ChallengeRecord:
         skill = self.skill_path or str(self.record.get("element_path") or "challenge")
         return f"{skill}:{self.block}"
 
-    def to_dict(self) -> dict:
-        media_rev = 0
+    def media_rev(self) -> int:
+        """Cache-buster for this image's pixels. Must be identical in the list and the detail payload:
+        the browser builds image URLs from it, and a mismatch downloads every image twice."""
         try:
-            media_rev = int(self.record.get("_mtime_ns") or 0)
+            rev = int(self.record.get("_mtime_ns") or 0)
         except (TypeError, ValueError):
-            media_rev = 0
+            rev = 0
+        if rev <= 0 and self.image_path is not None:
+            try:
+                rev = int(self.image_path.stat().st_mtime_ns)
+            except OSError:
+                rev = 0
+        return rev
+
+    def to_dict(self) -> dict:
+        media_rev = self.media_rev()
         return {
             "source_type": self.source_type,
             "record": self.record,
@@ -272,6 +428,7 @@ class ChallengeRecord:
             "top_boxes": self.top_boxes,
             "cached_left_boxes": self.cached_left_boxes,
             "reviewed": self.reviewed,
+            "has_label": bool(self.has_label or self.reviewed),
             "tuned": self.tuned,
             "loaded": self.loaded,
             "error": self.error,
@@ -282,6 +439,7 @@ class ChallengeRecord:
             "item_key": self.item_key,
             "media_rev": media_rev,
             "checks_passed": self.checks_passed,
+            "checks_total": self.checks_total,
             "checks_kind": self.checks_kind,
             "checks": (
                 {"r1": self.checks_s, "r2": self.checks_m, "r3": self.checks_f}
@@ -306,20 +464,12 @@ class ChallengeRecord:
             top_boxes = []
             cached_left = []
         # Bust browser/memory image caches when Own pixels change (mtime) or stem matters.
-        media_rev = 0
-        try:
-            media_rev = int(self.record.get("_mtime_ns") or 0)
-        except (TypeError, ValueError):
-            media_rev = 0
-        if media_rev <= 0 and self.image_path is not None:
-            try:
-                media_rev = int(self.image_path.stat().st_mtime_ns)
-            except OSError:
-                media_rev = 0
+        media_rev = self.media_rev()
         payload = {
             "source_type": self.source_type,
             "record": record,
             "reviewed": self.reviewed,
+            "has_label": bool(getattr(self, "has_label", False) or self.reviewed),
             "tuned": self.tuned,
             "loaded": self.loaded,
             "error": self.error,
@@ -332,6 +482,7 @@ class ChallengeRecord:
             "top_boxes": top_boxes,
             "cached_left_boxes": cached_left,
             "checks_passed": self.checks_passed,
+            "checks_total": self.checks_total,
             "checks_kind": self.checks_kind,
             "checks": (
                 {"r1": self.checks_s, "r2": self.checks_m, "r3": self.checks_f}
@@ -689,6 +840,7 @@ def score_top_against_left_gt(
     platform_score: float | None = None,
     platform_map50: float | None = None,
     platform_fp: float | None = None,
+    score_pillars: dict[str, float] | None = None,
 ) -> TopVsLeftGtScore:
     width, height = _resolve_score_image_size(
         pred_boxes,
@@ -726,7 +878,10 @@ def score_top_against_left_gt(
     map50 = float(sum(aps) / len(aps)) if aps else (0.0 if n_gt > 0 else 1.0)
     ffpi = float(fp)
     false_positive = max(0.0, 1.0 - ffpi / 10.0)
-    composite = 0.6 * map50 + 0.4 * false_positive
+    pillars = score_pillars if isinstance(score_pillars, dict) else DEFAULT_SCORE_PILLARS
+    w_map = float(pillars.get("map50", DEFAULT_SCORE_PILLARS["map50"]))
+    w_fp = float(pillars.get("false_positive", DEFAULT_SCORE_PILLARS["false_positive"]))
+    composite = w_map * map50 + w_fp * false_positive
     return TopVsLeftGtScore(
         composite=float(composite),
         map50=float(map50),
@@ -744,7 +899,9 @@ def score_top_against_left_gt(
 
 
 LABEL_CHECK_DELTA = 0.06
-LABEL_CHECKS_KIND = "r123-v8"
+LABEL_CHECKS_KIND = "r123-v9"
+# Older on-disk kinds still carry valid n/3 — hydrate them instead of flashing ?/3.
+LABEL_CHECKS_KIND_COMPAT = frozenset({"r123-v8", "r123-v9"})
 
 
 def metric_check_pass(platform: float | None, scored: float | None, *, delta: float = LABEL_CHECK_DELTA) -> bool:
@@ -1131,6 +1288,19 @@ def write_json_atomic(path: Path, data: object) -> None:
                 pass
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a unique temp file + rename so concurrent readers never see a partial file."""
+    tmp = path.with_name(f"{path.name}.{time.time_ns()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def load_json_source(source: str | Path) -> object:
     source_text = str(source)
     if source_text.startswith(("http://", "https://")):
@@ -1140,17 +1310,39 @@ def load_json_source(source: str | Path) -> object:
     return json.loads(Path(source).read_text(encoding="utf-8"))
 
 
+_INDEX_MEM_LOCK = threading.Lock()
+# (source, cache_root) -> (file signature, saved_at, parsed index list)
+_INDEX_MEM: dict[tuple[str, str], tuple[tuple, float, list]] = {}
+# id(index list) -> (index list kept alive so the id is stable, derived skills)
+_DISCOVER_MEM: dict[tuple[str, str], tuple[list, list]] = {}
+
+
+def _file_sig(path: Path) -> tuple[int, int]:
+    st = path.stat()
+    return (st.st_mtime_ns, st.st_size)
+
+
 def load_index_cached(source: str, cache_root: Path) -> list:
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_path = cache_root / "index_cache.json"
     meta_path = cache_root / "index_cache_meta.json"
     now = time.time()
     if source.startswith(("http://", "https://")) and cache_path.exists() and meta_path.exists():
+        mem_key = (source, str(cache_root))
         try:
+            # The index is ~45k entries; re-reading and re-parsing it per request cost ~0.5s.
+            sig = (_file_sig(cache_path), _file_sig(meta_path))
+            with _INDEX_MEM_LOCK:
+                hit = _INDEX_MEM.get(mem_key)
+            if hit is not None and hit[0] == sig and now - hit[1] < INDEX_CACHE_SECONDS:
+                return hit[2]
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if meta.get("source") == source and now - float(meta.get("saved_at", 0)) < INDEX_CACHE_SECONDS:
+            saved_at = float(meta.get("saved_at", 0))
+            if meta.get("source") == source and now - saved_at < INDEX_CACHE_SECONDS:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
                 if isinstance(cached, list):
+                    with _INDEX_MEM_LOCK:
+                        _INDEX_MEM[mem_key] = (sig, saved_at, cached)
                     return cached
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
@@ -1159,8 +1351,8 @@ def load_index_cached(source: str, cache_root: Path) -> list:
         if not isinstance(loaded, list):
             raise TypeError("Index JSON must be a list.")
         if source.startswith(("http://", "https://")):
-            cache_path.write_text(json.dumps(loaded), encoding="utf-8")
-            meta_path.write_text(json.dumps({"source": source, "saved_at": now}, indent=2), encoding="utf-8")
+            _atomic_write_text(cache_path, json.dumps(loaded))
+            _atomic_write_text(meta_path, json.dumps({"source": source, "saved_at": now}, indent=2))
         return loaded
     except Exception:
         if cache_path.exists():
@@ -1201,8 +1393,10 @@ def skill_name_from_element_path(element_path: str) -> str:
 
 
 def skill_slug(element_path: str) -> str:
-    """Short URL slug: manak0_Detect-car-wash → car-wash."""
+    """Short URL slug: manak0_Detect-car-wash / manak0/Detect-car-wash → car-wash."""
     name = str(element_path or "").strip()
+    # Normalize path separators so slash and underscore Studio ids share one slug.
+    name = name.replace("/", "_")
     for prefix in ("manak0_Detect-", "manak0_detect-", "manak0_"):
         if name.startswith(prefix):
             name = name[len(prefix) :]
@@ -1224,21 +1418,55 @@ def skill_title(skill: Skill) -> str:
 
 
 def find_skill_by_slug(skills: list[Skill], slug: str) -> Skill | None:
-    needle = skill_slug(slug)
-    for skill in skills:
-        if skill_slug(skill.element_path) == needle:
-            return skill
-        if skill_slug(skill.element_id.replace("/", "_")) == needle:
-            return skill
+    needles: list[str] = []
+    primary = skill_slug(slug)
+    needles.append(primary)
+    for suffix in ("-1-0", "-2-0", "-3-0"):
+        if primary.endswith(suffix):
+            needles.append(primary[: -len(suffix)])
+    seen: set[str] = set()
+    for needle in needles:
+        if not needle or needle in seen:
+            continue
+        seen.add(needle)
+        for skill in skills:
+            if skill_slug(skill.element_path) == needle:
+                return skill
+            if skill_slug(skill.element_id.replace("/", "_")) == needle:
+                return skill
     return None
 
 
-def discover_skills_from_index(index_source: str, cache_root: Path) -> list[Skill]:
+def discover_skills_from_index(
+    index_source: str,
+    cache_root: Path,
+    element_tokens: frozenset[str] | None = None,
+) -> list[Skill]:
+    """``element_tokens``: when set, only index entries whose element path contains one of these
+    (lowercase) tokens are parsed. The index has ~45k entries for every topic; parsing all of
+    them cost ~1.2s each refresh even though only one topic is served."""
     index = load_index_cached(index_source, cache_root)
+    memo_key = (index_source, str(cache_root), tuple(sorted(element_tokens)) if element_tokens else ())
+    with _INDEX_MEM_LOCK:
+        memo = _DISCOVER_MEM.get(memo_key)
+    if memo is not None and memo[0] is index:
+        # Same parsed index object => same skills. parse_index_entry over 45k urls is ~1s.
+        return list(memo[1])
+    skills = _discover_skills_uncached(index, element_tokens)
+    with _INDEX_MEM_LOCK:
+        _DISCOVER_MEM[memo_key] = (index, skills)
+    return list(skills)
+
+
+def _discover_skills_uncached(index: list, element_tokens: frozenset[str] | None = None) -> list[Skill]:
     grouped: dict[str, list[IndexEntry]] = {}
     for item in index:
         if not isinstance(item, str):
             continue
+        if element_tokens:
+            seg = item.split("/", 2)
+            if len(seg) < 3 or not any(tok in seg[1].lower() for tok in element_tokens):
+                continue
         entry = parse_index_entry(item)
         if entry is not None:
             grouped.setdefault(entry.element_path, []).append(entry)
@@ -1517,7 +1745,15 @@ def reference_boxes_path(project_root: Path, block: int) -> Path:
 def save_reference_boxes(project_root: Path, block: int, boxes: list[dict]) -> None:
     if not boxes:
         return
-    write_json_atomic(reference_boxes_path(project_root, block), boxes)
+    path = reference_boxes_path(project_root, block)
+    # Called for every block on every topic enter: skip the (indent=2, pure-python) rewrite when
+    # the file already holds exactly these boxes.
+    try:
+        if path.is_file() and json.loads(path.read_text(encoding="utf-8")) == boxes:
+            return
+    except (OSError, ValueError):
+        pass
+    write_json_atomic(path, boxes)
 
 
 def load_reference_boxes(project_root: Path, block: int) -> list[dict]:
@@ -1548,6 +1784,9 @@ def load_reference_variants(project_root: Path, block: int) -> list[dict]:
                 continue
             boxes = item.get("boxes")
             if not isinstance(boxes, list):
+                boxes = []
+            has_metrics = any(item.get(k) is not None for k in ("total_weighted", "map50", "false_positive"))
+            if not boxes and not has_metrics:
                 continue
             out.append(
                 {
@@ -1569,15 +1808,72 @@ def label_checks_path(project_root: Path, block: int) -> Path:
     return project_root / "challenge" / "label_checks" / f"block_{block}.json"
 
 
-def save_label_checks(project_root: Path, block: int, *, checks_passed: int, checks_s: bool, checks_m: bool, checks_f: bool) -> None:
-    write_json_atomic(
-        label_checks_path(project_root, block),
-        {
-            "kind": LABEL_CHECKS_KIND,
-            "checks_passed": int(checks_passed),
-            "checks": {"r1": bool(checks_s), "r2": bool(checks_m), "r3": bool(checks_f)},
+def save_label_checks(
+    project_root: Path,
+    block: int,
+    *,
+    checks_passed: int,
+    checks_total: int = 3,
+    checks_s: bool | None = None,
+    checks_m: bool | None = None,
+    checks_f: bool | None = None,
+) -> None:
+    """Persist n/3 strip tags so refresh/hydrate does not flash ?/3."""
+    path = label_checks_path(project_root, block)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "kind": LABEL_CHECKS_KIND,
+        "checks_passed": int(checks_passed),
+        "checks_total": int(checks_total) if checks_total else 3,
+        "checks": {
+            "r1": checks_s,
+            "r2": checks_m,
+            "r3": checks_f,
         },
-    )
+    }
+    write_json_atomic(path, payload)
+
+
+def variant_has_boxes(variant: dict) -> bool:
+    boxes = variant.get("boxes")
+    return isinstance(boxes, list) and any(isinstance(box, dict) for box in boxes)
+
+
+def compute_label_checks(
+    gt: list[DetectionBox],
+    variants: list[dict],
+    *,
+    image_width: int | None = None,
+    image_height: int | None = None,
+    score_pillars: dict | None = None,
+) -> dict:
+    """Score Done GT vs available R slots (miners with prediction boxes only)."""
+    available = [v for v in (variants or [])[:3] if variant_has_boxes(v)]
+    flags: list[bool] = []
+    for variant in available:
+        pred = dicts_to_detection_boxes(variant.get("boxes") or [])
+        score = score_top_against_left_gt(
+            pred,
+            gt,
+            image_width=image_width,
+            image_height=image_height,
+            platform_score=parse_score(variant.get("total_weighted")),
+            platform_map50=parse_score(variant.get("map50")),
+            platform_fp=parse_score(variant.get("false_positive")),
+            score_pillars=score_pillars,
+        )
+        flags.append(variant_check_pass(score))
+    slots: list[bool | None] = [None, None, None]
+    for index, flag in enumerate(flags):
+        slots[index] = flag
+    return {
+        "checks_passed": sum(1 for flag in flags if flag),
+        "checks_total": len(available),
+        "checks_s": slots[0],
+        "checks_m": slots[1],
+        "checks_f": slots[2],
+        "checks_kind": LABEL_CHECKS_KIND,
+    }
 
 
 def load_label_checks(project_root: Path, block: int) -> dict | None:
@@ -1585,7 +1881,8 @@ def load_label_checks(project_root: Path, block: int) -> dict | None:
     data = read_json(path)
     if not isinstance(data, dict):
         return None
-    if str(data.get("kind") or "") != LABEL_CHECKS_KIND:
+    kind = str(data.get("kind") or "")
+    if kind not in LABEL_CHECKS_KIND_COMPAT:
         return None
     checks = data.get("checks")
     if not isinstance(checks, dict):
@@ -1593,13 +1890,52 @@ def load_label_checks(project_root: Path, block: int) -> dict | None:
     passed = data.get("checks_passed")
     if passed is None:
         return None
+
+    def slot(name: str) -> bool | None:
+        if name not in checks:
+            return None
+        value = checks.get(name)
+        if value is None:
+            return None
+        return bool(value)
+
+    total = data.get("checks_total")
+    if total is None:
+        active = [slot(key) for key in ("r1", "r2", "r3") if slot(key) is not None]
+        total = len(active) if active else 3
     return {
         "kind": LABEL_CHECKS_KIND,
         "checks_passed": int(passed),
-        "checks_s": bool(checks.get("r1")),
-        "checks_m": bool(checks.get("r2")),
-        "checks_f": bool(checks.get("r3")),
+        "checks_total": int(total),
+        "checks_s": slot("r1"),
+        "checks_m": slot("r2"),
+        "checks_f": slot("r3"),
     }
+
+
+def checks_total_for_record(record: ChallengeRecord) -> int:
+    total = record.checks_total
+    if total is not None and int(total) > 0:
+        return int(total)
+    slots = [record.checks_s, record.checks_m, record.checks_f]
+    active = [slot for slot in slots if slot is not None]
+    if active:
+        return len(active)
+    return 3
+
+
+def checks_pass_complete(record: ChallengeRecord) -> bool:
+    total = checks_total_for_record(record)
+    if total <= 0:
+        return False
+    passed = record.checks_passed
+    if passed is None:
+        return False
+    return int(passed) >= total
+
+
+def checks_fail_complete(record: ChallengeRecord) -> bool:
+    return record.checks_passed == 0
 
 
 def cached_challenge_image_path(
@@ -1634,6 +1970,61 @@ def label_path_for_item(item: ChallengeRecord, label_dir: Path) -> Path:
         return label_dir / f"{stem}.txt"
     return label_path_for_block(item.block, label_dir)
 
+
+def own_done_marker_path(label_path: Path) -> Path:
+    """Sidecar next to Own YOLO label — presence means Done (reviewed).
+
+    Label without marker = SAM3 draft (auto-labeled, not yet reviewed).
+    """
+    return label_path.with_suffix(label_path.suffix + ".done")
+
+
+def own_has_label_file(label_path: Path | None) -> bool:
+    if label_path is None:
+        return False
+    try:
+        return label_path.is_file() and label_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def own_is_done(label_path: Path | None) -> bool:
+    """Done iff the .done marker exists (migrated legacy labels get a marker on load)."""
+    if label_path is None:
+        return False
+    try:
+        return own_done_marker_path(label_path).is_file()
+    except OSError:
+        return False
+
+
+def own_mark_done(label_path: Path) -> None:
+    marker = own_done_marker_path(label_path)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def own_clear_done(label_path: Path) -> None:
+    marker = own_done_marker_path(label_path)
+    try:
+        if marker.is_file():
+            marker.unlink()
+    except OSError:
+        pass
+
+
+def own_migrate_legacy_done(label_path: Path) -> bool:
+    """Return whether this Own label is Done (``.done`` marker present).
+
+    Historically this created a ``.done`` marker for any label without one
+    ("legacy Done"). That incorrectly promoted fresh SAM3 drafts to Done on
+    every ``refresh_reviewed_flags`` / Own pool reload. Migration is retired;
+    only an explicit ``own_mark_done`` (review) marks Done.
+    """
+    return own_is_done(label_path)
 
 def prediction_path_for_item(item: ChallengeRecord, prediction_dir: Path) -> Path:
     if item.source_type == "local":
@@ -1715,7 +2106,7 @@ def resolve_project_for_miner(review_dir: Path, miner_folder: Path) -> tuple[str
         if state.get("miner_folder") != folder_str and state.get("miner_folder_hash") != folder_hash:
             continue
         if project_dir.name == canonical_id:
-            return canonical_id, project_dir
+            return _prefer_dataset_project(projects_dir, miner_folder, project_dir)
         try:
             mtime = project_dir.stat().st_mtime
         except OSError:
@@ -1723,8 +2114,62 @@ def resolve_project_for_miner(review_dir: Path, miner_folder: Path) -> tuple[str
         legacy_matches.append((mtime, project_dir.name, project_dir))
     if legacy_matches:
         legacy_matches.sort(key=lambda item: item[0], reverse=True)
-        return legacy_matches[0][1], legacy_matches[0][2]
-    return canonical_id, canonical_root
+        return _prefer_dataset_project(projects_dir, miner_folder, legacy_matches[0][2])
+    return _prefer_dataset_project(projects_dir, miner_folder, canonical_root)
+
+
+def _project_size(project_dir: Path) -> int:
+    def n_files(path: Path) -> int:
+        try:
+            with os.scandir(path) as it:
+                return sum(1 for _ in it)
+        except OSError:
+            return 0
+
+    return n_files(project_dir / "local" / "images") + n_files(project_dir / "challenge" / "labels")
+
+
+def _prefer_dataset_project(projects_dir: Path, miner_folder: Path, found: Path) -> tuple[str, Path]:
+    """``found`` unless it is an EMPTY project of a custom base model and the topic has a project with images."""
+    if miner_folder.name.startswith("custom__") and _project_size(found) == 0:
+        shared = _dataset_project_for_custom_model(projects_dir, miner_folder)
+        if shared is not None:
+            return shared.name, shared
+    return found.name, found
+
+
+def _dataset_project_for_custom_model(projects_dir: Path, miner_folder: Path) -> Path | None:
+    """A custom base model (hf_miners/custom__*) must label the SAME images as before.
+
+    Projects are looked up by miner folder, so a model nobody has used yet used to get a brand-new EMPTY project
+    (no Own images, no Platform labels) the moment someone applied it. Reuse the topic's existing dataset project
+    instead: the one for the same skill with the most images."""
+    if not miner_folder.name.startswith("custom__"):
+        return None
+    try:
+        from .base_model_select import load_overrides
+
+        want = str(miner_folder.expanduser().resolve())
+        skill = next(
+            (sk for sk, ov in load_overrides().items() if str(Path(str(ov.get("folder", ""))).expanduser().resolve()) == want),
+            None,
+        )
+    except Exception:
+        return None
+    if not skill:
+        return None
+
+    best: tuple[int, Path] | None = None
+    for project_dir in projects_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        proj_skill = str(read_json(project_dir / "state.json").get("skill") or "")
+        if not proj_skill or skill not in (proj_skill, safe_filename(proj_skill)):  # overrides are keyed by either form
+            continue
+        size = _project_size(project_dir)
+        if size > 0 and (best is None or size > best[0]):
+            best = (size, project_dir)
+    return best[1] if best else None
 
 
 def validate_review_project_folder(folder: Path) -> str | None:
@@ -1848,42 +2293,95 @@ def discover_local_image_label_pairs(dataset_root: Path) -> list[dict]:
     return pairs
 
 
+def _scan_pool_images(image_dir: Path) -> list[tuple[str, str, int, int, bool]]:
+    """Recursive image scan with os.scandir: [(abs_path, rel_posix, mtime_ns, size, is_symlink)].
+
+    The previous rglob() + per-file Path.resolve()/is_file()/relative_to() cost ~4s for 7.4k
+    images (hundreds of thousands of syscalls); scandir gets d_type for free and stats once.
+    """
+    base = str(image_dir)
+    out: list[tuple[str, str, int, int, bool]] = []
+    stack: list[tuple[str, str]] = [(base, "")]
+    while stack:
+        cur, rel_prefix = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=True):
+                            stack.append((entry.path, f"{rel_prefix}{entry.name}/"))
+                            continue
+                        if not entry.is_file(follow_symlinks=True):
+                            continue
+                        dot = entry.name.rfind(".")
+                        if dot < 0 or entry.name[dot:].lower() not in IMAGE_EXTENSIONS:
+                            continue
+                        st = entry.stat(follow_symlinks=True)
+                        out.append((entry.path, f"{rel_prefix}{entry.name}", int(st.st_mtime_ns), int(st.st_size), entry.is_symlink()))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    out.sort(key=lambda r: tuple(r[1].split("/")))
+    return out
+
+
+def own_pool_fingerprint(image_dir: Path, label_dir: Path) -> tuple[int, int, int]:
+    """(image count, newest image mtime_ns, non-empty label count) — one scandir pass each."""
+    n_images = 0
+    newest = 0
+    for _path, _rel, mtime_ns, _size, _link in _scan_pool_images(image_dir) if image_dir.is_dir() else []:
+        n_images += 1
+        if mtime_ns > newest:
+            newest = mtime_ns
+    n_labels = 0
+    try:
+        with os.scandir(label_dir) as it:
+            for entry in it:
+                try:
+                    if entry.name.endswith(".txt") and entry.is_file() and entry.stat().st_size > 0:
+                        n_labels += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return n_images, newest, n_labels
+
+
 def discover_own_pool_images(image_dir: Path, label_dir: Path) -> list[dict]:
     """Scan the per-topic Own pool (project local/images). Labels optional."""
     image_dir = image_dir.expanduser().resolve()
     label_dir = label_dir.expanduser().resolve()
     if not image_dir.is_dir():
         return []
+    try:
+        label_names = {e.name for e in os.scandir(label_dir) if e.name.endswith(".txt")} if label_dir.is_dir() else set()
+    except OSError:
+        label_names = set()
+    label_root = str(label_dir)
     out: list[dict] = []
     seen_stems: set[str] = set()
-    try:
-        image_files = sorted(image_dir.rglob("*"))
-    except OSError:
-        return []
-    for image_path in image_files:
-        try:
-            if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-        except OSError:
-            continue
-        try:
-            rel = image_path.resolve().relative_to(image_dir)
-        except ValueError:
-            rel = Path(image_path.name)
-        stem = safe_filename(rel.with_suffix("").as_posix().replace("/", "_").replace("\\", "_"))
+    for abs_path, rel, mtime_ns, size, is_link in _scan_pool_images(image_dir):
+        rel_path = Path(rel)
+        stem = safe_filename(rel_path.with_suffix("").as_posix().replace("/", "_").replace("\\", "_"))
         if not stem:
-            stem = safe_filename(image_path.stem) or "image"
+            stem = safe_filename(rel_path.stem) or "image"
         if stem in seen_stems:
-            digest = hashlib.sha256(str(image_path).encode("utf-8")).hexdigest()[:8]
+            digest = hashlib.sha256(abs_path.encode("utf-8")).hexdigest()[:8]
             stem = f"{stem}_{digest}"
         seen_stems.add(stem)
-        label_path = label_dir / f"{stem}.txt"
+        has_label_file = f"{stem}.txt" in label_names
+        source_image = abs_path
+        if is_link:  # keep the old resolve() semantics for symlinked files only
+            source_image = str(Path(abs_path).resolve())
         out.append(
             {
                 "source_type": "local",
                 "stem": stem,
-                "source_image": str(image_path.resolve()),
-                "source_label": str(label_path.resolve()) if label_path.is_file() else "",
+                "source_image": source_image,
+                "source_label": f"{label_root}/{stem}.txt" if has_label_file else "",
+                "_mtime_ns": mtime_ns,
+                "_size": size,
             }
         )
     return out
@@ -1913,8 +2411,21 @@ def build_yolo_dataset_zip(
 
 def save_yolo_labels(label_path: Path, boxes: list[DetectionBox], width: int, height: int) -> None:
     label_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = [box.normalized(width, height) for box in boxes if box.area() >= 1.0]
-    label_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+    rows: list[str] = []
+    if width > 0 and height > 0:
+        for box in boxes:
+            # Filter AFTER clamping: a box outside the image has area >= 1 before clamping but
+            # collapses to zero size after it, and used to be written as a degenerate row.
+            x1 = min(max(box.x1, 0.0), float(width))
+            x2 = min(max(box.x2, 0.0), float(width))
+            y1 = min(max(box.y1, 0.0), float(height))
+            y2 = min(max(box.y2, 0.0), float(height))
+            if abs(x2 - x1) * abs(y2 - y1) >= 1.0:
+                rows.append(box.normalized(width, height))
+    # Always write a non-empty file so warmers can treat "exists" as done.
+    # Zero-byte files previously caused infinite Own re-inference loops.
+    # Atomic: these are the user's ground-truth labels; a crash mid-write must not truncate them.
+    _atomic_write_text(label_path, ("\n".join(rows) + "\n") if rows else "# no detections\n")
 
 
 def load_yolo_labels(label_path: Path, width: int, height: int) -> list[DetectionBox]:
@@ -2413,32 +2924,106 @@ def parse_class_names(text: str) -> list[str]:
 
 
 def validate_miner_folder(folder: Path) -> str | None:
+    """Require pack-local miner.py + weights.onnx (no ONNX-only / shared-miner fallback)."""
     resolved = folder.expanduser().resolve()
     if not resolved.is_dir():
         return f"Not a directory: {resolved}"
     if not (resolved / "weights.onnx").is_file():
         return f"Missing weights.onnx in {resolved}"
-    parent_miner = Path(__file__).resolve().parent.parent / "miner.py"
-    if not (resolved / "miner.py").is_file() and not parent_miner.is_file():
-        return f"Missing miner.py in {resolved} and no local miner.py fallback."
+    if not (resolved / "miner.py").is_file():
+        return f"Missing miner.py in {resolved} — refusing ONNX-only pack"
     return None
 
 
 def load_miner_from_folder(folder: Path):
+    """Load Miner from the pack's own miner.py (never a shared/local fallback)."""
     resolved = folder.expanduser().resolve()
     miner_py = resolved / "miner.py"
     if not miner_py.is_file():
-        miner_py = Path(__file__).resolve().parent.parent / "miner.py"
+        raise ImportError(f"Missing miner.py in {resolved} — cannot load ONNX without pack Miner")
     module_name = f"submission_miner_{abs(hash(str(resolved))) & 0xFFFF}"
     spec = importlib.util.spec_from_file_location(module_name, miner_py)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load miner module from {miner_py}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    for name in dir(module):
+        obj = getattr(module, name, None)
+        rebuild = getattr(obj, "model_rebuild", None)
+        if callable(rebuild):
+            try:
+                rebuild(_types_namespace=vars(module))
+            except TypeError:
+                try:
+                    rebuild()
+                except Exception:
+                    pass
+            except Exception:
+                pass
     miner_cls = getattr(module, "Miner", None)
     if miner_cls is None:
         raise ImportError(f"No Miner class found in {miner_py}")
     return miner_cls(resolved)
+
+
+_MINER_CACHE_MAX = 6
+_MINER_CACHE_LOCK = threading.Lock()
+# resolved folder -> (file signature, miner)   (insertion order == LRU order)
+_MINER_CACHE: dict[str, tuple[tuple, object]] = {}
+_MINER_LOAD_LOCKS: dict[str, threading.Lock] = {}
+_MINER_FALLBACK_INFER_LOCK = threading.RLock()
+
+
+def _miner_signature(folder: Path) -> tuple:
+    sig = []
+    for name in ("miner.py", "weights.onnx"):
+        try:
+            st = (folder / name).stat()
+            sig.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append(None)
+    return tuple(sig)
+
+
+def load_miner_cached(folder: Path, *, force: bool = False):
+    """Process-wide shared Miner per pack folder.
+
+    Each browser session used to build its own ONNX session (input 1280, ORT_ENABLE_ALL,
+    ~hundreds of MB each, seconds to load) and keep it for the 2h session TTL. The Miner is
+    shared, so every inference call MUST hold ``miner_infer_lock(miner)`` (it mutates
+    ``_tracks``). Reloads automatically when miner.py / weights.onnx change on disk.
+    """
+    resolved = folder.expanduser().resolve()
+    key = str(resolved)
+    sig = _miner_signature(resolved)
+    with _MINER_CACHE_LOCK:
+        hit = _MINER_CACHE.get(key)
+        if hit is not None and hit[0] == sig and not force:
+            _MINER_CACHE[key] = _MINER_CACHE.pop(key)  # refresh LRU position
+            return hit[1]
+        load_lock = _MINER_LOAD_LOCKS.setdefault(key, threading.Lock())
+    with load_lock:  # one loader per pack; concurrent callers then reuse its result
+        with _MINER_CACHE_LOCK:
+            hit = _MINER_CACHE.get(key)
+            if hit is not None and hit[0] == sig and not force:
+                return hit[1]
+        miner = load_miner_from_folder(resolved)
+        try:
+            miner._labeler_infer_lock = threading.RLock()
+        except Exception:
+            pass
+        with _MINER_CACHE_LOCK:
+            _MINER_CACHE.pop(key, None)
+            _MINER_CACHE[key] = (sig, miner)
+            while len(_MINER_CACHE) > _MINER_CACHE_MAX:
+                _MINER_CACHE.pop(next(iter(_MINER_CACHE)))
+        return miner
+
+
+def miner_infer_lock(miner) -> threading.RLock:
+    """Lock guarding inference on a (possibly shared) Miner instance."""
+    lock = getattr(miner, "_labeler_infer_lock", None)
+    return lock if lock is not None else _MINER_FALLBACK_INFER_LOCK
 
 
 def class_names_from_miner(miner) -> list[str]:
@@ -2453,29 +3038,49 @@ def class_names_from_miner(miner) -> list[str]:
 
 
 def class_names_from_onnx(onnx_path: Path | None) -> list[str]:
-    """Read class names from ONNX model metadata."""
+    """Read class names from ONNX model metadata (no InferenceSession — enter-path safe)."""
     if onnx_path is None:
         return []
     p = Path(onnx_path).expanduser().resolve()
     if not p.is_file():
         return []
+
+    def _parse_names(raw: object) -> list[str]:
+        if raw is None:
+            return []
+        text = raw if isinstance(raw, str) else str(raw)
+        try:
+            parsed = ast.literal_eval(text)
+        except Exception:
+            return []
+        if isinstance(parsed, dict):
+            return [
+                str(parsed[k])
+                for k in sorted(parsed.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x))
+            ]
+        if isinstance(parsed, (list, tuple)):
+            return [str(x) for x in parsed]
+        return []
+
+    # Prefer protobuf metadata only — loading ORT just for names blocked topic enter.
     try:
-        import onnxruntime as ort  # type: ignore
-        sess = ort.InferenceSession(str(p), providers=["CPUExecutionProvider"])
-        meta = sess.get_modelmeta().custom_metadata_map or {}
-        raw = meta.get("names") or meta.get("classes") or meta.get("class_names")
-        if raw:
-            try:
-                parsed = ast.literal_eval(raw)
-                if isinstance(parsed, dict):
-                    return [str(parsed[k]) for k in sorted(parsed.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x))]
-                if isinstance(parsed, (list, tuple)):
-                    return [str(x) for x in parsed]
-            except Exception:
-                pass
+        import onnx  # type: ignore
+
+        model = onnx.load(str(p), load_external_data=False)
+        meta = {prop.key: prop.value for prop in model.metadata_props}
+        names = _parse_names(meta.get("names") or meta.get("classes") or meta.get("class_names"))
+        if names:
+            return names
     except Exception:
         pass
-    return []
+    try:
+        import onnxruntime as ort  # type: ignore
+
+        sess = ort.InferenceSession(str(p), providers=["CPUExecutionProvider"])
+        meta = sess.get_modelmeta().custom_metadata_map or {}
+        return _parse_names(meta.get("names") or meta.get("classes") or meta.get("class_names"))
+    except Exception:
+        return []
 
 
 def _literal_string_list(node: ast.AST) -> list[str] | None:
@@ -2549,31 +3154,155 @@ def find_tune_checkpoint(folder: Path) -> Path | None:
     return None
 
 
+def miner_inference_path(miner) -> str:
+    """Which miner.py entry ``run_miner_inference`` will call."""
+    if miner is None:
+        return "none"
+    if bool(getattr(miner, "use_tta", False)):
+        if callable(getattr(miner, "_infer_tta", None)):
+            return "miner.py:_infer_tta"
+        if callable(getattr(miner, "_predict_tta", None)):
+            return "miner.py:_predict_tta"
+    if callable(getattr(miner, "predict_batch", None)):
+        return "miner.py:predict_batch"
+    if callable(getattr(miner, "_infer_single", None)):
+        return "miner.py:_infer_single"
+    if callable(getattr(miner, "_predict_single", None)):
+        return "miner.py:_predict_single"
+    if callable(getattr(miner, "_predict_tta", None)):
+        return "miner.py:_predict_tta"
+    if callable(getattr(miner, "_infer_tta", None)):
+        return "miner.py:_infer_tta"
+    return "none"
+
+
+class _RawScoreRecorder:
+    """Records, during ONE normal inference, the network confidence of every box the miner finally reports.
+
+    Some miners (the beverage ``fencer*`` family) replace the network score with a calibrated gate value
+    (``_gate``: a lookup table that saturates at 100%) and/or raise it to the best score of its cluster
+    (``_max_score_per_cluster``). The boxes and the reported ``conf`` stay exactly as the miner produces them;
+    this only remembers what the network said for the same boxes."""
+
+    def __init__(self, miner) -> None:
+        self.miner = miner
+        self.raw: np.ndarray | None = None
+        self._patched: list[tuple[str, object]] = []
+
+    @staticmethod
+    def _keys(boxes: np.ndarray, cls_ids: np.ndarray) -> list[bytes]:
+        """One key per row: coordinates + class (the same box can be reported for two classes)."""
+        b = np.asarray(boxes, np.float32)
+        c = np.asarray(cls_ids).reshape(-1)
+        return [np.ascontiguousarray(r).tobytes() + int(k).to_bytes(4, "little", signed=True) for r, k in zip(b, c)]
+
+    def __enter__(self):
+        m = self.miner
+        if bool(getattr(m, "use_tta", False)):
+            return self  # TTA path re-orders / drops boxes after these hooks: do not guess
+        gate = getattr(m, "_gate", None)
+        if callable(gate) and getattr(m, "gate_y", None) is not None:
+            def gated(boxes, scores, cls_ids, _orig=gate):
+                ob, op, oc = _orig(boxes, scores, cls_ids)
+                try:
+                    sc = np.asarray(scores, np.float32)
+                    idx = {k: i for i, k in enumerate(self._keys(boxes, cls_ids))}
+                    self.raw = np.asarray([sc[idx[k]] for k in self._keys(ob, oc)], np.float32)
+                except Exception:
+                    self.raw = None
+                return ob, op, oc
+            m._gate = gated
+            self._patched.append(("_gate", gate))
+        boost = getattr(m, "_max_score_per_cluster", None)
+        if callable(boost):
+            def boosted(kept_boxes, kept_cls, all_boxes, all_scores, all_cls, thr, _orig=boost):
+                if self.raw is None and len(kept_boxes) == len(all_scores):
+                    self.raw = np.asarray(all_scores, np.float32).copy()
+                return _orig(kept_boxes, kept_cls, all_boxes, all_scores, all_cls, thr)
+            m._max_score_per_cluster = boosted
+            self._patched.append(("_max_score_per_cluster", boost))
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for name, _orig in self._patched:
+            try:
+                delattr(self.miner, name)  # back to the class method
+            except AttributeError:
+                pass
+
+    def attach(self, boxes: list) -> list:
+        """Return DetectionBoxes with ``raw_conf`` filled when the record lines up with the reported boxes."""
+        dets = normalize_miner_detections(boxes)
+        if self.raw is not None and len(self.raw) == len(dets):
+            for d, r in zip(dets, self.raw):
+                d.raw_conf = float(max(0.0, min(1.0, float(r))))
+        return dets
+
+
 def run_miner_inference(miner, image: np.ndarray) -> list:
+    """Run pack ``miner.py`` post-processing — same entry the platform uses — and also record the network's
+    own confidence of each reported box as ``DetectionBox.raw_conf`` (see ``_RawScoreRecorder``)."""
+    rec = _RawScoreRecorder(miner)
+    try:
+        with rec:
+            boxes = _run_miner_inference(miner, image)
+    except Exception:
+        raise
+    if not boxes:
+        return []
+    return rec.attach(list(boxes))
+
+
+def _run_miner_inference(miner, image: np.ndarray) -> list:
+    """Run pack ``miner.py`` post-processing — same entry the platform uses.
+
+    Preference order mirrors SN44 competition calling convention:
+    1. TTA APIs only when ``use_tta`` is set
+    2. ``predict_batch`` (competition entry — includes miner post-process / evidence filters)
+    3. ``_infer_single`` / ``_predict_single``
+    4. TTA methods as last resort
+
+    Never raw-ONNX decode outside miner.py.
+    """
     if miner is None:
         return []
     use_tta = bool(getattr(miner, "use_tta", False))
     if use_tta:
-        infer_tta = getattr(miner, "_infer_tta", None)
-        if callable(infer_tta):
-            return list(infer_tta(image))
-        predict_tta = getattr(miner, "_predict_tta", None)
-        if callable(predict_tta):
-            return list(predict_tta(image))
-    infer_single = getattr(miner, "_infer_single", None)
-    if callable(infer_single):
-        return list(infer_single(image))
-    predict_tta = getattr(miner, "_predict_tta", None)
-    if callable(predict_tta):
-        return list(predict_tta(image))
+        for name in ("_infer_tta", "_predict_tta"):
+            fn = getattr(miner, name, None)
+            if callable(fn):
+                return list(fn(image))
+
     predict_batch = getattr(miner, "predict_batch", None)
     if callable(predict_batch):
+        # Competition path. Reset temporal state so single-image scoring matches
+        # a fresh predict_batch([img], 0, 0) call on the platform.
+        for attr in ("_tracks", "_last_track_frame_id"):
+            if hasattr(miner, attr):
+                try:
+                    if attr == "_tracks":
+                        setattr(miner, attr, [])
+                    else:
+                        setattr(miner, attr, None)
+                except Exception:
+                    pass
         frames = predict_batch([image], 0, 0)
         if not frames:
             return []
         first = frames[0]
         return list(getattr(first, "boxes", []) or [])
-    raise AttributeError("Miner has no supported inference API.")
+
+    for name in ("_infer_single", "_predict_single"):
+        fn = getattr(miner, name, None)
+        if callable(fn):
+            return list(fn(image))
+
+    for name in ("_predict_tta", "_infer_tta"):
+        fn = getattr(miner, name, None)
+        if callable(fn):
+            return list(fn(image))
+
+    raise AttributeError("Miner has no supported inference API (predict_batch / _predict_single / TTA).")
 
 
 def normalize_miner_detections(detections) -> list[DetectionBox]:
@@ -2653,12 +3382,152 @@ def filter_boxes_to_class_count(boxes: list[DetectionBox], class_count: int) -> 
     return [b for b in boxes if 0 <= int(b.cls) < class_count]
 
 
+def class_names_order_equal(a: list[str] | None, b: list[str] | None) -> bool:
+    if not a or not b:
+        return not a and not b
+    if len(a) != len(b):
+        return False
+    return [str(x).strip().lower() for x in a] == [str(x).strip().lower() for x in b]
+
+
+def class_names_same_set(a: list[str] | None, b: list[str] | None) -> bool:
+    if not a or not b or len(a) != len(b):
+        return False
+    return {str(x).strip().lower() for x in a} == {str(x).strip().lower() for x in b}
+
+
+def miner_output_class_names(miner, folder: Path | None = None) -> list[str]:
+    """Class names matching cls ids emitted by miner.py inference.
+
+    Prefer ``miner.class_names`` when the miner remaps model→competition ids.
+    When ``_model_to_competition_cls`` is identity (or missing) but ONNX metadata
+    is a different permutation of the same labels, cls ids follow the weights —
+    use ONNX names (WhiteCrow declares cup/bottle/can while weights are cup/can/bottle).
+    """
+    declared = list(class_names_from_miner(miner) or [])
+    onnx_names: list[str] = []
+    pack = folder
+    if pack is None:
+        pack = getattr(miner, "path_hf_repo", None) or getattr(miner, "model_dir", None)
+    if pack is not None:
+        try:
+            onnx_names = list(class_names_from_onnx(Path(pack) / "weights.onnx") or [])
+        except Exception:
+            onnx_names = []
+    if not declared:
+        return onnx_names
+    if not onnx_names or class_names_order_equal(declared, onnx_names):
+        return declared
+    if not class_names_same_set(declared, onnx_names):
+        return declared
+
+    mapping = getattr(miner, "_model_to_competition_cls", None)
+    remaps = False
+    try:
+        import numpy as np
+
+        if mapping is not None:
+            arr = np.asarray(mapping).reshape(-1)
+            if arr.size == len(declared):
+                remaps = not bool(np.array_equal(arr, np.arange(len(declared))))
+    except Exception:
+        remaps = False
+    # Identity map + mismatched metadata → weights/ONNX order is what predict_batch emits.
+    if not remaps:
+        return onnx_names
+    return declared
+
+
+def remap_boxes_class_names(
+    boxes: list[DetectionBox],
+    src_names: list[str] | None,
+    dst_names: list[str] | None,
+) -> list[DetectionBox]:
+    """Re-index box class ids from ``src_names`` order into ``dst_names`` order.
+
+    Used when local winner ONNX/miner order differs from Score Studio taxonomy
+    (e.g. detect-vehicle winner is bus-first; Detect-Vehicle taxonomy is car-first).
+    """
+    if not boxes or not src_names or not dst_names:
+        return list(boxes)
+    if class_names_order_equal(src_names, dst_names):
+        return list(boxes)
+    dst_index = {str(name).strip().lower(): idx for idx, name in enumerate(dst_names)}
+    out: list[DetectionBox] = []
+    for box in boxes:
+        cls_id = int(box.cls)
+        if cls_id < 0 or cls_id >= len(src_names):
+            continue
+        key = str(src_names[cls_id]).strip().lower()
+        mapped = dst_index.get(key)
+        if mapped is None:
+            continue
+        out.append(
+            DetectionBox(
+                mapped,
+                float(box.x1),
+                float(box.y1),
+                float(box.x2),
+                float(box.y2),
+                box.conf,
+            )
+        )
+    return out
+
+
+def _miner_metrics(record: dict) -> dict:
+    metrics = record.get("metrics")
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def miner_map50(record: dict) -> float:
+    """Prefer track_history Detect.map50, then legacy map50."""
+    metrics = _miner_metrics(record)
+    for key in ("Detect.map50", "map50"):
+        raw = metrics.get(key)
+        if raw is not None:
+            return float(raw)
+    raw = record.get("map50")
+    if raw is not None:
+        return float(raw)
+    return 0.0
+
+
+def miner_total_weighted(record: dict) -> float:
+    """Prefer track_history metrics.total_weighted (not gated composite_score)."""
+    metrics = _miner_metrics(record)
+    for key in ("total_weighted", "Detect.total_weighted"):
+        raw = metrics.get(key)
+        if raw is not None:
+            return float(raw)
+    raw = record.get("total_weighted")
+    if raw is not None:
+        return float(raw)
+    composite = record.get("composite_score")
+    if composite is not None:
+        return float(composite)
+    return miner_map50(record)
+
+
+def miner_false_positive(record: dict) -> float:
+    """Prefer track_history Detect.false_positive; default to 0 when missing."""
+    metrics = _miner_metrics(record)
+    for key in ("Detect.false_positive", "false_positive"):
+        raw = metrics.get(key)
+        if raw is not None:
+            return float(raw)
+    raw = record.get("false_positive")
+    if raw is not None:
+        return float(raw)
+    return 0.0
+
+
 def winner_rank_tuple(record: dict) -> tuple[float, float, float]:
     """Higher is better: this-challenge score, then mAP50, then FP pillar."""
     return (
-        float(record.get("total_weighted") or 0.0),
-        float(record.get("map50") or 0.0),
-        float(record.get("false_positive") or 0.0),
+        miner_total_weighted(record),
+        miner_map50(record),
+        float(miner_false_positive(record)),
     )
 
 
@@ -2699,6 +3568,7 @@ def collect_challenges_sync(
     progress_callback=None,
     record_found_callback=None,
     cancel_flag=None,
+    max_workers: int = 16,
 ) -> tuple[list[dict], str]:
     skip_blocks = set(skip_blocks or set())
     if progress_callback:
@@ -2734,7 +3604,7 @@ def collect_challenges_sync(
     latest_blocks = sorted(by_block, reverse=True)
     winners: list[dict] = []
     upgraded = 0
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as executor:
         for block_index, block in enumerate(latest_blocks, start=1):
             if cancel_flag and cancel_flag():
                 break
@@ -2942,29 +3812,61 @@ def local_skill_image_dirs(review_dir: Path, skill: Skill) -> list[Path]:
     projects = review_dir / "projects"
     if not projects.is_dir():
         return []
-    skill_name = safe_filename(skill.element_path)
+    skill_names = [safe_filename(skill.element_path)]
+    try:
+        from . import completed_topics
+
+        skill_names.extend(completed_topics.legacy_element_paths_for_active(skill.element_path))
+    except Exception:
+        pass
     found: list[Path] = []
+    seen: set[str] = set()
     for project in projects.iterdir():
         if not project.is_dir():
             continue
-        images = project / "challenge" / "score_cache" / skill_name / "images"
-        if images.is_dir():
-            found.append(images)
+        for skill_name in skill_names:
+            images = project / "challenge" / "score_cache" / safe_filename(skill_name) / "images"
+            key = str(images)
+            if key in seen:
+                continue
+            if images.is_dir():
+                seen.add(key)
+                found.append(images)
     return found
 
 
+_IMAGE_COUNT_LOCK = threading.Lock()
+_IMAGE_COUNT_MEM: dict[tuple[str, str], tuple[tuple, int]] = {}
+
+
 def count_local_skill_images(review_dir: Path, skill: Skill) -> int:
-    total = 0
-    for images in local_skill_image_dirs(review_dir, skill):
-        total = max(
-            total,
-            sum(
-                1
-                for path in images.iterdir()
-                if path.suffix.lower() in IMAGE_EXTENSIONS and path.stem.startswith("block_")
-            ),
-        )
-    return total
+    """Unique block_* images across the Active skill cache and merged legacy archives."""
+    dirs = local_skill_image_dirs(review_dir, skill)
+    try:
+        # A directory's mtime changes whenever an entry is added/removed, so it is a
+        # cheap validity key; listing ~15k files on every /api/topics call was ~0.2s.
+        sig = tuple((str(d), d.stat().st_mtime_ns) for d in dirs)
+    except OSError:
+        sig = None
+    cache_key = (str(review_dir), skill.element_path)
+    if sig is not None:
+        with _IMAGE_COUNT_LOCK:
+            hit = _IMAGE_COUNT_MEM.get(cache_key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    blocks: set[int] = set()
+    for images in dirs:
+        for path in images.iterdir():
+            if path.suffix.lower() not in IMAGE_EXTENSIONS or not path.stem.startswith("block_"):
+                continue
+            try:
+                blocks.add(int(path.stem[6:]))
+            except ValueError:
+                continue
+    if sig is not None:
+        with _IMAGE_COUNT_LOCK:
+            _IMAGE_COUNT_MEM[cache_key] = (sig, len(blocks))
+    return len(blocks)
 
 
 def _write_topic_preview_jpeg(source: Path, dest: Path, max_width: int = 640) -> Path | None:

@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import parse_qs, urlparse
+
+import requests
 
 PLATFORM_API = "https://platform.ultralytics.com/api"
 
@@ -63,6 +66,29 @@ def _request(
         ) from exc
     except error.URLError as exc:
         raise UltralyticsApiError(f"Network error contacting Ultralytics Platform: {exc.reason}") from exc
+
+
+def _put_headers_for_signed_url(upload_url: str, signed: dict[str, Any], *, content_type: str) -> dict[str, str]:
+    """Build PUT headers required by a GCS signed upload URL."""
+    headers: dict[str, str] = {"Content-Type": content_type}
+
+    for key in ("uploadHeaders", "headers", "requiredHeaders"):
+        extra = signed.get(key)
+        if isinstance(extra, dict):
+            headers.update({str(k): str(v) for k, v in extra.items()})
+
+    qs = parse_qs(urlparse(upload_url).query, keep_blank_values=True)
+    signed_header_names = (qs.get("X-Goog-SignedHeaders") or qs.get("x-goog-signedheaders") or [""])[0]
+    have = {k.lower() for k in headers}
+    for name in signed_header_names.lower().split(";"):
+        name = name.strip()
+        if not name or name in have:
+            continue
+        # Platform signs create-only uploads with generation-match=0.
+        if name == "x-goog-if-generation-match":
+            headers["x-goog-if-generation-match"] = "0"
+            have.add(name)
+    return headers
 
 
 def account_summary(api_key: str) -> dict:
@@ -149,16 +175,19 @@ def upload_archive_and_ingest(
     if not upload_url or not session_id:
         raise UltralyticsApiError("Ultralytics signed-url response missing uploadUrl/sessionId", body=signed)
 
-    put_headers = {"Content-Type": "application/zip"}
-    # Some signed URLs require no auth header; do not forward the API key.
-    with zip_path.open("rb") as fh:
-        put_req = request.Request(upload_url, data=fh.read(), method="PUT", headers=put_headers)
-        try:
-            with request.urlopen(put_req, timeout=max(120.0, size / (256 * 1024) + 60.0)) as resp:
-                resp.read()
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise UltralyticsApiError(f"Upload PUT failed ({exc.code}): {detail or exc.reason}", status=exc.code) from exc
+    put_headers = _put_headers_for_signed_url(upload_url, signed, content_type="application/zip")
+    # Signed URLs are pre-authorized; do not forward the Platform API key.
+    timeout = max(120.0, size / (256 * 1024) + 60.0)
+    try:
+        with zip_path.open("rb") as fh:
+            resp = requests.put(upload_url, data=fh, headers=put_headers, timeout=timeout)
+            resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        status = exc.response.status_code if exc.response is not None else None
+        raise UltralyticsApiError(f"Upload PUT failed ({status}): {detail or exc}", status=status) from exc
+    except requests.RequestException as exc:
+        raise UltralyticsApiError(f"Upload PUT failed: {exc}") from exc
 
     _request("POST", "/upload/complete", api_key=api_key, body={"sessionId": session_id}, timeout=60.0)
 

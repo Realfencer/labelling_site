@@ -16,6 +16,18 @@ export default {
           900: "#111827",
           950: "#0b1220",
         },
+        manako: {
+          bg: "#080809",
+          sidebar: "#101012",
+          card: "#101012",
+          panel: "#212124",
+          text: "#ffffff",
+          muted: "#97979D",
+          border: "#313137",
+          success: "#10b981",
+          warning: "#eab308",
+          error: "#FF425B",
+        },
       },
       boxShadow: {
         soft: "0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.06)",

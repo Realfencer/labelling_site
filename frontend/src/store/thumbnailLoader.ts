@@ -9,9 +9,9 @@ const batchInflight = new Map<string, Promise<void>>();
 const queue: { url: string; priority: number }[] = [];
 const inflight = new Map<string, Promise<string>>();
 let active = 0;
-const MAX_CONCURRENT = 24;
-const MAX_CACHE = 800;
-const BATCH_SIZE = 32;
+const MAX_CONCURRENT = 8;
+const MAX_CACHE = 400;
+const BATCH_SIZE = 24;
 
 function trimCache() {
   while (blobCache.size > MAX_CACHE) {
@@ -105,30 +105,66 @@ export async function batchLoadStripThumbnails(
   });
   if (!pending.length) return;
 
+  const pendingBlocks = pending
+    .map((index) => blocks.get(index))
+    .filter((block): block is number => block != null);
+
+  await batchLoadStripByBlocks(pendingBlocks, mode, blocks, cacheToken, meta, pending);
+}
+
+export async function batchLoadStripByBlocks(
+  blocksWanted: number[],
+  mode: string,
+  indexByBlock: ReadonlyMap<number, number>,
+  cacheToken?: string,
+  meta?: ReadonlyMap<number, { item_key?: string; media_rev?: number }>,
+  indicesHint?: number[],
+): Promise<void> {
+  const blockToIndex = new Map<number, number>();
+  if (indicesHint?.length) {
+    indicesHint.forEach((index) => {
+      const block = indexByBlock.get(index);
+      if (block != null) blockToIndex.set(block, index);
+    });
+  } else {
+    indexByBlock.forEach((block, index) => {
+      if (!blockToIndex.has(block)) blockToIndex.set(block, index);
+    });
+  }
+
+  const pendingBlocks = blocksWanted.filter((block) => {
+    const index = blockToIndex.get(block);
+    if (index == null) return false;
+    const m = meta?.get(index);
+    const url = challengeThumbnailUrl(index, mode, block, true, cacheToken, m?.item_key, m?.media_rev);
+    return url && !blobCache.has(url);
+  });
+  if (!pendingBlocks.length) return;
+
   const chunks: number[][] = [];
-  for (let start = 0; start < pending.length; start += BATCH_SIZE) {
-    chunks.push(pending.slice(start, start + BATCH_SIZE));
+  for (let start = 0; start < pendingBlocks.length; start += BATCH_SIZE) {
+    chunks.push(pendingBlocks.slice(start, start + BATCH_SIZE));
   }
 
   await Promise.all(
     chunks.map(async (chunk) => {
-      const key = `${cacheToken || ""}:${chunk.join(",")}`;
+      const key = `blocks:${cacheToken || ""}:${chunk.join(",")}`;
       let job = batchInflight.get(key);
       if (!job) {
         job = (async () => {
-          const res = await fetch("/api/challenges/thumbnails/batch", {
+          const res = await fetch("/api/media/thumbnails/batch", {
             method: "POST",
             credentials: "include",
             headers: tabSessionHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ indices: chunk, mode, strip: true }),
+            body: JSON.stringify({ blocks: chunk, mode, strip: true }),
           });
           if (!res.ok) return;
           const data = (await res.json()) as { thumbnails?: Record<string, string> };
           const thumbs = data.thumbnails || {};
-          for (const [idxStr, b64] of Object.entries(thumbs)) {
-            const index = Number(idxStr);
-            const block = blocks.get(index);
-            if (block == null || !b64) continue;
+          for (const [blockStr, b64] of Object.entries(thumbs)) {
+            const block = Number(blockStr);
+            const index = blockToIndex.get(block);
+            if (index == null || !b64) continue;
             const m = meta?.get(index);
             const url = challengeThumbnailUrl(index, mode, block, true, cacheToken, m?.item_key, m?.media_rev);
             if (!url || blobCache.has(url)) continue;
@@ -150,9 +186,16 @@ async function fetchThumbnail(url: string): Promise<string> {
   if (pending) return pending;
 
   pending = (async () => {
-    const res = await fetch(url, { cache: "no-cache", credentials: "include", priority: "high" } as RequestInit);
+    let res = await fetch(url, {
+      cache: url.includes("strip=1") || /[?&]v=/.test(url) ? "force-cache" : "no-cache",
+      credentials: "include",
+      priority: "high",
+    } as RequestInit);
     if (!res.ok) {
-      throw new Error(`Thumbnail fetch failed: ${res.status}`);
+      // Bypass the browser cache once: a stored error answer must not hide the real thumbnail.
+      const retry = await fetch(url, { cache: "reload", credentials: "include", priority: "high" } as RequestInit);
+      if (!retry.ok) throw new Error(`Thumbnail fetch failed: ${retry.status}`);
+      res = retry;
     }
     const buf = new Uint8Array(await res.arrayBuffer());
     return storeBlob(url, buf);

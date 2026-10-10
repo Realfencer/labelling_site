@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from . import vault
+
 import json
 import os
 import re
@@ -23,16 +25,19 @@ HISTORY_ROOT = SCORE_ROOT / "review_datasets" / "merged_models"
 GT_STAGING_ROOT = SCORE_ROOT / "review_datasets" / "find_best_gt"
 RUNS_ROOT = SCORE_ROOT / "runs" / "find_best_web"
 
-STEP_RE = re.compile(r"\[(\d+)\s*/\s*8\]\s*(.*)$")
+STEP_RE = re.compile(r"\[(\d+)\s*/\s*(?:8|10)\]\s*(.*)$")
+NUM_STEPS = 10
 STEP_LABELS = {
-    1: "Scan Hugging Face models",
-    2: "Filter structure + class match",
+    1: "Commitments + known-author scan",
+    2: "Historical unique ONNX snaps",
     3: "Download miner packs",
     4: "Score packs on GT",
     5: "Cluster by ONNX cosine",
     6: "N-way soup / merge",
-    7: "Deep post-process",
-    8: "Compare vs top scored miner",
+    7: "Force top-1 × top-7",
+    8: "Deep post-process",
+    9: "Compare vs top scored miner",
+    10: "Result report",
 }
 STEP_ARTIFACTS = {
     1: "01_discover.json",
@@ -41,10 +46,13 @@ STEP_ARTIFACTS = {
     4: "04_scores.json",
     5: "05_clusters.json",
     6: "06_soups.json",
-    7: "07_postproc.json",
-    8: "SUMMARY.json",
+    7: "07_force_top1.json",
+    8: "08_postproc.json",
+    9: "09_compare.json",
+    10: "10_report.json",
 }
-MIN_REVIEWED_IMAGES = 100
+# Minimum Done GT images required to start Submit/merge (1 = any non-empty dataset).
+MIN_REVIEWED_IMAGES = 1
 
 
 def _utc_now() -> str:
@@ -60,6 +68,12 @@ def normalize_element_key(name: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     if s == "road signs":
         s = "road sign"
+    # Score Studio paths like Detect-beverage-detect / Detect-detect-vehicle
+    # become "beverage detect" / "detect vehicle" via skill_slug — drop redundant
+    # "detect" tokens so they match find_best aliases ("beverage", "vehicle").
+    parts = [p for p in s.split() if p != "detect"]
+    if parts:
+        s = " ".join(parts)
     return s
 
 
@@ -81,6 +95,16 @@ SCAN_RE = re.compile(
     r"scanned=(\d+).*miner\.py=(\d+).*structure(?:_ok)?=(\d+).*class_match=(\d+)"
 )
 MATCH_RE = re.compile(r"^\s+MATCH\s+(\S+)")
+PROGRESS_RE = re.compile(r"^\s+progress\s+(\w+):\s*(.+)$")
+COMMITMENTS_RE = re.compile(
+    r"commitments:\s*events=(\d+).*authors_in_window=(\d+).*store=(\d+)"
+)
+TIPS_PROGRESS_RE = re.compile(
+    r"progress tips:\s*matched=(\d+).*structure=(\d+).*count_mismatch=(\d+)"
+)
+HISTORY_PROGRESS_RE = re.compile(r"progress history:\s*(.+)$")
+DOWNLOAD_PROGRESS_RE = re.compile(r"progress download:\s*(\d+)/(\d+)\s+(\S+)")
+SCORE_PROGRESS_RE = re.compile(r"progress score:\s*(\d+)/(\d+)\s+(\S+)")
 DOWNLOADED_RE = re.compile(r"^\s+downloaded\s+(\S+)")
 READY_RE = re.compile(r"ready packs:\s*(\d+)")
 SCORE_LINE_RE = re.compile(
@@ -91,6 +115,12 @@ TOP_ITEM_RE = re.compile(r"^\s+(\d+)\.\s+(\S+)\s+([0-9.]+)\s*$")
 SOUP_FLAG_RE = re.compile(r"^\s+(KEEP|skip)\s+(\S+)\s+([0-9.]+)")
 POST_START_RE = re.compile(r"^\s+start\s+(\S+):\s*([0-9.]+)")
 POST_SCORE_RE = re.compile(r"score\s+([0-9.]+)")
+POST_TRIAL_RE = re.compile(
+    r"postproc\s+\[(\w+)\]\s+(\d+)/(\d+)\s+score=([0-9.]+)\s+best=([0-9.]+)\s+phase=(\S+)"
+)
+FORCE_PAIR_RE = re.compile(
+    r"\[force\s+(\d+)/(\d+)\]\s+(\S+)\s+×\s+(\S+)"
+)
 COMPARE_RE = re.compile(
     r"OUR\s+([0-9.]+).*TOP\s+([0-9.]+).*delta=([+-]?[0-9.]+)"
 )
@@ -218,10 +248,10 @@ def suggest_params_from_history(
 ) -> dict[str, Any]:
     """Prefer last successful run's knobs; fall back to reviewed-aware defaults."""
     suggested = {
-        "days": 14,
-        "top_k": 15,
+        "days": 7,
+        "top_k": 30,
         "min_cosine": 0.9,
-        "n_images": max(min_reviewed, min(reviewed, 300)) if reviewed else min_reviewed,
+        "n_images": max(min_reviewed, reviewed) if reviewed else min_reviewed,
         "source": "defaults",
     }
     for entry in history:
@@ -271,9 +301,16 @@ def _short_repo(repo_id: str) -> str:
 def summarize_step_artifact(step_n: int, out_dir: Path) -> dict[str, Any] | None:
     """Build a compact UI summary from a step's JSON artifact."""
     name = STEP_ARTIFACTS.get(step_n)
-    if not name:
-        return None
-    data = _load_json(out_dir / name)
+    data = _load_json(out_dir / name) if name else None
+    if data is None and step_n == 8:
+        data = _load_json(out_dir / "07_postproc.json")
+    if data is None and step_n == 9:
+        data = _load_json(out_dir / "SUMMARY.json")
+    if data is None and step_n == 10:
+        # Prefer dedicated report; else SUMMARY.report
+        summary = _load_json(out_dir / "SUMMARY.json")
+        if isinstance(summary, dict) and isinstance(summary.get("report"), dict):
+            data = summary["report"]
     if data is None:
         return None
 
@@ -301,29 +338,37 @@ def summarize_step_artifact(step_n: int, out_dir: Path) -> dict[str, Any] | None
         all_rows = (data or {}).get("all") if isinstance(data, dict) else []
         scored = [r for r in (all_rows or []) if isinstance(r, dict) and "score" in r]
         best = top[0] if top else None
+        best_score = float(best["score"]) if best and best.get("score") is not None else None
+        rows = []
+        for i, r in enumerate(top[:30], 1):
+            if not isinstance(r, dict):
+                continue
+            score = float(r.get("score") or 0)
+            rows.append(
+                {
+                    "title": _short_repo(r.get("repo_id", "")),
+                    "subtitle": r.get("repo_id", ""),
+                    "meta": f"mAP {float(r.get('map50') or 0):.3f} · ffpi {float(r.get('ffpi') or 0):.1f}",
+                    "rank": i,
+                    "score": score,
+                    "bar": round(100.0 * score / best_score, 1) if best_score and best_score > 0 else None,
+                }
+            )
         return {
             "headline": (
-                f"Best {best['score']:.4f} · {_short_repo(best.get('repo_id', ''))}"
+                f"Top {len(top)} for merge · best {best['score']:.4f} · {_short_repo(best.get('repo_id', ''))}"
                 if best
                 else f"{len(scored)} packs scored"
             ),
             "metrics": [
                 {"label": "Scored", "value": str(len(scored))},
-                {"label": "Top-k", "value": str(len(top))},
+                {"label": "Merge", "value": str(len(top))},
                 {
                     "label": "Best",
                     "value": f"{best['score']:.4f}" if best else "—",
                 },
             ],
-            "rows": [
-                {
-                    "title": f"{r.get('score', 0):.4f}  {_short_repo(r.get('repo_id', ''))}",
-                    "subtitle": r.get("repo_id", ""),
-                    "meta": f"mAP {r.get('map50', 0):.3f} · ffpi {r.get('ffpi', 0):.1f}",
-                }
-                for r in top[:10]
-                if isinstance(r, dict)
-            ],
+            "rows": rows,
         }
 
     if step_n == 5:
@@ -365,7 +410,7 @@ def summarize_step_artifact(step_n: int, out_dir: Path) -> dict[str, Any] | None
             "rows": [
                 {
                     "title": f"{r.get('score', 0):.4f}  {r.get('name') or r.get('method') or 'soup'}",
-                    "subtitle": " + ".join(r.get("pair") or [])[:80],
+                    "subtitle": " + ".join(r.get("pair") or r.get("members") or [])[:80],
                     "meta": "KEEP" if r.get("greedy_keep") else "skip",
                 }
                 for r in (keep or ok)[:10]
@@ -373,22 +418,93 @@ def summarize_step_artifact(step_n: int, out_dir: Path) -> dict[str, Any] | None
         }
 
     if step_n == 7:
+        if not isinstance(data, dict):
+            return {"headline": "Force top-1 complete", "metrics": [], "rows": []}
+        # Legacy runs stored postproc at step 7 — detect by keys.
+        if "kept" not in data and "partners" not in data and ("mode" in data or "params" in data):
+            score = data.get("best_score") or data.get("score") or (data.get("params") or {}).get("score")
+            return {
+                "headline": f"Post-process complete" + (f" · {float(score):.4f}" if score is not None else ""),
+                "metrics": [{"label": "Mode", "value": str(data.get("mode") or "search")}],
+                "rows": [],
+            }
+        kept = data.get("kept") or []
+        best = data.get("best") or (kept[0] if kept else None)
+        partners = data.get("partners") or []
+        rows = []
+        src_rows = kept[:12] if kept else [r for r in (data.get("results") or []) if isinstance(r, dict) and "score" in r][:12]
+        for r in src_rows:
+            rows.append(
+                {
+                    "title": f"{float(r.get('score') or 0):.4f}  {r.get('name') or 'force'}",
+                    "subtitle": " + ".join(r.get("members") or r.get("pair") or [])[:100],
+                    "meta": (
+                        f"w={r.get('weights')} · {r.get('method')}"
+                        if r.get("weights") is not None
+                        else ("KEEP" if r.get("greedy_keep") else "skip")
+                    ),
+                    "score": float(r.get("score") or 0),
+                }
+            )
+        return {
+            "headline": (
+                f"Force top-1×{data.get('k', 7)} · kept {len(kept)}"
+                + (
+                    f" · best {float(best.get('score')):.4f}"
+                    if isinstance(best, dict) and best.get("score") is not None
+                    else ""
+                )
+            ),
+            "metrics": [
+                {"label": "K", "value": str(data.get("k") or len(partners))},
+                {"label": "Kept", "value": str(len(kept))},
+                {
+                    "label": "Best",
+                    "value": (
+                        f"{float(best['score']):.4f}"
+                        if isinstance(best, dict) and best.get("score") is not None
+                        else "—"
+                    ),
+                },
+            ],
+            "rows": rows
+            or [
+                {
+                    "title": "No force soup beat baseline",
+                    "subtitle": ", ".join(_short_repo(p) for p in partners[:6]),
+                }
+            ],
+        }
+
+    if step_n == 8:
+        if data is None or (isinstance(data, dict) and not data):
+            data = _load_json(out_dir / "07_postproc.json")
         score = None
         if isinstance(data, dict):
-            score = data.get("best_score") or (data.get("params") or {}).get("score")
-            if score is None and "score" in data:
-                score = data.get("score")
+            score = data.get("best_score") or data.get("score") or (data.get("params") or {}).get("score")
         return {
             "headline": f"Post-process complete" + (f" · {float(score):.4f}" if score is not None else ""),
             "metrics": [
                 {"label": "Mode", "value": str((data or {}).get("mode") or "search")},
+                {
+                    "label": "Reverted",
+                    "value": "yes" if isinstance(data, dict) and data.get("reverted") else "no",
+                },
             ],
             "rows": [],
         }
 
-    if step_n == 8 and isinstance(data, dict):
-        live = ((data.get("best_final") or {}).get("live") or {})
+    if step_n == 9:
+        if not isinstance(data, dict):
+            data = _load_json(out_dir / "SUMMARY.json") or {}
+        live = (
+            ((data.get("ours") or {}).get("live") if isinstance(data.get("ours"), dict) else None)
+            or ((data.get("best_final") or {}).get("live") if isinstance(data.get("best_final"), dict) else None)
+            or {}
+        )
         baseline = data.get("top_miner") or data.get("winner") or {}
+        if not isinstance(baseline, dict):
+            baseline = {}
         baseline_live = baseline.get("live") or {}
         delta = data.get("delta_score")
         our = live.get("score")
@@ -415,6 +531,159 @@ def summarize_step_artifact(step_n: int, out_dir: Path) -> dict[str, Any] | None
                     "meta": "step-4 #1",
                 }
             ],
+        }
+
+    if step_n == 10:
+        if not isinstance(data, dict):
+            data = {}
+        stage = data.get("winner_stage_label") or data.get("winner_stage") or "—"
+        members = data.get("merged_members") or []
+        weights = data.get("merge_weights")
+        merge_s = data.get("score_after_merge")
+        post_s = data.get("score_after_postproc")
+        best_single = data.get("best_single") if isinstance(data.get("best_single"), dict) else {}
+        cosine_best = data.get("cosine_soup_best") if isinstance(data.get("cosine_soup_best"), dict) else None
+        force_info = data.get("force_top1") if isinstance(data.get("force_top1"), dict) else {}
+        force_best = force_info.get("best") if isinstance(force_info.get("best"), dict) else None
+        vs_top = data.get("vs_top_miner") if isinstance(data.get("vs_top_miner"), dict) else {}
+        vs_live = vs_top.get("live") if isinstance(vs_top.get("live"), dict) else {}
+        rows = [
+            {
+                "title": f"Winner stage: {stage}",
+                "subtitle": str(data.get("merge_name") or ""),
+                "meta": str(data.get("winner_stage") or ""),
+            },
+            {
+                "title": "Merged models",
+                "subtitle": " + ".join(str(m) for m in members) if members else "(single pack)",
+                "meta": f"method={data.get('merge_method') or '—'}",
+            },
+            {
+                "title": "Merge weights",
+                "subtitle": str(weights) if weights is not None else "n/a (single)",
+                "meta": f"template={data.get('merge_template') or '—'}",
+            },
+            {
+                "title": (
+                    f"Best single  {float(best_single['score']):.4f}"
+                    if best_single.get("score") is not None
+                    else "Best single  —"
+                ),
+                "subtitle": str(best_single.get("repo_id") or ""),
+                "meta": "step-4 #1",
+                "score": float(best_single["score"]) if isinstance(best_single.get("score"), (int, float)) else None,
+            },
+        ]
+        if cosine_best:
+            rows.append(
+                {
+                    "title": (
+                        f"Cosine soup  {float(cosine_best['score']):.4f}"
+                        if cosine_best.get("score") is not None
+                        else "Cosine soup  —"
+                    ),
+                    "subtitle": " + ".join(str(m) for m in (cosine_best.get("members") or []))[:100],
+                    "meta": f"w={cosine_best.get('weights')} · {cosine_best.get('method') or ''}",
+                    "score": (
+                        float(cosine_best["score"])
+                        if isinstance(cosine_best.get("score"), (int, float))
+                        else None
+                    ),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "title": "Cosine soup  (none kept)",
+                    "subtitle": "No cosine-gated soup beat member baselines",
+                    "meta": "min_cosine band",
+                }
+            )
+        if force_best:
+            rows.append(
+                {
+                    "title": (
+                        f"Force top-1×{force_info.get('k', 7)}  {float(force_best['score']):.4f}"
+                        if force_best.get("score") is not None
+                        else f"Force top-1×{force_info.get('k', 7)}  —"
+                    ),
+                    "subtitle": " + ".join(str(m) for m in (force_best.get("members") or []))[:100],
+                    "meta": (
+                        f"w={force_best.get('weights')} · kept {force_info.get('n_kept', 0)}/"
+                        f"{force_info.get('n_scored', 0)}"
+                    ),
+                    "score": (
+                        float(force_best["score"])
+                        if isinstance(force_best.get("score"), (int, float))
+                        else None
+                    ),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "title": f"Force top-1×{force_info.get('k', 7)}  (none kept)",
+                    "subtitle": ", ".join(str(p) for p in (force_info.get("partners") or [])[:5]),
+                    "meta": f"scored {force_info.get('n_scored', 0)}",
+                }
+            )
+        rows.extend(
+            [
+                {
+                    "title": (
+                        f"Score after merge  {float(merge_s):.4f}"
+                        if merge_s is not None
+                        else "Score after merge  —"
+                    ),
+                    "subtitle": f"winner={data.get('winner_stage') or '—'}",
+                    "meta": "before deep postproc",
+                    "score": float(merge_s) if isinstance(merge_s, (int, float)) else None,
+                },
+                {
+                    "title": (
+                        f"Score after postproc  {float(post_s):.4f}"
+                        if post_s is not None
+                        else "Score after postproc  —"
+                    ),
+                    "subtitle": (
+                        f"p95 {(data.get('final_latency') or {}).get('p95_ms')}ms"
+                        if (data.get("final_latency") or {}).get("p95_ms") is not None
+                        else ""
+                    ),
+                    "meta": "reverted" if (data.get("postproc") or {}).get("reverted") else "applied",
+                    "score": float(post_s) if isinstance(post_s, (int, float)) else None,
+                },
+                {
+                    "title": (
+                        f"Vs top miner  Δ{float(data['delta_vs_top_miner']):+.4f}"
+                        if isinstance(data.get("delta_vs_top_miner"), (int, float))
+                        else "Vs top miner"
+                    ),
+                    "subtitle": str(vs_top.get("repo_id") or ""),
+                    "meta": (
+                        f"top={float(vs_live['score']):.4f}"
+                        if isinstance(vs_live.get("score"), (int, float))
+                        else "step-4 #1"
+                    ),
+                },
+            ]
+        )
+        return {
+            "headline": (
+                f"{stage} · final {float(post_s):.4f}" if isinstance(post_s, (int, float)) else str(stage)
+            ),
+            "metrics": [
+                {"label": "Stage", "value": str(data.get("winner_stage") or "—")[:18]},
+                {
+                    "label": "Merge",
+                    "value": f"{float(merge_s):.4f}" if isinstance(merge_s, (int, float)) else "—",
+                },
+                {
+                    "label": "Final",
+                    "value": f"{float(post_s):.4f}" if isinstance(post_s, (int, float)) else "—",
+                },
+            ],
+            "rows": rows,
         }
 
     return {"headline": "Complete", "metrics": [], "rows": []}
@@ -478,6 +747,7 @@ class FindBestJob:
         for raw in self.steps:
             item = dict(raw)
             live = item.pop("live", None)
+            item.pop("_score_board", None)
             use_live = isinstance(live, dict) and (
                 bool(live.get("rows")) or bool(live.get("headline")) or bool(live.get("metrics"))
             )
@@ -572,7 +842,7 @@ class FindBestManager:
         artifact_dir = _artifact_dir_for_history(dest, meta if isinstance(meta, dict) else {})
         steps: list[dict[str, Any]] = []
         last_done = 0
-        for n in range(1, 9):
+        for n in range(1, NUM_STEPS + 1):
             summary = summarize_step_artifact(n, artifact_dir)
             if summary:
                 last_done = n
@@ -582,7 +852,7 @@ class FindBestManager:
             steps.append(
                 {
                     "n": n,
-                    "label": STEP_LABELS[n],
+                    "label": STEP_LABELS.get(n, f"Step {n}"),
                     "status": status,
                     "summary": summary,
                 }
@@ -592,8 +862,8 @@ class FindBestManager:
         return {
             "id": history_id,
             "history_id": history_id,
-            "status": "done" if last_done >= 8 else ("partial" if last_done else "unknown"),
-            "step": last_done or (8 if (dest / "SUMMARY.json").is_file() else 0),
+            "status": "done" if last_done >= 6 else ("partial" if last_done else "unknown"),
+            "step": last_done or (NUM_STEPS if (dest / "SUMMARY.json").is_file() else 0),
             "step_label": STEP_LABELS.get(last_done, "Complete") if last_done else "Unknown",
             "element": (meta.get("element") if isinstance(meta, dict) else None) or "",
             "steps": steps,
@@ -660,13 +930,28 @@ class FindBestManager:
         n_boxes = sum(int(im["n_boxes"]) for im in images_out)
         by_cls: dict[int, int] = {}
         for im in images_out:
+            per: dict[int, int] = {}
             for box in im["boxes"]:
                 cid = int(box.get("cls") or 0)
                 by_cls[cid] = by_cls.get(cid, 0) + 1
+                per[cid] = per.get(cid, 0) + 1
+            counts: list[dict[str, Any]] = [
+                {
+                    "cls": i,
+                    "name": names[i] if i < len(names) else f"cls {i}",
+                    "count": int(per.get(i, 0)),
+                }
+                for i in range(len(names))
+            ]
+            for cid in sorted(c for c in per if c < 0 or c >= len(names)):
+                counts.append({"cls": cid, "name": f"cls {cid}", "count": int(per[cid])})
+            im["class_counts"] = counts
         classes = [
-            {"cls": cid, "name": names[cid] if 0 <= cid < len(names) else f"cls {cid}", "count": n}
-            for cid, n in sorted(by_cls.items(), key=lambda kv: -kv[1])
+            {"cls": i, "name": names[i], "count": int(by_cls.get(i, 0))}
+            for i in range(len(names))
         ]
+        for cid in sorted(c for c in by_cls if c < 0 or c >= len(names)):
+            classes.append({"cls": cid, "name": f"cls {cid}", "count": int(by_cls[cid])})
         return {
             "history_id": history_id,
             "class_names": names,
@@ -676,6 +961,131 @@ class FindBestManager:
             "skipped": skipped,
             "classes": classes,
             "images": images_out,
+        }
+
+    def push_ship_to_hf(self, history_id: str, *, token: str, repo: str) -> dict[str, Any]:
+        """Push ship pack to Hugging Face (create if missing, else update). No README."""
+        import ast
+        import io
+        import tempfile
+        import tokenize
+
+        from huggingface_hub import HfApi
+
+        repo = (repo or "").strip().strip("/")
+        token = vault.hf_token(token, repo)  # saved account that owns this repo, unless one was passed
+        if not token:
+            raise ValueError("No Hugging Face token saved — add one under API keys")
+        if not repo:
+            raise ValueError("Repo name is required")
+
+        dest = self.history_entry_dir(history_id)
+        if dest is None:
+            raise FileNotFoundError("History entry not found")
+        ship = dest / "ship"
+        weights = ship / "weights.onnx"
+        miner_py = ship / "miner.py"
+        if not miner_py.is_file():
+            miner_py = ship / "main.py"
+        chute = ship / "chute_config.yml"
+        if not weights.is_file():
+            raise FileNotFoundError("Ship pack incomplete (missing weights.onnx)")
+        if not miner_py.is_file():
+            raise FileNotFoundError("Ship pack incomplete (missing miner.py)")
+        if not chute.is_file():
+            raise FileNotFoundError("Ship pack incomplete (missing chute_config.yml)")
+
+        def strip_comments_and_docs(src: str) -> str:
+            toks = [
+                t
+                for t in tokenize.tokenize(io.BytesIO(src.encode()).readline)
+                if t.type != tokenize.COMMENT
+            ]
+            clean = tokenize.untokenize(toks)
+            if isinstance(clean, bytes):
+                clean = clean.decode()
+
+            class DocStrip(ast.NodeTransformer):
+                def _strip(self, node):
+                    if not getattr(node, "body", None):
+                        return node
+                    first = node.body[0]
+                    if isinstance(first, ast.Expr) and isinstance(getattr(first, "value", None), ast.Constant):
+                        if isinstance(first.value.value, str):
+                            node.body = node.body[1:] or [ast.Pass()]
+                    return node
+
+                def visit_Module(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+                def visit_FunctionDef(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+                def visit_AsyncFunctionDef(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+                def visit_ClassDef(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+            return ast.unparse(DocStrip().visit(ast.parse(clean))) + "\n"
+
+        api = HfApi(token=token)
+        if "/" not in repo:
+            info = api.whoami()
+            user = info.get("name")
+            if not user:
+                orgs = info.get("orgs") or []
+                if orgs and isinstance(orgs[0], dict):
+                    user = orgs[0].get("name")
+            if not user:
+                raise ValueError("Could not resolve HF username; use user/repo")
+            repo = f"{user}/{repo}"
+
+        created = False
+        try:
+            api.repo_info(repo_id=repo, repo_type="model")
+        except Exception:
+            api.create_repo(repo_id=repo, repo_type="model", private=True, exist_ok=True)
+            created = True
+        try:
+            api.update_repo_settings(repo_id=repo, private=True, repo_type="model")
+        except Exception:
+            pass
+
+        miner_src = miner_py.read_text(encoding="utf-8")
+        try:
+            miner_clean = strip_comments_and_docs(miner_src)
+        except Exception as exc:
+            raise ValueError(f"Failed to strip miner.py comments: {exc}") from exc
+
+        with tempfile.TemporaryDirectory(prefix="hf_ship_") as tmp:
+            out = Path(tmp)
+            (out / "miner.py").write_text(miner_clean, encoding="utf-8")
+            shutil.copy2(weights, out / "weights.onnx")
+            shutil.copy2(chute, out / "chute_config.yml")
+            api.upload_folder(
+                folder_path=str(out),
+                repo_id=repo,
+                repo_type="model",
+                commit_message=".",
+                allow_patterns=["miner.py", "weights.onnx", "chute_config.yml"],
+            )
+
+        try:
+            api.delete_file("README.md", repo_id=repo, repo_type="model", commit_message=".")
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "history_id": history_id,
+            "repo_id": repo,
+            "created": created,
+            "url": f"https://huggingface.co/{repo}",
         }
 
     def start(
@@ -702,7 +1112,7 @@ class FindBestManager:
                     "summary": None,
                     "live": {"headline": "Queued", "metrics": [], "rows": []},
                 }
-                for i in range(1, 9)
+                for i in range(1, NUM_STEPS + 1)
             ]
             out_dir = RUNS_ROOT / f"{job_id}_{_safe(element)}"
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -817,6 +1227,36 @@ class FindBestManager:
         rows.insert(0, {"title": title[:160], "subtitle": subtitle[:200], "meta": meta[:80]})
         live["rows"] = rows[:40]
 
+    def _live_set_scoreboard(self, step: dict, board: list[dict]) -> None:
+        """Keep a ranked top-30 leaderboard in the live step summary."""
+        live = self._step_live(step)
+        board = sorted(board, key=lambda r: float(r.get("score") or 0), reverse=True)
+        best = float(board[0]["score"]) if board else 0.0
+        top_n = board[:30]
+        live["headline"] = (
+            f"Best {best:.4f} · {len(board)} scored · merge top {len(top_n)}"
+            if board
+            else "Scoring…"
+        )
+        live["metrics"] = [
+            {"label": "Scored", "value": str(len(board))},
+            {"label": "Merge", "value": str(len(top_n))},
+            {"label": "Best", "value": f"{best:.4f}" if board else "—"},
+        ]
+        live["rows"] = [
+            {
+                "title": _short_repo(str(r.get("repo_id") or "")),
+                "subtitle": str(r.get("repo_id") or ""),
+                "meta": (
+                    f"mAP {float(r.get('map50') or 0):.3f} · ffpi {float(r.get('ffpi') or 0):.1f}"
+                ),
+                "rank": i,
+                "score": float(r.get("score") or 0),
+                "bar": round(100.0 * float(r.get("score") or 0) / best, 1) if best > 0 else None,
+            }
+            for i, r in enumerate(top_n, 1)
+        ]
+
     def _ingest_live_line(self, job: FindBestJob, line: str) -> None:
         step = next((s for s in job.steps if int(s["n"]) == int(job.step or 0)), None)
         if step is None:
@@ -824,6 +1264,53 @@ class FindBestManager:
         live = self._step_live(step)
         text = line.rstrip()
 
+        m = COMMITMENTS_RE.search(text)
+        if m:
+            live["headline"] = f"Chain sync · {m.group(2)} authors in window · store {m.group(3)}"
+            live["metrics"] = [
+                {"label": "Events", "value": m.group(1)},
+                {"label": "Window authors", "value": m.group(2)},
+                {"label": "Store", "value": m.group(3)},
+            ]
+            return
+        m = PROGRESS_RE.match(text)
+        if m:
+            kind, detail = m.group(1), m.group(2).strip()
+            live["headline"] = f"{kind}: {detail[:100]}"
+            if kind == "authors":
+                live["metrics"] = [{"label": "Authors", "value": detail.split()[0] if detail else "—"}]
+            elif kind == "tips":
+                tm = TIPS_PROGRESS_RE.search(text)
+                if tm:
+                    live["metrics"] = [
+                        {"label": "Matched", "value": tm.group(1)},
+                        {"label": "Structure", "value": tm.group(2)},
+                        {"label": "Count≠", "value": tm.group(3)},
+                    ]
+            elif kind == "history":
+                live["metrics"] = [{"label": "History", "value": detail[:40]}]
+            elif kind == "download":
+                dm = DOWNLOAD_PROGRESS_RE.search(text)
+                if dm:
+                    pct = 100.0 * int(dm.group(1)) / max(int(dm.group(2)), 1)
+                    live["metrics"] = [
+                        {"label": "Pack", "value": f"{dm.group(1)}/{dm.group(2)}"},
+                        {"label": "%", "value": f"{pct:.0f}"},
+                    ]
+                    self._live_add_row(step, _short_repo(dm.group(3)), dm.group(3), "fetch")
+            elif kind == "score":
+                sm = SCORE_PROGRESS_RE.search(text)
+                if sm:
+                    pct = 100.0 * int(sm.group(1)) / max(int(sm.group(2)), 1)
+                    live["metrics"] = [
+                        {"label": "Score", "value": f"{sm.group(1)}/{sm.group(2)}"},
+                        {"label": "%", "value": f"{pct:.0f}"},
+                    ]
+            return
+        m = HISTORY_PROGRESS_RE.search(text)
+        if m:
+            live["headline"] = f"History · {m.group(1)[:90]}"
+            return
         m = SCAN_RE.search(text)
         if m:
             live["headline"] = f"Scanning… {m.group(4)} class matches"
@@ -852,18 +1339,19 @@ class FindBestManager:
             return
         m = SCORE_LINE_RE.match(text)
         if m:
-            live["headline"] = f"Best so far {m.group(2)}"
-            scored = 1 + len(live["rows"])
-            live["metrics"] = [
-                {"label": "Scored", "value": str(scored)},
-                {"label": "Last", "value": m.group(2)},
-            ]
-            self._live_add_row(
-                step,
-                f"{m.group(2)}  {_short_repo(m.group(1))}",
-                m.group(1),
-                f"mAP {m.group(3)} · ffpi {m.group(4)}",
+            board = step.setdefault("_score_board", [])
+            if not isinstance(board, list):
+                board = []
+                step["_score_board"] = board
+            board.append(
+                {
+                    "repo_id": m.group(1),
+                    "score": float(m.group(2)),
+                    "map50": float(m.group(3)),
+                    "ffpi": float(m.group(4)),
+                }
             )
+            self._live_set_scoreboard(step, board)
             return
         m = SCORE_ERR_RE.match(text)
         if m:
@@ -871,7 +1359,7 @@ class FindBestManager:
             return
         m = TOP_ITEM_RE.match(text)
         if m:
-            self._live_add_row(step, f"{m.group(1)}. {_short_repo(m.group(2))}  {m.group(3)}", m.group(2))
+            # Final top list is already reflected via scoreboard / 04_scores.json.
             return
         m = SOUP_FLAG_RE.match(text)
         if m:
@@ -879,14 +1367,44 @@ class FindBestManager:
             kept = sum(1 for r in live["rows"] if r.get("meta") == "KEEP")
             if flag == "KEEP":
                 kept += 1
-            live["headline"] = f"{kept} soups kept · last {score}"
+            prefix = "force" if job.step == 7 else "soups"
+            live["headline"] = f"{kept} {prefix} kept · last {score}"
             self._live_add_row(step, f"{score}  {name[:48]}", "", flag)
+            return
+        m = FORCE_PAIR_RE.search(text)
+        if m and job.step == 7:
+            i, total, a_id, b_id = m.group(1), m.group(2), m.group(3), m.group(4)
+            live["headline"] = f"Force {i}/{total} · {_short_repo(a_id)} × {_short_repo(b_id)}"
+            live["metrics"] = [
+                {"label": "Pair", "value": f"{i}/{total}"},
+                {"label": "Anchor", "value": _short_repo(a_id)},
+                {"label": "Partner", "value": _short_repo(b_id)},
+            ]
+            self._live_add_row(
+                step,
+                f"{_short_repo(a_id)} × {_short_repo(b_id)}",
+                f"{a_id} × {b_id}",
+                f"force {i}/{total}",
+            )
             return
         m = POST_START_RE.match(text)
         if m:
             live["headline"] = f"{m.group(1)} {m.group(2)}"
             live["metrics"] = [{"label": "Start", "value": m.group(2)}]
             self._live_add_row(step, f"{m.group(1)}  {m.group(2)}", "", "start")
+            return
+        m = POST_TRIAL_RE.search(text)
+        if m and job.step == 8:
+            style, trial, total, score, best, phase = m.groups()
+            pct = 100.0 * int(trial) / max(int(total), 1)
+            live["headline"] = f"{style} · trial {trial}/{total} · best {best}"
+            live["metrics"] = [
+                {"label": "Best", "value": best},
+                {"label": "Trial", "value": f"{trial}/{total}"},
+                {"label": "Phase", "value": phase[:24]},
+                {"label": "%", "value": f"{pct:.0f}"},
+            ]
+            self._live_add_row(step, f"{score}  {phase}", f"{style} {trial}/{total}", best)
             return
         m = COMPARE_RE.search(text)
         if m:
@@ -903,7 +1421,7 @@ class FindBestManager:
             live["metrics"] = [{"label": "Top miner", "value": m.group(2)}]
             self._live_add_row(step, _short_repo(m.group(1)), m.group(1), m.group(2))
             return
-        if "score " in text and job.step == 7:
+        if "score " in text and job.step == 8:
             sm = POST_SCORE_RE.search(text)
             if sm:
                 live["headline"] = f"Post-process score {sm.group(1)}"
@@ -996,6 +1514,8 @@ class FindBestManager:
             str(top_k),
             "--min-cosine",
             str(min_cosine),
+            "--force-top1-k",
+            "7",
             "--out",
             str(out_dir),
         ]
@@ -1066,7 +1586,7 @@ class FindBestManager:
                 summary = summarize_step_artifact(s["n"], out_dir)
                 if summary:
                     s["summary"] = summary
-            job.step = 8
+            job.step = NUM_STEPS
             job.step_label = "Complete"
             history_id = self._archive_result(job, out_dir, element)
             job.history_id = history_id
@@ -1134,7 +1654,7 @@ class FindBestManager:
             "id": history_id,
             "history_id": history_id,
             "status": job.status,
-            "step": job.step or 8,
+            "step": job.step or NUM_STEPS,
             "step_label": job.step_label or "Complete",
             "element": element,
             "steps": _public_steps(job.steps),
@@ -1151,6 +1671,93 @@ class FindBestManager:
         self._save_history_index(history[:200])
         job.result = entry
         return history_id
+
+    def register_external_ship(
+        self,
+        *,
+        ship_src: Path,
+        element: str,
+        score: float | None = None,
+        label: str = "",
+        summary: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        winner: str | None = None,
+        run_dir: Path | None = None,
+    ) -> str:
+        """Archive an external ship pack into merged-model history (Eval / Load / ZIP)."""
+        HISTORY_ROOT.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        job_id = uuid.uuid4().hex[:12]
+        history_id = f"{stamp}_{_safe(element)}_{job_id}"
+        dest = HISTORY_ROOT / history_id
+        dest.mkdir(parents=True, exist_ok=True)
+
+        ship_src = Path(ship_src)
+        if not ship_src.is_dir():
+            raise FileNotFoundError(f"ship folder missing: {ship_src}")
+        shutil.copytree(ship_src, dest / "ship", dirs_exist_ok=True)
+        # Drop local caches from ship copies.
+        pyc = dest / "ship" / "__pycache__"
+        if pyc.is_dir():
+            shutil.rmtree(pyc, ignore_errors=True)
+
+        payload = dict(summary or {})
+        if run_dir is not None:
+            summary_src = Path(run_dir) / "SUMMARY.json"
+            if summary_src.is_file() and not (dest / "SUMMARY.json").is_file():
+                shutil.copy2(summary_src, dest / "SUMMARY.json")
+                try:
+                    payload = json.loads((dest / "SUMMARY.json").read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+        elif summary is not None:
+            (dest / "SUMMARY.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        onnx = dest / "ship" / "weights.onnx"
+        entry = {
+            "id": history_id,
+            "created_at": _utc_now(),
+            "element": element,
+            "label": label or None,
+            "params": params or {"source": "external_ship"},
+            "score": score if score is not None else (payload.get("live") or {}).get("score"),
+            "delta_score": None,
+            "winner": winner,
+            "top_miner": winner,
+            "has_onnx": onnx.is_file(),
+            "onnx_size": onnx.stat().st_size if onnx.is_file() else 0,
+            "run_dir": str(run_dir) if run_dir else str(ship_src.parent),
+        }
+        (dest / "meta.json").write_text(json.dumps(entry, indent=2), encoding="utf-8")
+        progress = {
+            "id": history_id,
+            "history_id": history_id,
+            "status": "done",
+            "step": NUM_STEPS,
+            "step_label": "Complete",
+            "element": element,
+            "steps": [
+                {
+                    "n": i,
+                    "label": STEP_LABELS[i],
+                    "status": "done" if i == NUM_STEPS else "skipped",
+                    "summary": label if i == NUM_STEPS else None,
+                }
+                for i in range(1, NUM_STEPS + 1)
+            ],
+            "error": None,
+            "params": entry["params"],
+            "result": entry,
+            "started_at": entry["created_at"],
+            "finished_at": entry["created_at"],
+            "score": entry.get("score"),
+        }
+        (dest / "progress.json").write_text(json.dumps(progress, indent=2), encoding="utf-8")
+        history = self.list_history()
+        history.insert(0, entry)
+        self._save_history_index(history[:200])
+        return history_id
+
 
 
 find_best_manager = FindBestManager()

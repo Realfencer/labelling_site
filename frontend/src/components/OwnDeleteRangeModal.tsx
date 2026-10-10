@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Loader2, Trash2, X } from "lucide-react";
 import type { ChallengeItem } from "../types";
 import { cn } from "../lib/utils";
+import ImageSelectionField from "./ImageSelectionField";
 
 const HIST_BINS = 48;
 
@@ -14,7 +15,7 @@ export default function OwnDeleteRangeModal({
   open: boolean;
   onClose: () => void;
   challenges: ChallengeItem[];
-  onDelete: (opts: { blockMin: number; blockMax: number }) => Promise<void>;
+  onDelete: (opts: { blockMin: number; blockMax: number; itemKeys?: string[] }) => Promise<void>;
 }) {
   const loaded = useMemo(
     () => challenges.filter((c) => c.loaded && (c.block || 0) > 0),
@@ -25,6 +26,7 @@ export default function OwnDeleteRangeModal({
   const maxBlock = blocks[blocks.length - 1] ?? 0;
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [picked, setPicked] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -32,6 +34,7 @@ export default function OwnDeleteRangeModal({
     if (!open) return;
     setFrom(minBlock ? String(minBlock) : "");
     setTo(maxBlock ? String(maxBlock) : "");
+    setPicked(null);
     setBusy(false);
     setError("");
   }, [open, minBlock, maxBlock]);
@@ -44,8 +47,10 @@ export default function OwnDeleteRangeModal({
   const hi = Math.max(rawLo, rawHi);
   const span = Math.max(1, maxBlock - minBlock);
   const inRange = loaded.filter((c) => c.block >= lo && c.block <= hi);
-  const doneCount = inRange.filter((c) => c.reviewed).length;
-  const newCount = inRange.length - doneCount;
+  const pickedSet = picked ? new Set(picked) : null;
+  const target = pickedSet ? loaded.filter((c) => pickedSet.has(c.item_key)) : inRange;
+  const doneCount = target.filter((c) => c.reviewed).length;
+  const newCount = target.length - doneCount;
 
   const hist = useMemo(() => {
     const bins = new Array(HIST_BINS).fill(0);
@@ -82,6 +87,8 @@ export default function OwnDeleteRangeModal({
         </div>
 
         <div className="space-y-4 px-4 py-4">
+          <ImageSelectionField suggest={inRange.map((c) => c.item_key)} challenges={challenges} ownMode doneOnly={false} value={picked} onChange={setPicked} verb="delete" />
+          <div className={cn("space-y-4", picked && "pointer-events-none opacity-40")}>
           <div className="grid grid-cols-2 gap-2">
             <label className="block">
               <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">From #</span>
@@ -141,11 +148,13 @@ export default function OwnDeleteRangeModal({
             Reset to all Own images ({minBlock}–{maxBlock})
           </button>
 
+          </div>
+
           <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 dark:border-rose-900/50 dark:bg-rose-950/30">
             <div className="text-[10px] font-bold uppercase tracking-wider text-rose-500">Will remove</div>
-            <div className="mt-0.5 text-2xl font-black tabular-nums text-slate-900 dark:text-white">{inRange.length}</div>
+            <div className="mt-0.5 text-2xl font-black tabular-nums text-slate-900 dark:text-white">{target.length}</div>
             <div className="text-[11px] text-slate-500">
-              index {lo}–{hi} · {newCount} New · {doneCount} Done
+              {picked ? "hand-picked" : `index ${lo}–${hi}`} · {newCount} New · {doneCount} Done
             </div>
           </div>
 
@@ -166,11 +175,11 @@ export default function OwnDeleteRangeModal({
           </button>
           <button
             type="button"
-            disabled={busy || inRange.length <= 0}
+            disabled={busy || target.length <= 0}
             onClick={() => {
               setBusy(true);
               setError("");
-              void onDelete({ blockMin: lo, blockMax: hi })
+              void onDelete({ blockMin: lo, blockMax: hi, itemKeys: picked ?? undefined })
                 .then(() => onClose())
                 .catch((e) => setError(String(e).replace(/^Error:\s*/i, "")))
                 .finally(() => setBusy(false));
@@ -178,7 +187,7 @@ export default function OwnDeleteRangeModal({
             className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-500 disabled:opacity-40"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-            {busy ? "Deleting…" : `Delete ${inRange.length}`}
+            {busy ? "Deleting…" : `Delete ${target.length}`}
           </button>
         </div>
       </div>

@@ -385,7 +385,7 @@ def prepare_run_dir(
     run_dir.mkdir(parents=True, exist_ok=True)
     vertex = is_pure_vertex(weights)
     tmpl = members[vertex if vertex is not None else template_idx]
-    for fn in ("miner.py", "chute_config.yml"):
+    for fn in ("miner.py", "chute_config.yml", "config.json"):
         src = tmpl / fn
         if src.is_file():
             shutil.copy2(src, run_dir / fn)

@@ -78,6 +78,8 @@ def refresh_sessions_for_skill(skill_path: str) -> int:
             continue
         if state.active_skill.element_path != skill_path:
             continue
+        if state.review_mode == "local":
+            continue  # Own mode: Platform pool is refreshed from disk when they switch back
         added = state.refresh_topic_from_disk()
         if added >= 0:
             touched += 1
@@ -100,6 +102,24 @@ def notify_miner_model_updated(skill_path: str, repo_id: str, new_sha: str) -> i
             state.status_message = f"Top miner updated from Hugging Face: {repo_id} ({short_sha})"
             notify_session(state.session_id)
             touched += 1
+        except Exception:
+            pass
+    return touched
+
+
+def apply_external_label(skill_path: str, item_key: str, reviewed: bool, *, except_sid: str | None = None) -> int:
+    """Tell every other open session on this topic that a teammate saved / reset an image."""
+    if _sessions is None:
+        return 0
+    touched = 0
+    for sid, state in _sessions.iter_states():
+        if sid == except_sid or state.active_skill is None:
+            continue
+        if state.active_skill.element_path != skill_path:
+            continue
+        try:
+            if state.apply_external_label(item_key, reviewed):
+                touched += 1
         except Exception:
             pass
     return touched

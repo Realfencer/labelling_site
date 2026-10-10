@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Download, Loader2, X } from "lucide-react";
 import type { ChallengeItem } from "../types";
+import { checksFailComplete, checksPassComplete } from "../labelChecks";
 import { cn } from "../lib/utils";
+import ImageSelectionField from "./ImageSelectionField";
 
 const HIST_BINS = 48;
 
@@ -20,6 +22,7 @@ export default function DownloadGtModal({
     blockMin: number;
     blockMax: number;
     quality: "all" | "pass" | "fail";
+    itemKeys?: string[];
     onProgress?: (received: number, total: number) => void;
   }) => Promise<void>;
 }) {
@@ -33,6 +36,7 @@ export default function DownloadGtModal({
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [quality, setQuality] = useState<"all" | "pass" | "fail">("all");
+  const [picked, setPicked] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ received: number; total: number } | null>(null);
   const [error, setError] = useState("");
@@ -42,6 +46,7 @@ export default function DownloadGtModal({
     setFrom(minBlock ? String(minBlock) : "");
     setTo(maxBlock ? String(maxBlock) : "");
     setQuality("all");
+    setPicked(null);
     setError("");
     setBusy(false);
     setProgress(null);
@@ -55,9 +60,10 @@ export default function DownloadGtModal({
   const hi = Math.max(rawLo, rawHi);
   const span = Math.max(1, maxBlock - minBlock);
   const inRange = labeled.filter((c) => c.block >= lo && c.block <= hi);
-  const passCount = inRange.filter((c) => c.checks_passed === 3).length;
-  const failCount = inRange.filter((c) => c.checks_passed === 0).length;
-  const count = ownMode || quality === "all" ? inRange.length : quality === "pass" ? passCount : failCount;
+  const passCount = inRange.filter((c) => checksPassComplete(c)).length;
+  const failCount = inRange.filter((c) => checksFailComplete(c)).length;
+  const rangeCount = ownMode || quality === "all" ? inRange.length : quality === "pass" ? passCount : failCount;
+  const count = picked ? picked.length : rangeCount;
 
   const hist = useMemo(() => {
     const bins = new Array(HIST_BINS).fill(0);
@@ -94,6 +100,8 @@ export default function DownloadGtModal({
         </div>
 
         <div className="space-y-4 px-4 py-4">
+          <ImageSelectionField suggest={inRange.map((c) => c.item_key)} challenges={challenges} ownMode={ownMode} value={picked} onChange={setPicked} verb="download" />
+          <div className={cn("space-y-4", picked && "pointer-events-none opacity-40")}>
           <div className="grid grid-cols-2 gap-2">
             <label className="block">
               <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">{ownMode ? "From #" : "From block"}</span>
@@ -202,12 +210,16 @@ export default function DownloadGtModal({
 
           )}
 
+          </div>
+
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-ink-950">
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Will download</div>
             <div className="mt-0.5 text-2xl font-black tabular-nums text-slate-900 dark:text-white">{count}</div>
             <div className="text-[11px] text-slate-500">
-              {ownMode ? "index" : "blocks"} {lo}–{hi}
-              {ownMode
+              {picked ? "hand-picked images" : `${ownMode ? "index" : "blocks"} ${lo}–${hi}`}
+              {picked
+                ? " · exactly these"
+                : ownMode
                 ? " · every Done in range"
                 : quality === "pass"
                   ? " · R1–R3 all close to p"
@@ -242,7 +254,8 @@ export default function DownloadGtModal({
               void onDownload({
                 blockMin: lo,
                 blockMax: hi,
-                quality: ownMode ? "all" : quality,
+                quality: ownMode || picked ? "all" : quality,
+                itemKeys: picked ?? undefined,
                 onProgress: (received, total) => setProgress({ received, total }),
               })
                 .then(() => onClose())

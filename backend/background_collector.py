@@ -5,25 +5,33 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from . import collab
 from . import core
 from . import hf_models
 from . import topic_cache
+from .lowprio import low_priority
 
 log = logging.getLogger(__name__)
 
 COLLECT_INTERVAL_SECONDS = 3600
 DAILY_MINER_SYNC_INTERVAL_SECONDS = 86400
-STARTUP_DELAY_SECONDS = 15
-MINER_SYNC_STARTUP_DELAY_SECONDS = 20
+STARTUP_DELAY_SECONDS = 900  # keep the hourly job off the CPU right after a (re)start
+BG_WORKERS = 4  # 16 parser threads fight the web handlers for Python's GIL and make every page crawl
+MINER_SYNC_STARTUP_DELAY_SECONDS = 240
 
 
 class BackgroundCollector:
-    def __init__(self, review_dir: Path, skills: list[core.Skill], index_url: str = core.INDEX_URL) -> None:
+    def __init__(
+        self,
+        review_dir: Path,
+        skills_provider: Callable[[], list[core.Skill]],
+        index_url: str = core.INDEX_URL,
+    ) -> None:
         self.review_dir = review_dir.resolve()
-        self.skills = list(skills)
+        self._skills_provider = skills_provider
         self.index_url = index_url
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -46,7 +54,7 @@ class BackgroundCollector:
     def start(self) -> None:
         self._stop.clear()
         if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(target=self._run_loop, name="bg-collector", daemon=True)
+            self._thread = threading.Thread(target=low_priority(self._run_loop), name="bg-collector", daemon=True)
             self._thread.start()
         if self._miner_thread is None or not self._miner_thread.is_alive():
             self._miner_thread = threading.Thread(
@@ -77,7 +85,7 @@ class BackgroundCollector:
         self._last_miner_sync_at = time.time()
         try:
             log.info("Starting daily winner miner commit check against Hugging Face...")
-            results = hf_models.check_and_sync_all_winner_miners(self.review_dir, self.skills)
+            results = hf_models.check_and_sync_all_winner_miners(self.review_dir, self._skills_provider())
             self._last_miner_sync_status = "idle"
             updated_count = sum(1 for r in results if r.get("updated"))
             log.info(
@@ -106,9 +114,12 @@ class BackgroundCollector:
             self._last_run_at = time.time()
             self._last_status = "running"
             hf_root = self.review_dir / "hf_miners"
-            for skill in self.skills:
+            skills = self._skills_provider()
+            for skill in skills:
                 if self._stop.is_set():
                     break
+                if getattr(skill, "status", "active") != "active":
+                    continue
                 try:
                     self._collect_skill(skill, hf_root)
                 except Exception as exc:
@@ -146,9 +157,12 @@ class BackgroundCollector:
             skip_blocks=skip_blocks,
             record_found_callback=on_record,
             cancel_flag=self._stop.is_set,
+            max_workers=BG_WORKERS,
         )
-        topic_cache.invalidate(skill.element_path)
-        if added > 0 or status not in ("canceled",):
+        # Only disturb open sessions when something actually changed: every refresh re-scans the
+        # whole Platform pool of every session (1.5-2s of CPU each) and used to run every pass.
+        if added > 0:
+            topic_cache.invalidate(skill.element_path)
             collab.refresh_sessions_for_skill(skill.element_path)
         log.info(
             "Background collect %s: status=%s new_or_upgraded=%s skip=%s",

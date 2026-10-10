@@ -248,10 +248,35 @@ export function comparePredToGt(
   gtBoxes: DetectionBox[],
   imageWidth?: number,
   imageHeight?: number,
-): { roles: BoxCompareRole[]; missedGt: DetectionBox[] } {
+): {
+  roles: BoxCompareRole[];
+  missedGt: DetectionBox[];
+  missedGtIndices: number[];
+  predToGt: (number | null)[];
+  gtToPred: (number | null)[];
+} {
   const roles: BoxCompareRole[] = predBoxes.map(() => "fp");
-  if (!gtBoxes.length) return { roles: predBoxes.map(() => "tp"), missedGt: [] };
-  if (!predBoxes.length) return { roles, missedGt: [...gtBoxes] };
+  const predToGt: (number | null)[] = predBoxes.map(() => null);
+  const gtToPred: (number | null)[] = gtBoxes.map(() => null);
+  if (!gtBoxes.length) {
+    return {
+      roles: predBoxes.map(() => "tp"),
+      missedGt: [],
+      missedGtIndices: [],
+      predToGt,
+      gtToPred,
+    };
+  }
+  if (!predBoxes.length) {
+    const missedGtIndices = gtBoxes.map((_, i) => i);
+    return {
+      roles,
+      missedGt: [...gtBoxes],
+      missedGtIndices,
+      predToGt,
+      gtToPred,
+    };
+  }
 
   const preds = predBoxes.map(toScoredBox);
   const gts = gtBoxes.map(toScoredBox);
@@ -285,21 +310,33 @@ export function comparePredToGt(
         if (bestIou >= required) {
           gtUsed[bestGi] = true;
           roles[pi] = "tp";
+          predToGt[pi] = bestGi;
+          gtToPred[bestGi] = pi;
           continue;
         }
       }
       let wrongIou = 0;
+      let wrongGi = -1;
       for (let gi = 0; gi < gts.length; gi += 1) {
         if (gts[gi].cls === pred.cls) continue;
         const iou = boxIou(pred, gts[gi]);
-        if (iou > wrongIou) wrongIou = iou;
+        if (iou > wrongIou) {
+          wrongIou = iou;
+          wrongGi = gi;
+        }
       }
-      roles[pi] = wrongIou >= 0.3 ? "wrong_class" : "fp";
+      if (wrongIou >= 0.3) {
+        roles[pi] = "wrong_class";
+        if (wrongGi >= 0) predToGt[pi] = wrongGi;
+      } else {
+        roles[pi] = "fp";
+      }
     }
   }
 
-  const missedGt = gtBoxes.filter((_, i) => !gtUsed[i]);
-  return { roles, missedGt };
+  const missedGtIndices = gtBoxes.map((_, i) => i).filter((i) => !gtUsed[i]);
+  const missedGt = missedGtIndices.map((i) => gtBoxes[i]);
+  return { roles, missedGt, missedGtIndices, predToGt, gtToPred };
 }
 
 export function scoreTopAgainstLeftGt(
@@ -329,7 +366,14 @@ export function scoreTopAgainstLeftGt(
   const map50 = aps.length ? aps.reduce((a, b) => a + b, 0) / aps.length : nGt > 0 ? 0 : 1;
   const ffpi = fp;
   const falsePositive = Math.max(0, 1 - ffpi / 10);
-  const composite = 0.6 * map50 + 0.4 * falsePositive;
+  const pillarsRaw = record.score_pillars;
+  const pillars =
+    pillarsRaw && typeof pillarsRaw === "object" && !Array.isArray(pillarsRaw)
+      ? (pillarsRaw as Record<string, unknown>)
+      : null;
+  const wMap = parseScore(pillars?.map50) ?? 0.6;
+  const wFp = parseScore(pillars?.false_positive) ?? 0.4;
+  const composite = wMap * map50 + wFp * falsePositive;
 
   const platformScore = parseScore(record.total_weighted);
   const platformMap50 = parseScore(record.map50);

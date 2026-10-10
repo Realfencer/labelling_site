@@ -41,19 +41,82 @@ class TopicSnapshot:
 _CACHE: dict[str, TopicSnapshot] = {}
 
 
+def top_by_block_count(project_root: Path, skill_path: str) -> int | None:
+    """Number of winner records on disk for this skill (None if index missing).
+
+    Includes superseded archive tops merged into Active (e.g. detect-vehicle → Detect-Vehicle).
+    """
+    from . import completed_topics
+
+    paths = [skill_path, *completed_topics.legacy_element_paths_for_active(skill_path)]
+    total = 0
+    any_file = False
+    seen_blocks: set[int] = set()
+    for path_name in paths:
+        top = project_root / "challenge" / "score_cache" / path_name / "top_by_block.json"
+        if not top.is_file():
+            continue
+        any_file = True
+        try:
+            payload = core.read_json(top)
+        except Exception:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for record in payload:
+            if not isinstance(record, dict) or record.get("block") is None:
+                continue
+            block = int(record["block"])
+            if block in seen_blocks:
+                continue
+            seen_blocks.add(block)
+            total += 1
+    if not any_file:
+        return None
+    return total
+
+
 def topic_disk_stamp(project_root: Path, skill_path: str) -> tuple[float, float, int, float]:
-    cache = project_root / "challenge" / "score_cache" / skill_path
-    top = cache / "top_by_block.json"
-    images = cache / "images"
+    from . import completed_topics
+
+    paths = [skill_path, *completed_topics.legacy_element_paths_for_active(skill_path)]
+    top_mtime = 0.0
+    images_mtime = 0.0
+    top_size = 0
+    for path_name in paths:
+        cache = project_root / "challenge" / "score_cache" / path_name
+        top = cache / "top_by_block.json"
+        images = cache / "images"
+        if top.is_file():
+            try:
+                st = top.stat()
+                top_mtime = max(top_mtime, st.st_mtime)
+                top_size += st.st_size
+            except OSError:
+                pass
+        if images.is_dir():
+            try:
+                images_mtime = max(images_mtime, images.stat().st_mtime)
+            except OSError:
+                pass
     labels = project_root / "challenge" / "labels"
-    top_mtime = top.stat().st_mtime if top.is_file() else 0.0
-    images_mtime = images.stat().st_mtime if images.is_dir() else 0.0
     labels_mtime = labels.stat().st_mtime if labels.is_dir() else 0.0
-    try:
-        top_size = top.stat().st_size if top.is_file() else 0
-    except OSError:
-        top_size = 0
     return (top_mtime, images_mtime, top_size, labels_mtime)
+
+
+def _clone_items(items: list) -> list:
+    """Independent copy of challenge rows. copy.deepcopy of ~1.6k rows took 0.35s and ran on every
+    publish/hydrate (many per enter); rows only hold scalars, Paths and small dict/list fields."""
+    out = []
+    for it in items:
+        n = copy.copy(it)
+        n.record = {
+            k: (copy.deepcopy(v) if isinstance(v, (dict, list)) else v) for k, v in it.record.items()
+        }
+        n.top_boxes = [dict(b) if isinstance(b, dict) else b for b in it.top_boxes]
+        n.cached_left_boxes = [dict(b) if isinstance(b, dict) else b for b in it.cached_left_boxes]
+        out.append(n)
+    return out
 
 
 def get(skill_path: str) -> TopicSnapshot | None:
@@ -109,7 +172,7 @@ def _publish_from_state_now(state: ReviewAppState) -> None:
         model_class_names=list(state.model_class_names),
         miner_class_names=list(state.miner_class_names),
         image_index=dict(state._image_index),
-        challenge_items=copy.deepcopy(state.challenge_items),
+        challenge_items=_clone_items(state.challenge_items),
         stamp=stamp,
     )
     with _lock:
@@ -130,7 +193,12 @@ def try_hydrate(state: ReviewAppState) -> bool:
         stamp = topic_disk_stamp(state.project_root, skill.element_path)
         if stamp != snap.stamp:
             return False
-        state.challenge_items = copy.deepcopy(snap.challenge_items)
+        expected = top_by_block_count(state.project_root, skill.element_path)
+        if expected is not None:
+            loaded = sum(1 for item in snap.challenge_items if item.loaded)
+            if len(snap.challenge_items) < expected or loaded < expected:
+                return False
+        state.challenge_items = _clone_items(snap.challenge_items)
         state._image_index = dict(snap.image_index)
         # Never copy class names from the shared snapshot. A session that switched
         # topics can publish the new skill key with the previous skill's names,

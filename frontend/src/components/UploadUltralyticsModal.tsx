@@ -1,9 +1,11 @@
+import { useKeys } from "../store/useKeys";
 import { useEffect, useMemo, useState } from "react";
 import { CloudUpload, Loader2, X } from "lucide-react";
-import { api, type UltralyticsDataset } from "../api";
+import { api, type OwnDayRow, type UltralyticsDataset } from "../api";
 import type { ChallengeItem } from "../types";
+import { checksFailComplete, checksPassComplete } from "../labelChecks";
 import { cn } from "../lib/utils";
-import { loadUltralyticsSettings, saveUltralyticsSettings } from "../ultralyticsSettings";
+import ImageSelectionField from "./ImageSelectionField";
 
 const HIST_BINS = 48;
 
@@ -16,12 +18,18 @@ export default function UploadUltralyticsModal({
   onClose,
   challenges,
   ownMode = false,
+  dayMode,
 }: {
   open: boolean;
   onClose: () => void;
   challenges: ChallengeItem[];
   ownMode?: boolean;
+  /** Own day list page: choose whole days (several days = one dataset) instead of a range of one day. */
+  dayMode?: { preselect: string[] };
 }) {
+  const inDays = Boolean(dayMode);
+  const [dayRows, setDayRows] = useState<OwnDayRow[]>([]);
+  const [selDays, setSelDays] = useState<string[]>([]);
   const labeled = useMemo(
     () => challenges.filter((c) => c.loaded && c.reviewed),
     [challenges],
@@ -30,10 +38,14 @@ export default function UploadUltralyticsModal({
   const minBlock = blocks[0] ?? 0;
   const maxBlock = blocks[blocks.length - 1] ?? 0;
 
-  const [apiKey, setApiKey] = useState(() => loadUltralyticsSettings().apiKey);
+  // The Ultralytics key lives in the shared key vault on the server.
+  const keys = useKeys((st) => st.view);
+  const setKeysOpen = useKeys((st) => st.setOpen);
+  const keyOk = Boolean(keys?.ultralytics.configured);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [quality, setQuality] = useState<Quality>("all");
+  const [picked, setPicked] = useState<string[] | null>(null);
   // Cumulative boundaries: train = [0, trainEnd), val = [trainEnd, valEnd), test = [valEnd, 100]
   const [trainEnd, setTrainEnd] = useState(80);
   const [valEnd, setValEnd] = useState(90);
@@ -56,10 +68,10 @@ export default function UploadUltralyticsModal({
 
   useEffect(() => {
     if (!open) return;
-    setApiKey(loadUltralyticsSettings().apiKey);
     setFrom(minBlock ? String(minBlock) : "");
     setTo(maxBlock ? String(maxBlock) : "");
     setQuality("all");
+    setPicked(null);
     setTrainEnd(80);
     setValEnd(90);
     setForceSplit("");
@@ -73,9 +85,26 @@ export default function UploadUltralyticsModal({
   }, [open, minBlock, maxBlock]);
 
   useEffect(() => {
+    if (!open || !inDays) return;
+    let alive = true;
+    api
+      .listOwnDays()
+      .then((r) => {
+        if (!alive) return;
+        setDayRows(r.days);
+        const withDone = r.days.filter((d) => d.done > 0).map((d) => d.date);
+        const pre = (dayMode?.preselect ?? []).filter((d) => withDone.includes(d));
+        setSelDays(pre.length ? pre : withDone);
+      })
+      .catch((e) => alive && setError(String(e).replace(/^Error:\s*/i, "")));
+    return () => {
+      alive = false;
+    };
+  }, [open, inDays]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     if (!open) return;
-    const key = apiKey.trim();
-    if (!key || key.length < 10) {
+    if (!keyOk) {
       setDatasets([]);
       setOwner("");
       return;
@@ -85,7 +114,7 @@ export default function UploadUltralyticsModal({
       setLoadingList(true);
       setError("");
       api
-        .ultralyticsListDatasets(key)
+        .ultralyticsListDatasets("")
         .then((res) => {
           if (!alive) return;
           setOwner(res.owner);
@@ -106,7 +135,7 @@ export default function UploadUltralyticsModal({
       alive = false;
       window.clearTimeout(timer);
     };
-  }, [open, apiKey]);
+  }, [open, keyOk]);
 
   const fromN = Number(from);
   const toN = Number(to);
@@ -116,9 +145,11 @@ export default function UploadUltralyticsModal({
   const hi = Math.max(rawLo, rawHi);
   const span = Math.max(1, maxBlock - minBlock);
   const inRange = labeled.filter((c) => c.block >= lo && c.block <= hi);
-  const passCount = inRange.filter((c) => c.checks_passed === 3).length;
-  const failCount = inRange.filter((c) => c.checks_passed === 0).length;
-  const count = quality === "pass" ? passCount : quality === "fail" ? failCount : inRange.length;
+  const passCount = inRange.filter((c) => checksPassComplete(c)).length;
+  const failCount = inRange.filter((c) => checksFailComplete(c)).length;
+  const rangeCount = quality === "pass" ? passCount : quality === "fail" ? failCount : inRange.length;
+  const daysDone = dayRows.filter((d) => selDays.includes(d.date)).reduce((n, d) => n + d.done, 0);
+  const count = inDays ? daysDone : picked ? picked.length : rangeCount;
   const selected = datasets.find((d) => d.dataset === datasetSlug);
   const targetSlug = createNew ? newSlug.trim().toLowerCase().replace(/\s+/g, "-") : datasetSlug;
 
@@ -154,7 +185,7 @@ export default function UploadUltralyticsModal({
         : "Keep both (store under another name)";
 
   const canUpload =
-    Boolean(apiKey.trim()) &&
+    keyOk &&
     count > 0 &&
     Boolean(targetSlug) &&
     (forceSplit !== "" || trainPct + valPct + testPct === 100) &&
@@ -171,18 +202,18 @@ export default function UploadUltralyticsModal({
     setError("");
     setResultUrl("");
     try {
-      const key = apiKey.trim();
-      saveUltralyticsSettings({ apiKey: key });
       const res = await api.ultralyticsUpload({
-        api_key: key,
+        api_key: "",
         owner: owner || undefined,
         dataset: targetSlug,
         dataset_id: createNew ? undefined : selected?.id || undefined,
         create_if_missing: createNew,
         dataset_name: createNew ? targetSlug : undefined,
-        block_min: lo,
-        block_max: hi,
-        quality: ownMode ? "all" : quality,
+        block_min: inDays ? undefined : lo,
+        block_max: inDays ? undefined : hi,
+        item_keys: inDays ? undefined : picked ?? undefined,
+        own_days: inDays ? selDays : undefined,
+        quality: ownMode || picked || inDays ? "all" : quality,
         train_pct: trainPct,
         val_pct: valPct,
         test_pct: testPct,
@@ -241,19 +272,53 @@ export default function UploadUltralyticsModal({
         </div>
 
         <div className="max-h-[min(78vh,680px)] space-y-3.5 overflow-y-auto px-4 py-4">
-          <label className="block">
-            <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">API key</span>
-            <input
-              type="password"
-              autoComplete="off"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              onBlur={() => saveUltralyticsSettings({ apiKey: apiKey.trim() })}
-              placeholder="ul_…"
-              className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 font-mono text-xs text-slate-800 dark:border-slate-700 dark:bg-ink-800 dark:text-slate-100"
-            />
-          </label>
+          <div className="flex items-center justify-between rounded-lg border border-slate-200 px-2.5 py-2 text-[12px] dark:border-slate-700">
+            {keyOk ? (
+              <span className="text-emerald-600 dark:text-emerald-300">Using the saved Ultralytics key ({keys?.ultralytics.masked})</span>
+            ) : (
+              <span className="text-rose-600 dark:text-rose-300">No Ultralytics API key saved yet</span>
+            )}
+            <button
+              type="button"
+              onClick={() => setKeysOpen(true)}
+              className="rounded border border-slate-300 px-2 py-0.5 text-[11px] font-bold hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800"
+            >
+              {keyOk ? "Change" : "Add key"}
+            </button>
+          </div>
 
+          {inDays && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700">
+              <div className="flex items-center justify-between border-b border-slate-200 px-2.5 py-1.5 text-[11px] dark:border-slate-700">
+                <span className="font-bold uppercase tracking-wider text-slate-500">Days to send</span>
+                <span className="flex gap-2">
+                  <button type="button" className="font-bold text-sky-600 hover:underline dark:text-sky-300" onClick={() => setSelDays(dayRows.filter((d) => d.done > 0).map((d) => d.date))}>all</button>
+                  <button type="button" className="font-bold text-slate-500 hover:underline" onClick={() => setSelDays([])}>none</button>
+                </span>
+              </div>
+              <div className="max-h-52 overflow-y-auto">
+                {dayRows.map((d) => (
+                  <label key={d.date} className={cn("flex cursor-pointer items-center gap-2 border-b border-slate-100 px-2.5 py-1.5 text-[12px] last:border-0 dark:border-slate-800", d.done === 0 && "cursor-not-allowed opacity-40")}>
+                    <input
+                      type="checkbox"
+                      disabled={d.done === 0}
+                      checked={selDays.includes(d.date)}
+                      onChange={() => setSelDays((cur) => (cur.includes(d.date) ? cur.filter((x) => x !== d.date) : [...cur, d.date]))}
+                    />
+                    <span className="font-mono font-bold tabular-nums">{d.date}</span>
+                    <span className="ml-auto text-[11px] text-slate-500">
+                      <b className="text-emerald-600 dark:text-emerald-300">{d.done} done</b> · {d.total - d.done} not done (not sent)
+                    </span>
+                  </label>
+                ))}
+                {dayRows.length === 0 && <div className="px-3 py-4 text-center text-[12px] text-slate-400">Loading days…</div>}
+              </div>
+            </div>
+          )}
+          {!inDays && (
+          <>
+          <ImageSelectionField suggest={inRange.map((c) => c.item_key)} challenges={challenges} ownMode={ownMode} value={picked} onChange={setPicked} verb="upload" />
+          <div className={cn("space-y-3.5", picked && "pointer-events-none opacity-40")}>
           <div className="grid grid-cols-2 gap-2">
             <label className="block">
               <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">{ownMode ? "From #" : "From block"}</span>
@@ -360,6 +425,10 @@ export default function UploadUltralyticsModal({
               ))}
             </div>
           </div>
+          )}
+
+          </div>
+          </>
           )}
 
           <div>
@@ -508,7 +577,7 @@ export default function UploadUltralyticsModal({
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Will upload</div>
             <div className="mt-0.5 text-2xl font-black tabular-nums text-slate-900 dark:text-white">{count}</div>
             <div className="text-[11px] text-slate-500">
-              blocks {lo}–{hi}
+              {inDays ? `${selDays.length} day${selDays.length === 1 ? "" : "s"} · Done images only` : picked ? "hand-picked images" : `blocks ${lo}–${hi}`}
               {forceSplit
                 ? ` · all → ${forceSplit}`
                 : ` · ~${estTrain}/${estVal}/${estTest} train/val/test`}

@@ -1,49 +1,38 @@
-"""Email-gated access: users request a code; only the admin inbox receives it.
+"""Simple password gate for the labeler.
 
-Flow
-----
-1. User submits their email → OTP is created.
-2. Admin (AUTH_ADMIN_EMAIL) receives the code + requester email.
-3. Admin either shares the code manually, or clicks the "send to user" link
-   in that email so the same code is mailed to the requester.
-4. User enters the code → authenticated cookie → full site access.
-
-Verified sessions are persisted under ``store_dir/sessions.json`` so a score
-service restart / machine reboot does not force users through the gate again.
-The browser cookie (30 days) is the device credential; the server must still
-recognize that token after restart.
+Users enter a shared static password. Successful login sets an auth cookie;
+sessions are persisted under ``store_dir/sessions.json`` so restarts do not
+force everyone through the gate again.
 """
 
 from __future__ import annotations
 
-import hashlib
+import hmac
 import json
 import os
-import re
 import secrets
-import smtplib
 import threading
 import time
 from dataclasses import dataclass, field
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
+from . import team
+
 AUTH_COOKIE = "labeler_auth"
-CODE_TTL_SECONDS = 20 * 60
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
-# How often we rewrite sessions.json when only last_seen changed.
 _SESSION_TOUCH_FLUSH_SECONDS = 10 * 60
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Shared site password. Override with AUTH_PASSWORD env if needed.
+DEFAULT_PASSWORD = "for my country"
+LEGACY_LABEL = "authenticated"
+# A name stays reserved for this long after its last request, so two people cannot sign in
+# under the same name by accident (same browser re-login is always allowed).
+NAME_ACTIVE_SECONDS = 120.0
 
 
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
-
-
-def _smtp_password() -> str:
-    # Gmail app passwords are often copied with spaces (xxxx xxxx xxxx xxxx).
-    return _env("AUTH_SMTP_PASSWORD").replace(" ", "")
 
 
 def auth_enabled() -> bool:
@@ -51,39 +40,13 @@ def auth_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
-def admin_email() -> str:
-    return _env("AUTH_ADMIN_EMAIL", "matthewsliger0302@gmail.com").lower()
-
-
-def public_base_url() -> str:
-    return _env("AUTH_PUBLIC_BASE_URL", "").rstrip("/")
-
-
-def _normalize_email(value: str) -> str:
-    return (value or "").strip().lower()
-
-
-def _valid_email(value: str) -> bool:
-    return bool(EMAIL_RE.match(value))
-
-
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
-
-
-@dataclass
-class PendingAccess:
-    user_email: str
-    code_hash: str
-    clear_code: str
-    relay_token: str
-    created_at: float = field(default_factory=time.time)
-    sent_to_user: bool = False
+def site_password() -> str:
+    return _env("AUTH_PASSWORD", DEFAULT_PASSWORD)
 
 
 @dataclass
 class AuthSession:
-    email: str
+    email: str  # display label; kept for cookie session payload compatibility
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
 
@@ -94,7 +57,6 @@ class AuthManager:
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self._sessions_path = self.store_dir / "sessions.json"
         self._lock = threading.RLock()
-        self._pending: dict[str, PendingAccess] = {}
         self._sessions: dict[str, AuthSession] = {}
         self._dirty = False
         self._last_flush = 0.0
@@ -102,17 +64,22 @@ class AuthManager:
 
     def status(self, token: str | None) -> dict[str, Any]:
         enabled = auth_enabled()
-        email = self.session_email(token) if enabled else None
+        username = self.session_email(token) if enabled else None
+        if not enabled:
+            username = "guest"
+        color = None
+        if username:
+            try:
+                color = team.get_store().registry.color(username)
+            except RuntimeError:
+                color = None
         return {
             "enabled": enabled,
-            "authenticated": (not enabled) or bool(email),
-            "email": email,
-            "admin_email": admin_email(),
-            "smtp_configured": self.smtp_ready(),
+            "authenticated": (not enabled) or bool(username),
+            "email": username,  # legacy field name
+            "username": username,
+            "color": color,
         }
-
-    def smtp_ready(self) -> bool:
-        return bool(_env("AUTH_SMTP_USER") and _smtp_password())
 
     def session_email(self, token: str | None) -> str | None:
         if not token:
@@ -122,8 +89,9 @@ class AuthManager:
             sess = self._sessions.get(token)
             if not sess:
                 return None
+            if sess.email == LEGACY_LABEL:
+                return None  # pre-username session: must sign in again with a name
             now = time.time()
-            # Throttle disk writes: touch in memory every request, flush periodically.
             if now - sess.last_seen > 30:
                 self._dirty = True
             sess.last_seen = now
@@ -131,106 +99,35 @@ class AuthManager:
                 self._save_sessions_locked()
             return sess.email
 
-    def request_access(self, user_email: str) -> dict[str, Any]:
-        email = _normalize_email(user_email)
-        if not _valid_email(email):
-            raise ValueError("Enter a valid email address")
-        if not self.smtp_ready():
-            raise RuntimeError(
-                "Email delivery is not configured yet. Ask the site owner to set "
-                "AUTH_SMTP_USER / AUTH_SMTP_PASSWORD."
-            )
-
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        relay = secrets.token_urlsafe(24)
+    def login(self, password: str, username: str = "") -> str:
+        expected = site_password()
+        if not expected:
+            raise RuntimeError("Site password is not configured")
+        if not hmac.compare_digest((password or "").encode(), expected.encode()):
+            raise ValueError("Incorrect password")
+        name = team.normalize_username(username)  # ValueError -> HTTP 400 with a clear message
         with self._lock:
             self._cleanup_locked()
-            self._pending[email] = PendingAccess(
-                user_email=email,
-                code_hash=_hash_code(code),
-                clear_code=code,
-                relay_token=relay,
-            )
-
-        base = public_base_url()
-        relay_url = (
-            f"{base}/api/auth/send-to-user?token={relay}"
-            if base
-            else f"/api/auth/send-to-user?token={relay}"
-        )
-        admin = admin_email()
-        subject = f"[SN44 Labeler] Access code for {email}"
-        body = (
-            f"Someone requested access to the SN44 image labeler.\n\n"
-            f"Requester: {email}\n"
-            f"Verification code: {code}\n"
-            f"Code expires in {CODE_TTL_SECONDS // 60} minutes.\n\n"
-            f"How to approve:\n"
-            f"1) Share this code with them (chat / SMS), OR\n"
-            f"2) Open this link to email the same code to {email}:\n"
-            f"   {relay_url}\n\n"
-            f"They will enter the code on the login page to unlock the site.\n"
-        )
-        self._send_mail(to=admin, subject=subject, body=body)
-        return {
-            "ok": True,
-            "email": email,
-            "message": (
-                f"Access request sent to the site owner ({admin}). "
-                "After they approve, enter the verification code below."
-            ),
-            "expires_in_seconds": CODE_TTL_SECONDS,
-        }
-
-    def send_code_to_user(self, relay_token: str) -> dict[str, Any]:
-        token = (relay_token or "").strip()
-        if not token:
-            raise ValueError("Missing relay token")
-        with self._lock:
-            self._cleanup_locked()
-            pending = next((p for p in self._pending.values() if p.relay_token == token), None)
-            if pending is None:
-                raise ValueError(
-                    "This approval link is invalid or expired. Ask the user to request a new code."
-                )
-            user_email = pending.user_email
-            clear_code = pending.clear_code
-            pending.sent_to_user = True
-
-        subject = "[SN44 Labeler] Your access verification code"
-        body = (
-            f"Your access request was approved.\n\n"
-            f"Verification code: {clear_code}\n"
-            f"Enter this code on the login page. It expires in {CODE_TTL_SECONDS // 60} minutes.\n"
-        )
-        self._send_mail(to=user_email, subject=subject, body=body)
-        return {
-            "ok": True,
-            "email": user_email,
-            "message": f"Verification code emailed to {user_email}.",
-        }
-
-    def verify(self, user_email: str, code: str) -> str:
-        email = _normalize_email(user_email)
-        raw = (code or "").strip().replace(" ", "")
-        if not _valid_email(email):
-            raise ValueError("Enter a valid email address")
-        if not raw.isdigit() or len(raw) != 6:
-            raise ValueError("Enter the 6-digit verification code")
-
-        with self._lock:
-            self._cleanup_locked()
-            pending = self._pending.get(email)
-            if pending is None:
-                raise ValueError("No active code for this email. Request access first.")
-            if _hash_code(raw) != pending.code_hash:
-                raise ValueError("Incorrect verification code")
-            self._pending.pop(email, None)
+            now = time.time()
+            for other in self._sessions.values():
+                if (
+                    other.email.casefold() == name.casefold()
+                    and now - other.last_seen < NAME_ACTIVE_SECONDS
+                ):
+                    raise ValueError(
+                        f"“{other.email}” is signed in on another device right now. "
+                        "Choose a different name (or wait a minute if that was you)."
+                    )
+            reg = team.get_store().registry.register(name)
             token = secrets.token_urlsafe(32)
-            self._sessions[token] = AuthSession(email=email)
+            self._sessions[token] = AuthSession(email=reg["name"])
             self._dirty = True
             self._save_sessions_locked()
             return token
+
+    def known_username(self, token: str | None) -> str | None:
+        """Username of a session without touching ``last_seen`` bookkeeping side effects."""
+        return self.session_email(token)
 
     def logout(self, token: str | None) -> None:
         if not token:
@@ -242,9 +139,6 @@ class AuthManager:
 
     def _cleanup_locked(self) -> None:
         now = time.time()
-        expired = [e for e, p in self._pending.items() if now - p.created_at > CODE_TTL_SECONDS]
-        for e in expired:
-            self._pending.pop(e, None)
         expired_sess = [t for t, s in self._sessions.items() if now - s.last_seen > SESSION_TTL_SECONDS]
         if expired_sess:
             for t in expired_sess:
@@ -268,9 +162,7 @@ class AuthManager:
         for token, meta in items.items():
             if not isinstance(token, str) or not isinstance(meta, dict):
                 continue
-            email = _normalize_email(str(meta.get("email") or ""))
-            if not _valid_email(email):
-                continue
+            email = str(meta.get("email") or "authenticated").strip() or "authenticated"
             try:
                 created = float(meta.get("created_at") or now)
                 last_seen = float(meta.get("last_seen") or created)
@@ -306,31 +198,3 @@ class AuthManager:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
-
-    def _send_mail(self, *, to: str, subject: str, body: str) -> None:
-        host = _env("AUTH_SMTP_HOST", "smtp.gmail.com")
-        port = int(_env("AUTH_SMTP_PORT", "587") or "587")
-        user = _env("AUTH_SMTP_USER")
-        password = _smtp_password()
-        sender = _env("AUTH_SMTP_FROM", user or admin_email())
-        if not user or not password:
-            raise RuntimeError("SMTP is not configured")
-        if len(password) < 16:
-            raise RuntimeError(
-                "AUTH_SMTP_PASSWORD looks incomplete after removing spaces "
-                f"({len(password)} chars). Gmail App Passwords are 16 characters — "
-                "paste the full password into .env with no spaces, then restart score."
-            )
-
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = to
-        msg.set_content(body)
-
-        with smtplib.SMTP(host, port, timeout=30) as smtp:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()
-            smtp.login(user, password)
-            smtp.send_message(msg)

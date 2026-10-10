@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlaskConical, ImagePlus, Loader2, X } from "lucide-react";
-import { api, type FindBestEvalResult, type FindBestEvalImage } from "../api";
+import { api, type FindBestEvalResult, type FindBestEvalImage, type FindBestEvalClassCount } from "../api";
 import type { DetectionBox } from "../types";
 import { colorForClass } from "../utils/colors";
 import { cn } from "../lib/utils";
@@ -16,6 +16,54 @@ function boxesFor(image: FindBestEvalImage): DetectionBox[] {
     y2: b.y2,
     conf: b.conf,
   }));
+}
+
+function ClassCountStrip({
+  counts,
+  total,
+}: {
+  counts: FindBestEvalClassCount[];
+  total: number;
+}) {
+  if (!counts.length) return null;
+  const max = Math.max(1, ...counts.map((c) => c.count));
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="rounded-md bg-slate-900/80 px-1.5 py-0.5 text-[11px] font-bold text-white dark:bg-white/15">
+        {total} box{total === 1 ? "" : "es"}
+      </span>
+      {counts.map((c) => {
+        const active = c.count > 0;
+        const color = colorForClass(c.cls);
+        return (
+          <span
+            key={`${c.cls}-${c.name}`}
+            title={`${c.name}: ${c.count}`}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold transition",
+              active
+                ? "border-transparent text-white shadow-sm"
+                : "border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-700 dark:bg-ink-950 dark:text-slate-500",
+            )}
+            style={active ? { backgroundColor: color } : undefined}
+          >
+            <span className="max-w-[7rem] truncate">{c.name}</span>
+            <span className={cn("tabular-nums", active ? "rounded bg-black/20 px-1" : "text-slate-500")}>
+              {c.count}
+            </span>
+            {active && (
+              <span className="ml-0.5 inline-block h-1 w-8 overflow-hidden rounded-full bg-black/25" aria-hidden>
+                <span
+                  className="block h-full rounded-full bg-white/90"
+                  style={{ width: `${Math.max(12, Math.round((c.count / max) * 100))}%` }}
+                />
+              </span>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 function OverlayPreview({
@@ -62,7 +110,7 @@ function OverlayPreview({
           ctx.lineWidth = Math.max(2, Math.round(w / 400));
           ctx.strokeRect(x1, y1, bw, bh);
           const name = classNames[box.cls] ?? `cls ${box.cls}`;
-          const label = box.conf != null ? `${name} ${Math.round(box.conf * 100)}%` : name;
+          const label = (box.raw_conf ?? box.conf) != null ? `${name} ${Math.round(((box.raw_conf ?? box.conf) as number) * 100)}%` : name;
           const fontPx = Math.max(11, Math.round(w / 70));
           ctx.font = `600 ${fontPx}px Inter, Segoe UI, sans-serif`;
           const tw = ctx.measureText(label).width;
@@ -84,10 +132,7 @@ function OverlayPreview({
 
   return (
     <div ref={wrapRef} className="flex h-full w-full items-center justify-center">
-      <canvas
-        ref={canvasRef}
-        className="max-h-full max-w-full rounded-md transition-opacity duration-200 ease-out"
-      />
+      <canvas ref={canvasRef} className="max-h-full max-w-full rounded-md transition-opacity duration-200 ease-out" />
     </div>
   );
 }
@@ -98,12 +143,14 @@ export default function EvaluateMergedModal({
   title,
   score,
   onClose,
+  mode = "find-best",
 }: {
   open: boolean;
   historyId: string;
   title: string;
   score?: number | null;
   onClose: () => void;
+  mode?: "find-best" | "dpp" | "manual";
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const runIdRef = useRef(0);
@@ -121,7 +168,7 @@ export default function EvaluateMergedModal({
     setError("");
     setResult(null);
     setDragOver(false);
-  }, [open, historyId]);
+  }, [open, historyId, mode]);
 
   const evaluateOne = useCallback(
     async (next: File) => {
@@ -131,7 +178,12 @@ export default function EvaluateMergedModal({
       setError("");
       setBusy(true);
       try {
-        const data = await api.evaluateFindBestModel(historyId, [next]);
+        const data =
+          mode === "dpp"
+            ? await api.dppEvaluateShip(historyId, [next])
+            : mode === "manual"
+              ? await api.manualMergeEvaluate(historyId, [next])
+              : await api.evaluateFindBestModel(historyId, [next]);
         if (runId !== runIdRef.current) return;
         setResult(data);
       } catch (e) {
@@ -141,7 +193,7 @@ export default function EvaluateMergedModal({
         if (runId === runIdRef.current) setBusy(false);
       }
     },
-    [historyId],
+    [historyId, mode],
   );
 
   const pickFile = useCallback(
@@ -160,6 +212,12 @@ export default function EvaluateMergedModal({
   if (!open) return null;
 
   const image = result?.images[0];
+  const imageCounts =
+    image?.class_counts && image.class_counts.length
+      ? image.class_counts
+      : (result?.classes || []).map((c) => ({ ...c, count: 0 }));
+  const heading =
+    mode === "dpp" ? "Evaluate post-processed model" : mode === "manual" ? "Evaluate manual merge" : "Evaluate merged model";
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-[3px]">
@@ -170,7 +228,7 @@ export default function EvaluateMergedModal({
               <FlaskConical className="h-4 w-4" />
             </div>
             <div className="min-w-0">
-              <h2 className="truncate text-sm font-extrabold text-slate-900 dark:text-white">Evaluate merged model</h2>
+              <h2 className="truncate text-sm font-extrabold text-slate-900 dark:text-white">{heading}</h2>
               <p className="truncate text-[11px] text-slate-500">
                 {title}
                 {score != null ? ` · ${Number(score).toFixed(4)}` : ""}
@@ -225,6 +283,18 @@ export default function EvaluateMergedModal({
         {error && (
           <div className="mx-4 mt-2 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-[11px] text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/40 dark:text-rose-200">
             {error}
+          </div>
+        )}
+
+        {result && (
+          <div className="mx-4 mt-2 space-y-1.5 rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2 dark:border-slate-700 dark:bg-ink-950/50">
+            <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">This image · per class</div>
+            <ClassCountStrip counts={imageCounts} total={image?.n_boxes ?? result.n_boxes} />
+            {result.elapsed_ms != null && (
+              <div className="text-[10px] text-slate-400">
+                {result.elapsed_ms} ms · {result.class_names.length} classes
+              </div>
+            )}
           </div>
         )}
 

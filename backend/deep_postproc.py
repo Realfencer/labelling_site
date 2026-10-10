@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from . import vault
+from .lowprio import low_priority
+
 import json
+import os
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -69,6 +74,7 @@ class DppJob:
     postproc: dict[str, Any] | None = None
     baseline_score: dict[str, Any] | None = None
     compare: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
     error: str | None = None
     block_min: int | None = None
     block_max: int | None = None
@@ -90,6 +96,7 @@ class DppJob:
             "postproc": self.postproc,
             "baseline_score": self.baseline_score,
             "compare": self.compare,
+            "progress": self.progress,
             "error": self.error,
             "block_min": self.block_min,
             "block_max": self.block_max,
@@ -112,7 +119,58 @@ class DeepPostProcManager:
 
     def get(self, job_id: str) -> DppJob | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+            if job is not None:
+                return job
+        return self._load_job_from_disk(job_id)
+
+    def _load_job_from_disk(self, job_id: str) -> DppJob | None:
+        root = DPP_ROOT / job_id
+        meta_path = root / "job.json"
+        if not meta_path.is_file():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(meta, dict):
+            return None
+        job = DppJob(
+            id=str(meta.get("id") or job_id),
+            topic_slug=str(meta.get("topic_slug") or "topic"),
+            class_names=[str(c) for c in (meta.get("class_names") or [])],
+            status=str(meta.get("status") or "ready"),
+            message=str(meta.get("message") or ""),
+            created_at=str(meta.get("created_at") or _utc_now()),
+            updated_at=str(meta.get("updated_at") or _utc_now()),
+        )
+        if isinstance(meta.get("verify"), dict):
+            job.verify = meta["verify"]
+        if isinstance(meta.get("postproc"), dict):
+            job.postproc = meta["postproc"]
+        if isinstance(meta.get("baseline_score"), dict):
+            job.baseline_score = meta["baseline_score"]
+        if isinstance(meta.get("compare"), dict):
+            job.compare = meta["compare"]
+        if isinstance(meta.get("progress"), dict):
+            job.progress = meta["progress"]
+        job.error = meta.get("error")
+        try:
+            job.block_min = int(meta["block_min"]) if meta.get("block_min") is not None else None
+        except (TypeError, ValueError):
+            job.block_min = None
+        try:
+            job.block_max = int(meta["block_max"]) if meta.get("block_max") is not None else None
+        except (TypeError, ValueError):
+            job.block_max = None
+        job.quality = str(meta.get("quality") or "all")
+        try:
+            job.n_gt = int(meta.get("n_gt") or 0)
+        except (TypeError, ValueError):
+            job.n_gt = 0
+        with self._lock:
+            self._jobs[job_id] = job
+        return job
 
     def create_from_upload(
         self,
@@ -158,6 +216,22 @@ class DeepPostProcManager:
         else:
             (pack / "chute_config.yml").write_text(DEFAULT_CHUTE, encoding="utf-8")
 
+        # Gate always-on flip-TTA + pin ORT threads so ONNX/PT uploads can pass the
+        # CPU latency gate before deep post-process even starts.
+        try:
+            import find_best_model as fbm
+
+            harden = fbm.harden_miner_for_latency(
+                pack / "miner.py",
+                onnx_path=onnx_path,
+                force_flip_off=True,
+            )
+            job.message = (
+                f"Model verified — latency harden: {', '.join(harden.get('actions') or ['noop'])}"
+            )
+        except Exception:
+            pass
+
         verify = self._verify_pack(pack, class_names)
         job.verify = verify
         if not verify.get("ok"):
@@ -176,20 +250,38 @@ class DeepPostProcManager:
     def _resolve_template(self, template_miner_dir: Path | None, topic_slug: str) -> Path:
         if template_miner_dir and (template_miner_dir / "miner.py").is_file():
             return template_miner_dir
-        # Prefer HF winner for topic slug
+        # Prefer HF winner / known strong packs for topic slug
         slug = (topic_slug or "").lower().replace("_", "-")
-        candidates = sorted(HF_MINERS.glob("manak0__Detect-*"), key=lambda p: p.name)
-        for folder in candidates:
-            if slug and slug.replace("-", "") in folder.name.lower().replace("-", "").replace("_", ""):
-                if (folder / "miner.py").is_file():
-                    return folder
-        # Any ship pack with miner.py
+        compact = slug.replace("-", "").replace("_", "")
+        ranked: list[Path] = []
+        if HF_MINERS.is_dir():
+            ranked.extend(sorted(HF_MINERS.glob("manak0__Detect-*"), key=lambda p: p.name))
+            ranked.extend(sorted(HF_MINERS.iterdir(), key=lambda p: p.name))
+        for folder in ranked:
+            if not folder.is_dir() or not (folder / "miner.py").is_file():
+                continue
+            name = folder.name.lower().replace("-", "").replace("_", "")
+            if compact and compact in name:
+                return folder
+        # Beverage-detect: prefer a latency-safe TTA template when the active labeler
+        # miner is missing — manak0 1280+always-flip fails the CPU gate hard.
+        if "beverage" in compact or "bev" in compact:
+            for prefer in (
+                "Realfencer__bev7__main",
+                "Realfencer__bev6__main",
+                "Cargile__beverage001__main",
+                "SuperBitDev__bev3__main",
+                "WhiteCrow323__bev2__main",
+            ):
+                cand = HF_MINERS / prefer
+                if (cand / "miner.py").is_file():
+                    return cand
         if MERGED.is_dir():
             for ship in sorted(MERGED.glob("*/ship"), reverse=True):
                 if (ship / "miner.py").is_file():
                     return ship
-        for folder in candidates:
-            if (folder / "miner.py").is_file():
+        for folder in ranked:
+            if folder.is_dir() and (folder / "miner.py").is_file():
                 return folder
         raise ValueError("No template miner.py found for this topic")
 
@@ -201,10 +293,28 @@ class DeepPostProcManager:
                 "Uploading .pt requires ultralytics. Install it on the server, or export ONNX yourself."
             ) from exc
         model = YOLO(str(pt_path))
-        exported = model.export(format="onnx", simplify=True, dynamic=False)
+        imgsz = 640
+        try:
+            ov = getattr(model, "overrides", None) or {}
+            if isinstance(ov, dict) and ov.get("imgsz"):
+                raw = ov["imgsz"]
+                imgsz = int(raw if not isinstance(raw, (list, tuple)) else raw[0])
+            else:
+                args = getattr(getattr(model, "model", None), "args", None)
+                if args is not None and getattr(args, "imgsz", None):
+                    raw = args.imgsz
+                    imgsz = int(raw if not isinstance(raw, (list, tuple)) else raw[0])
+        except Exception:
+            imgsz = 640
+        exported = model.export(
+            format="onnx",
+            simplify=True,
+            dynamic=False,
+            imgsz=imgsz,
+            opset=12,
+        )
         exported_path = Path(str(exported))
         if not exported_path.is_file():
-            # Ultralytics often writes next to the .pt
             alt = pt_path.with_suffix(".onnx")
             if alt.is_file():
                 exported_path = alt
@@ -290,8 +400,8 @@ class DeepPostProcManager:
         job_id: str,
         *,
         stage_gt: Callable[[], tuple[Path, int, dict]],
-        passes: int = 3,
-        random_n: int = 250,
+        passes: int = 4,
+        random_n: int = 300,
     ) -> DppJob:
         job = self.get(job_id)
         if job is None:
@@ -328,12 +438,46 @@ class DeepPostProcManager:
                 pack = job.root / "pack"
                 class_names = list(job.class_names)
                 n_classes = len(class_names)
+                # Always harden before baseline so always-on flip templates don't poison the run.
+                fbm.harden_miner_for_latency(
+                    pack / "miner.py",
+                    onnx_path=pack / "weights.onnx",
+                    force_flip_off=True,
+                )
                 job.message = "Scoring baseline (before post-process)…"
                 items = load_items(job_gt)
                 baseline = fbm.score_pack(pack, items, n_classes, quiet=True)
                 job.baseline_score = baseline
-                job.message = "Deep post-process search (conf / NMS / filters)…"
+                job.message = "Deep post-process search (live, any miner style)…"
+                job.progress = {
+                    "phase": "starting",
+                    "trial": 0,
+                    "total": 1,
+                    "pct": 0.0,
+                    "score": None,
+                    "best": None,
+                    "message": job.message,
+                }
                 job.updated_at = _utc_now()
+                (job.root / "job.json").write_text(json.dumps(job.to_public(), indent=2), encoding="utf-8")
+
+                last_flush = [0.0]
+
+                def on_progress(payload: dict) -> None:
+                    job.progress = dict(payload)
+                    job.message = str(payload.get("message") or job.message)
+                    job.updated_at = _utc_now()
+                    now = time.time()
+                    # Throttle disk writes so the UI can poll lively without thrashing.
+                    if now - last_flush[0] >= 0.4 or payload.get("phase") in {"done", "reverted"}:
+                        last_flush[0] = now
+                        try:
+                            (job.root / "job.json").write_text(
+                                json.dumps(job.to_public(), indent=2), encoding="utf-8"
+                            )
+                        except Exception:
+                            pass
+
                 result = fbm.deep_postproc(
                     pack / "weights.onnx",
                     job_gt,
@@ -343,18 +487,52 @@ class DeepPostProcManager:
                     random_n=random_n,
                     pack_dir=pack,
                     items=items,
+                    progress_cb=on_progress,
+                    cancel_cb=job.cancel.is_set,
                 )
                 if job.cancel.is_set():
                     job.status = "error"
                     job.error = "Cancelled"
                     job.message = "Cancelled"
                     return
-                # Ensure miner.py patched (deep_postproc already does when pack_dir set)
-                fbm.apply_postproc_to_miner(pack / "miner.py", result["params"])
-                # Final live score
+                # deep_postproc already patched miner.py when successful; re-apply is idempotent
+                # and style-aware (c2 ELEMENT_CONFIG / CONF_BY_COUNT or array miners).
+                if result.get("postproc_applied") and isinstance(result.get("params"), dict):
+                    fbm.apply_postproc_to_miner(pack / "miner.py", result["params"])
+                # Enforce CPU latency gate on the final ship (flip off + ORT thread pins).
+                job.message = "Checking latency gate…"
+                gate = fbm.ensure_pack_passes_latency(pack, items, n_sample=min(16, len(items)))
+                result["latency"] = gate.get("latency") or result.get("latency") or {}
+                result["latency_harden"] = gate.get("harden") or result.get("latency_harden") or {}
+                # Final live score (after latency harden)
                 final = fbm.score_pack(pack, items, n_classes, quiet=True)
                 result["final_live"] = final
                 job.postproc = result
+                lat = result.get("latency") or {}
+                rolled_back = " · post-process rolled back: it pushed p95 over the limit" if result.get("latency_reverted") else ""
+                lat_bit = ""
+                if lat.get("p95_ms") is not None:
+                    lat_bit = (
+                        f" · p95 {float(lat['p95_ms']):.0f}ms"
+                        f"{' idle-equivalent' if lat.get('normalized') else ''}"
+                        f" ({'PASS' if lat.get('passed') else 'FAIL'} ≤{lat.get('gate_ms', 150):.0f}ms)"
+                    )
+                    if lat.get("normalized"):
+                        lat_bit += f" · measured {float(lat['p95_raw_ms']):.0f}ms while the server was busy (winner {float(lat['ref_ms']):.0f}ms)"
+                job.progress = {
+                    "phase": "done",
+                    "trial": int(result.get("n_trials") or 0),
+                    "total": int(result.get("n_trials") or 0),
+                    "pct": 100.0,
+                    "score": final.get("score"),
+                    "best": final.get("score"),
+                    "style": result.get("style") or result.get("mode"),
+                    "message": (
+                        f"Done · {baseline.get('score')} → {final.get('score')} "
+                        f"(Δ {(float(final.get('score') or 0) - float(baseline.get('score') or 0)):+.4f})"
+                        f"{lat_bit}{rolled_back}"
+                    ),
+                }
 
                 ship = job.root / "ship"
                 if ship.exists():
@@ -368,6 +546,7 @@ class DeepPostProcManager:
                             "baseline": baseline,
                             "postproc": result,
                             "final": final,
+                            "latency": result.get("latency"),
                             "topic": job.topic_slug,
                             "class_names": class_names,
                             "created_at": _utc_now(),
@@ -376,10 +555,18 @@ class DeepPostProcManager:
                     ),
                     encoding="utf-8",
                 )
+                # Pre-build downloadable zip so the UI does not wait on a live compress.
+                try:
+                    zip_path, _fname = self.build_ship_zip(job_id)
+                    dest_zip = job.root / f"dpp_{_safe(job.topic_slug)}_{job_id}_ship.zip"
+                    shutil.move(str(zip_path), dest_zip)
+                except Exception:
+                    pass
                 job.status = "done"
                 job.message = (
                     f"Done · score {baseline.get('score')} → {final.get('score')} "
                     f"(Δ {(float(final.get('score') or 0) - float(baseline.get('score') or 0)):+.4f})"
+                    f"{lat_bit}"
                 )
                 job.error = None
             except Exception as exc:
@@ -395,7 +582,7 @@ class DeepPostProcManager:
                 except OSError:
                     pass
 
-        job.thread = threading.Thread(target=run, daemon=True, name=f"dpp-{job_id}")
+        job.thread = threading.Thread(target=low_priority(run), daemon=True, name=f"dpp-{job_id}")
         job.thread.start()
         return job
 
@@ -537,23 +724,313 @@ class DeepPostProcManager:
 
     def build_ship_zip(self, job_id: str) -> tuple[Path, str]:
         job = self.get(job_id)
-        if job is None:
+        root = DPP_ROOT / job_id
+        if job is not None:
+            root = job.root
+            topic_slug = job.topic_slug
+        elif not (root / "ship").is_dir():
             raise ValueError("Unknown job")
-        ship = job.root / "ship"
+        else:
+            topic_slug = "topic"
+            job_json = root / "job.json"
+            if job_json.is_file():
+                try:
+                    meta = json.loads(job_json.read_text(encoding="utf-8"))
+                    topic_slug = str(meta.get("topic_slug") or topic_slug)
+                except Exception:
+                    pass
+        ship = root / "ship"
         for f in REQUIRED:
             if not (ship / f).is_file():
                 raise ValueError(f"Ship pack incomplete — missing {f}. Run deep post-process first.")
-        tmp = job.root / f"{job.id}_ship.zip"
-        if tmp.is_file():
-            tmp.unlink()
+        fname = f"dpp_{_safe(topic_slug)}_{job_id}_ship.zip"
+        cached = root / fname
+        # Prefer a pre-built zip when ship files have not changed since it was written.
+        if cached.is_file() and cached.stat().st_size > 0:
+            try:
+                newest_ship = max((ship / f).stat().st_mtime for f in REQUIRED)
+                if cached.stat().st_mtime >= newest_ship:
+                    return cached, fname
+            except OSError:
+                pass
+        fd, tmp_name = tempfile.mkstemp(suffix=".zip", prefix=f"dpp_{job_id}_")
+        os.close(fd)
+        tmp = Path(tmp_name)
         with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for f in REQUIRED:
                 zf.write(ship / f, arcname=f)
             score = ship / "SCORE.json"
             if score.is_file():
                 zf.write(score, arcname="SCORE.json")
-        fname = f"dpp_{_safe(job.topic_slug)}_{job.id}_ship.zip"
+        try:
+            shutil.copy2(tmp, cached)
+        except OSError:
+            pass
         return tmp, fname
+
+    def list_history(self, topic_slug: str | None = None) -> list[dict[str, Any]]:
+        """List completed DPP jobs with ship packs on disk (newest first)."""
+        want = (topic_slug or "").strip().lower().replace("_", "-")
+        entries: list[dict[str, Any]] = []
+        if not DPP_ROOT.is_dir():
+            return entries
+        for job_dir in DPP_ROOT.iterdir():
+            if not job_dir.is_dir():
+                continue
+            meta_path = job_dir / "job.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(meta, dict) or meta.get("status") != "done":
+                continue
+            entry_slug = str(meta.get("topic_slug") or "").strip().lower().replace("_", "-")
+            if want and entry_slug != want:
+                continue
+            ship_onnx = job_dir / "ship" / "weights.onnx"
+            if not ship_onnx.is_file():
+                continue
+            postproc = meta.get("postproc") if isinstance(meta.get("postproc"), dict) else {}
+            baseline = meta.get("baseline_score") if isinstance(meta.get("baseline_score"), dict) else {}
+            final_live = postproc.get("final_live") if isinstance(postproc.get("final_live"), dict) else {}
+            score = final_live.get("score") if final_live else postproc.get("score")
+            baseline_score = baseline.get("score")
+            delta = None
+            try:
+                if score is not None and baseline_score is not None:
+                    delta = float(score) - float(baseline_score)
+            except (TypeError, ValueError):
+                delta = None
+            entries.append(
+                {
+                    "id": str(meta.get("id") or job_dir.name),
+                    "topic_slug": meta.get("topic_slug"),
+                    "status": meta.get("status"),
+                    "created_at": meta.get("created_at"),
+                    "updated_at": meta.get("updated_at"),
+                    "score": score,
+                    "baseline_score": baseline_score,
+                    "delta": delta,
+                    "map50": final_live.get("map50") if final_live else postproc.get("map50"),
+                    "n_gt": meta.get("n_gt"),
+                    "block_min": meta.get("block_min"),
+                    "block_max": meta.get("block_max"),
+                    "quality": meta.get("quality"),
+                    "has_ship": True,
+                    "onnx_size": ship_onnx.stat().st_size,
+                }
+            )
+        entries.sort(key=lambda e: str(e.get("updated_at") or ""), reverse=True)
+        return entries
+
+    def _ship_dir(self, job_id: str) -> Path:
+        job = self.get(job_id)
+        root = job.root if job is not None else DPP_ROOT / job_id
+        ship = root / "ship"
+        if not (ship / "weights.onnx").is_file():
+            raise FileNotFoundError("Ship pack incomplete (missing weights.onnx)")
+        miner_py = ship / "miner.py"
+        if not miner_py.is_file():
+            miner_py = ship / "main.py"
+        if not miner_py.is_file():
+            raise FileNotFoundError("Ship pack incomplete (missing miner.py)")
+        if not (ship / "chute_config.yml").is_file():
+            raise FileNotFoundError("Ship pack incomplete (missing chute_config.yml)")
+        return ship
+
+    def evaluate_ship_images(self, job_id: str, files: list[tuple[str, bytes]]) -> dict[str, Any]:
+        """Run the DPP ship pack on uploaded test images (does not change the labeler miner)."""
+        import cv2
+        import numpy as np
+
+        from . import core
+
+        ship = self._ship_dir(job_id)
+        miner = core.load_miner_from_folder(ship)
+        names = core.class_names_from_miner(miner) or core.class_names_from_onnx(ship / "weights.onnx")
+        t0 = time.perf_counter()
+        images_out: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        max_bytes = 16 * 1024 * 1024
+        for name, data in files:
+            if len(data) > max_bytes:
+                skipped.append(name)
+                continue
+            arr = np.frombuffer(data, dtype=np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if bgr is None:
+                skipped.append(name)
+                continue
+            h, w = int(bgr.shape[0]), int(bgr.shape[1])
+            dets = core.normalize_miner_detections(core.run_miner_inference(miner, bgr))
+            boxes = []
+            for box in dets:
+                clamped = box.clamped(w, h)
+                if clamped is None:
+                    continue
+                boxes.append(clamped.to_dict())
+            images_out.append(
+                {
+                    "name": name,
+                    "width": w,
+                    "height": h,
+                    "n_boxes": len(boxes),
+                    "boxes": boxes,
+                }
+            )
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+        n_boxes = sum(int(im["n_boxes"]) for im in images_out)
+        by_cls: dict[int, int] = {}
+        for im in images_out:
+            per: dict[int, int] = {}
+            for box in im["boxes"]:
+                cid = int(box.get("cls") or 0)
+                by_cls[cid] = by_cls.get(cid, 0) + 1
+                per[cid] = per.get(cid, 0) + 1
+            counts: list[dict[str, Any]] = [
+                {
+                    "cls": i,
+                    "name": names[i] if i < len(names) else f"cls {i}",
+                    "count": int(per.get(i, 0)),
+                }
+                for i in range(len(names))
+            ]
+            for cid in sorted(c for c in per if c < 0 or c >= len(names)):
+                counts.append({"cls": cid, "name": f"cls {cid}", "count": int(per[cid])})
+            im["class_counts"] = counts
+        classes = [
+            {"cls": i, "name": names[i], "count": int(by_cls.get(i, 0))}
+            for i in range(len(names))
+        ]
+        for cid in sorted(c for c in by_cls if c < 0 or c >= len(names)):
+            classes.append({"cls": cid, "name": f"cls {cid}", "count": int(by_cls[cid])})
+        return {
+            "history_id": job_id,
+            "class_names": names,
+            "n_images": len(images_out),
+            "n_boxes": n_boxes,
+            "elapsed_ms": elapsed_ms,
+            "skipped": skipped,
+            "classes": classes,
+            "images": images_out,
+        }
+
+    def push_ship_to_hf(self, job_id: str, *, token: str, repo: str) -> dict[str, Any]:
+        """Push ship pack to Hugging Face (create if missing, else update). No README."""
+        import ast
+        import io
+        import tokenize
+
+        from huggingface_hub import HfApi
+
+        repo = (repo or "").strip().strip("/")
+        token = vault.hf_token(token, repo)  # saved account that owns this repo, unless one was passed
+        if not token:
+            raise ValueError("No Hugging Face token saved — add one under API keys")
+        if not repo:
+            raise ValueError("Repo name is required")
+
+        ship = self._ship_dir(job_id)
+        weights = ship / "weights.onnx"
+        miner_py = ship / "miner.py"
+        if not miner_py.is_file():
+            miner_py = ship / "main.py"
+        chute = ship / "chute_config.yml"
+
+        def strip_comments_and_docs(src: str) -> str:
+            toks = [
+                t
+                for t in tokenize.tokenize(io.BytesIO(src.encode()).readline)
+                if t.type != tokenize.COMMENT
+            ]
+            clean = tokenize.untokenize(toks)
+            if isinstance(clean, bytes):
+                clean = clean.decode()
+
+            class DocStrip(ast.NodeTransformer):
+                def _strip(self, node):
+                    if not getattr(node, "body", None):
+                        return node
+                    first = node.body[0]
+                    if isinstance(first, ast.Expr) and isinstance(getattr(first, "value", None), ast.Constant):
+                        if isinstance(first.value.value, str):
+                            node.body = node.body[1:] or [ast.Pass()]
+                    return node
+
+                def visit_Module(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+                def visit_FunctionDef(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+                def visit_AsyncFunctionDef(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+                def visit_ClassDef(self, node):
+                    self.generic_visit(node)
+                    return self._strip(node)
+
+            return ast.unparse(DocStrip().visit(ast.parse(clean))) + "\n"
+
+        api = HfApi(token=token)
+        if "/" not in repo:
+            info = api.whoami()
+            user = info.get("name")
+            if not user:
+                orgs = info.get("orgs") or []
+                if orgs and isinstance(orgs[0], dict):
+                    user = orgs[0].get("name")
+            if not user:
+                raise ValueError("Could not resolve HF username; use user/repo")
+            repo = f"{user}/{repo}"
+
+        created = False
+        try:
+            api.repo_info(repo_id=repo, repo_type="model")
+        except Exception:
+            api.create_repo(repo_id=repo, repo_type="model", private=True, exist_ok=True)
+            created = True
+        try:
+            api.update_repo_settings(repo_id=repo, private=True, repo_type="model")
+        except Exception:
+            pass
+
+        miner_src = miner_py.read_text(encoding="utf-8")
+        try:
+            miner_clean = strip_comments_and_docs(miner_src)
+        except Exception as exc:
+            raise ValueError(f"Failed to strip miner.py comments: {exc}") from exc
+
+        with tempfile.TemporaryDirectory(prefix="hf_dpp_ship_") as tmp:
+            out = Path(tmp)
+            (out / "miner.py").write_text(miner_clean, encoding="utf-8")
+            shutil.copy2(weights, out / "weights.onnx")
+            shutil.copy2(chute, out / "chute_config.yml")
+            api.upload_folder(
+                folder_path=str(out),
+                repo_id=repo,
+                repo_type="model",
+                commit_message=".",
+                allow_patterns=["miner.py", "weights.onnx", "chute_config.yml"],
+            )
+
+        try:
+            api.delete_file("README.md", repo_id=repo, repo_type="model", commit_message=".")
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "history_id": job_id,
+            "repo_id": repo,
+            "created": created,
+            "url": f"https://huggingface.co/{repo}",
+        }
 
 
 dpp_manager = DeepPostProcManager()

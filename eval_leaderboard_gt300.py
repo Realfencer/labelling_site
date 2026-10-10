@@ -67,11 +67,32 @@ def latest_split(gt: Path, n: int, out: Path) -> Path:
 def load_miner(repo: Path):
     miner_py = repo / "miner.py"
     # unique module name per repo so class attrs don't collide across loads
-    mod_name = f"miner_{repo.name}"
+    mod_name = f"miner_{repo.name}_{abs(hash(str(repo.resolve()))) % (10**8)}"
     spec = importlib.util.spec_from_file_location(mod_name, miner_py)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(mod)
+    # dataclasses / pydantic need the module registered before exec_module
+    sys.modules[mod_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        sys.modules.pop(mod_name, None)
+        raise
+    # Pydantic v2 + `from __future__ import annotations` leaves TVFrameResult
+    # with unresolved ForwardRefs (BoundingBox) until model_rebuild().
+    for name in dir(mod):
+        obj = getattr(mod, name, None)
+        rebuild = getattr(obj, "model_rebuild", None)
+        if callable(rebuild):
+            try:
+                rebuild(_types_namespace=vars(mod))
+            except TypeError:
+                try:
+                    rebuild()
+                except Exception:
+                    pass
+            except Exception:
+                pass
     return mod.Miner(repo)
 
 

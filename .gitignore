@@ -23,3 +23,8 @@ _hf_probe/
 
 # OS
 .DS_Store
+
+# GT challenge images / labels copied for scripts (data, not code)
+preprocessing/
+*.pt
+*.npz
