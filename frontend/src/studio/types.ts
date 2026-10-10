@@ -268,3 +268,6 @@ export type StudioStatus = {
   me: string;
   can_spend: boolean;
 };
+
+/** A Done Platform image the eval set can be built from. */
+export type GtCandidate = { item_key: string; block: number; quality: "pass" | "mid" | "fail" | null; in_eval: boolean };

@@ -196,6 +196,7 @@ def run_generation(
     model: str | None = None,
     source_index: int | None = None,
     source_image: str | None = None,
+    source_images: list[str] | None = None,
     per_source: int | None = 10,
     quality: str | None = None,
     workers: int = 3,
@@ -224,6 +225,7 @@ def run_generation(
         mode=mode,
         source_index=source_index,
         source_image=source_image,
+        source_images=source_images,
     )
     if not rows:
         raise OpenRouterGenError("No sources selected")

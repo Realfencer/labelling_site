@@ -167,33 +167,101 @@ def _gt_info() -> dict:
     }
 
 
-class SyncGtBody(BaseModel):
-    analyze: bool = True
-    # The newest N Done Platform images. The eval set should look like the CURRENT challenges (and every source
-    # costs money in a final run), so this is a recent slice, never the whole history.
-    latest_n: int = Field(default=110, ge=10, le=2000)
-    quality: str = Field(default="all", pattern="^(all|pass)$")
+_open_lock = threading.RLock()
 
 
-@router.post("/api/studio-admin/sync-gt")
-def studio_sync_gt(body: SyncGtBody, request: Request) -> dict:
-    """Copy the Done Platform GT (beverage) into the Studio's eval set, then (optionally) start the analysis."""
+def _platform_state():
+    """The server-side labeler session on Platform · beverage-detect, re-read from disk so Done is current."""
     from .main import sessions
 
-    if not _sync_lock.acquire(blocking=False):
-        raise HTTPException(409, "An update is already running")
-    try:
+    with _open_lock:
         _sid, st, _ = sessions.get_or_create(SYNC_SID)
         skill = getattr(st.active_skill, "element_path", "") or ""
         if "beverage" not in skill or st.review_mode != "challenge":
             st.enter_topic("beverage-detect", start_collect=False, workspace="platform")
         else:
             st.refresh_topic_from_disk()
-        done = sorted(
-            (it for it in st.challenge_items if getattr(it, "reviewed", False) and getattr(it, "loaded", True) and int(it.block or 0) > 0),
-            key=lambda it: int(it.block),
-            reverse=True,
-        )[: body.latest_n]
+        return st
+
+
+def _done_items(st) -> list:
+    """Done Platform images, newest block first."""
+    return sorted(
+        (it for it in st.challenge_items if getattr(it, "reviewed", False) and getattr(it, "loaded", True) and int(it.block or 0) > 0),
+        key=lambda it: int(it.block),
+        reverse=True,
+    )
+
+
+def _eval_blocks() -> set[int]:
+    images = GT_DIR / "images"
+    out: set[int] = set()
+    for p in images.iterdir() if images.is_dir() else []:
+        stem = p.stem
+        if stem.startswith("block_") and stem[6:].isdigit():
+            out.add(int(stem[6:]))
+    return out
+
+
+@router.get("/api/studio-admin/gt-candidates")
+def studio_gt_candidates() -> dict:
+    """Every Done Platform image the eval set can be built from (for the Studio's image picker)."""
+    from . import core
+
+    st = _platform_state()
+    in_eval = _eval_blocks()
+    items = []
+    for it in _done_items(st):
+        quality = None
+        if core.checks_total_for_record(it) > 0:
+            quality = "pass" if core.checks_pass_complete(it) else "fail" if core.checks_fail_complete(it) else "mid"
+        items.append({"item_key": str(it.item_key), "block": int(it.block), "quality": quality, "in_eval": int(it.block) in in_eval})
+    return {"items": items}
+
+
+@router.get("/api/studio-admin/gt-image/{block}")
+def studio_gt_image(block: int, kind: str = "thumb") -> Response:
+    if kind not in {"thumb", "preview"}:
+        raise HTTPException(400, "kind must be thumb or preview")
+    from .main import sessions
+
+    _sid, st, _ = sessions.get_or_create(SYNC_SID)
+    if not st.challenge_items:  # thumbnails never re-read the topic; the candidates list does
+        st = _platform_state()
+    item = next((it for it in st.challenge_items if int(it.block or 0) == block), None)
+    if item is None:
+        raise HTTPException(404, "Image not found")
+    path = st.thumbnail_path_for_item(item) if kind == "thumb" else st.preview_path_for_item(item)
+    if path is None or not path.exists():
+        raise HTTPException(404, "Image not found")
+    return Response(path.read_bytes(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+class SyncGtBody(BaseModel):
+    analyze: bool = True
+    # The newest N Done Platform images. The eval set should look like the CURRENT challenges (and every source
+    # costs money in a final run), so this is a recent slice, never the whole history.
+    latest_n: int = Field(default=110, ge=10, le=2000)
+    # Hand-picked images (item keys from gt-candidates); when given, latest_n is ignored.
+    item_keys: list[str] | None = Field(default=None, max_length=2000)
+    quality: str = Field(default="all", pattern="^(all|pass)$")
+
+
+@router.post("/api/studio-admin/sync-gt")
+def studio_sync_gt(body: SyncGtBody, request: Request) -> dict:
+    """Copy the Done Platform GT (beverage) into the Studio's eval set, then (optionally) start the analysis."""
+    if body.item_keys is not None and len(body.item_keys) < 10:
+        raise HTTPException(400, "Pick at least 10 images")
+    if not _sync_lock.acquire(blocking=False):
+        raise HTTPException(409, "An update is already running")
+    try:
+        st = _platform_state()
+        done = _done_items(st)
+        if body.item_keys is not None:
+            want = set(body.item_keys)
+            done = [it for it in done if str(it.item_key) in want]
+        else:
+            done = done[: body.latest_n]
         if not done:
             raise HTTPException(400, "No Done Platform images yet")
         try:

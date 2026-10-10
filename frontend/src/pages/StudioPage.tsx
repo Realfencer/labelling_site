@@ -1,4 +1,4 @@
-import { lazy, Suspense, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Image as ImageIcon, Loader2, RotateCw, Settings, Sparkles, Type, Wand2, X } from "lucide-react";
 import { cn } from "../lib/utils";
@@ -35,6 +35,11 @@ function Studio() {
     setTab(t);
     localStorage.setItem("studio_tab2", t);
   };
+  useEffect(() => {
+    const open = (e: Event) => pick((e as CustomEvent<Tab>).detail);
+    window.addEventListener("studio-open-tab", open);
+    return () => window.removeEventListener("studio-open-tab", open);
+  }, []);
   const next = nextStep(st);
   const keys = st.status?.keys;
 

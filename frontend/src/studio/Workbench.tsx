@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Bot, Check, ChevronDown, DatabaseZap, FlaskConical, FolderUp, Loader2, Rocket, ScanSearch, Sparkles, Upload, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Bot, Check, ChevronDown, DatabaseZap, FlaskConical, FolderUp, Images, Loader2, Rocket, ScanSearch, Sparkles, Upload, X } from "lucide-react";
 import { cn } from "../lib/utils";
 import { timeAgo } from "../store/useTeam";
 import { img, studio } from "./api";
 import { useStudio } from "./store";
-import type { GenMode, SwitchName } from "./types";
+import { ImagePickerModal, type PickItem } from "../components/ImagePicker";
+import type { GenMode, GtCandidate, SwitchName } from "./types";
 import { Btn, Confirm, errText, Progress } from "./ui";
 
 /** $ per 1024² image (OpenAI Batch API: low / medium / high). */
@@ -103,15 +105,20 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
     if (st.status?.gt_images) setLatest(st.status.gt_images);
   }, [st.status?.gt_images]);
 
-  const sync = async () => {
+  const [picking, setPicking] = useState(false);
+
+  /** keys: exactly these images (picker); otherwise the newest `latest` Done images. */
+  const sync = async (keys?: string[]) => {
     setBusy(true);
     try {
-      const r = await studio.syncGt(reanalyze, latest);
+      const r = await studio.syncGt(reanalyze, keys ? { item_keys: keys } : { latest_n: latest });
+      const what = keys ? `${r.n_images} chosen` : `the newest ${r.n_images}`;
       st.setToast(
         r.analyze?.error
           ? { kind: "error", text: `Copied ${r.n_images} images, but the analysis did not start: ${r.analyze.error}` }
-          : { kind: "ok", text: `Copied the newest ${r.n_images} Done Platform images${reanalyze ? " — analyzing now." : "."}` },
+          : { kind: "ok", text: `Copied ${what} Done Platform images${reanalyze ? " — analyzing now." : "."}` },
       );
+      setPicking(false);
       if (reanalyze) st.analyze.kick();
       void st.loadStatus();
     } catch (e) {
@@ -146,7 +153,7 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
         Real challenge frames with your labels. The Studio copies their look; every frame becomes a source in a final run, so keep it to the newest ones.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
-        <Btn kind="success" busy={busy} disabled={st.analyze.job?.status === "running"} onClick={() => void sync()}>
+        <Btn kind="success" busy={busy && !picking} disabled={busy || st.analyze.job?.status === "running"} onClick={() => void sync()}>
           <DatabaseZap className="h-3.5 w-3.5" /> Update from labeler
         </Btn>
         <label className="flex items-center gap-1">
@@ -166,8 +173,79 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
           <input type="checkbox" checked={reanalyze} onChange={(e) => setReanalyze(e.target.checked)} /> analyze after
         </label>
       </div>
+      <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+        <Btn className="whitespace-nowrap" disabled={busy || st.analyze.job?.status === "running"} onClick={() => setPicking(true)}>
+          <Images className="h-3.5 w-3.5" /> Choose images…
+        </Btn>
+        or pick the exact frames
+      </div>
+      {picking && <EvalPicker busy={busy} reanalyze={reanalyze} onUse={(keys) => void sync(keys)} onClose={() => setPicking(false)} />}
       <FolderUpload />
     </StepCard>
+  );
+}
+
+/** Pick the eval set image by image from every Done Platform frame (the site's image picker). */
+function EvalPicker({ busy, reanalyze, onUse, onClose }: { busy: boolean; reanalyze: boolean; onUse: (keys: string[]) => void; onClose: () => void }) {
+  const [cands, setCands] = useState<GtCandidate[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    studio
+      .gtCandidates()
+      .then((r) => setCands(r.items))
+      .catch((e) => setError(errText(e)));
+  }, []);
+  const items = useMemo<PickItem[]>(
+    () =>
+      (cands || []).map((c) => ({
+        id: c.item_key,
+        order: c.block,
+        label: String(c.block),
+        thumb: img.gt(c.block, "thumb"),
+        preview: img.gt(c.block, "preview"),
+        tag: c.in_eval ? "IN" : undefined,
+        quality: c.quality,
+      })),
+    [cands],
+  );
+  const initial = useMemo(() => (cands || []).filter((c) => c.in_eval).map((c) => c.item_key), [cands]);
+  // Portal: the left column is its own stacking context, so the picker would sit under the result cards.
+  return createPortal(
+    <ImagePickerModal
+      layer="z-[70]"
+      title="Choose the eval set"
+      hint={
+        <>
+          Done Platform frames, newest first. <b>IN</b> = in the eval set now. Each picked frame becomes a source in a final run, so prefer recent
+          frames that look like today's challenges.
+        </>
+      }
+      items={items}
+      initial={initial}
+      minCount={10}
+      loading={cands === null && !error}
+      busy={busy}
+      error={error}
+      defaultLatest={initial.length || 110}
+      onClose={onClose}
+      actions={(ctx) => (
+        <>
+          <button
+            type="button"
+            disabled={ctx.small || ctx.n === 0 || busy}
+            onClick={() => onUse(ctx.selected)}
+            className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-4 py-2.5 text-[13px] font-bold text-white hover:bg-emerald-500 disabled:opacity-40"
+          >
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+            Use these {ctx.n} images{reanalyze ? " · analyze" : ""}
+          </button>
+          <button type="button" onClick={onClose} className="rounded-md border border-slate-600 px-3 py-1.5 text-[12px] font-semibold hover:bg-slate-800">
+            Cancel
+          </button>
+        </>
+      )}
+    />,
+    document.body,
   );
 }
 
@@ -390,7 +468,8 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   }, [models, h?.default_model]);
 
   const unit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
-  const nFinal = Math.max(st.sources.length, st.nAllSources);
+  const nFinal = st.nFinal;
+  const nAll = Math.max(st.sources.length, st.nAllSources);
   const source = st.sources.find((s) => s.source_image === st.source) || st.sources[0] || null;
 
   const start = async (kind: "test" | "final") => {
@@ -400,6 +479,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         model,
         per_source: per,
         source_image: kind === "test" ? source?.source_image || null : null,
+        source_images: kind === "final" ? st.finalSel : null,
         quality: isGemini ? null : quality,
         input_fidelity: isGemini ? null : fidelity,
       });
@@ -506,6 +586,31 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
           </div>
         </div>
 
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 p-2 text-[11px] dark:border-slate-700">
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Final sources</div>
+            <div className="truncate">
+              {st.finalSel ? (
+                <>
+                  <b>{nFinal}</b> of {nAll} ticked
+                </>
+              ) : (
+                <>
+                  all <b>{nAll}</b> eval-set frames
+                </>
+              )}
+            </div>
+          </div>
+          <button type="button" onClick={() => window.dispatchEvent(new CustomEvent("studio-open-tab", { detail: "plan" }))} className="font-bold text-violet-600 hover:underline dark:text-violet-300">
+            choose
+          </button>
+          {st.finalSel && (
+            <button type="button" onClick={() => st.setFinalSel(null)} className="font-semibold text-slate-500 hover:underline">
+              use all
+            </button>
+          )}
+        </div>
+
         <div className="grid grid-cols-2 gap-2">
           <Btn kind="secondary" disabled={!canSpend || genRunning || analyzing || !source} onClick={() => setConfirm("test")} className="flex-col gap-0 py-2">
             <span className="flex items-center gap-1">
@@ -549,10 +654,10 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         </Confirm>
       )}
       {confirm === "final" && (
-        <Confirm title="Generate the full set?" confirmLabel={`Spend ≈ $${(unit * nFinal * per).toFixed(2)}`} onCancel={() => setConfirm(null)} onConfirm={async () => (setConfirm(null), await start("final"))}>
+        <Confirm title={st.finalSel ? `Generate on ${nFinal} chosen sources?` : "Generate the full set?"} confirmLabel={`Spend ≈ $${(unit * nFinal * per).toFixed(2)}`} onCancel={() => setConfirm(null)} onConfirm={async () => (setConfirm(null), await start("final"))}>
           <p>
             <b>{model}</b>
-            {!isGemini && <> · {quality}</>} makes <b>{nFinal * per}</b> images ({nFinal} sources × {per}).
+            {!isGemini && <> · {quality}</>} makes <b>{nFinal * per}</b> images ({nFinal} {st.finalSel ? `ticked of ${nAll} ` : ""}sources × {per}).
           </p>
           <p>
             Estimated <b className="text-amber-600 dark:text-amber-300">≈ ${(unit * nFinal * per).toFixed(2)}</b>

@@ -670,6 +670,7 @@ def run_generation_batch(
     model: str | None = None,
     source_index: int | None = None,
     source_image: str | None = None,
+    source_images: list[str] | None = None,
     per_source: int | None = None,
     progress_cb: ProgressCb | None = None,
     poll_s: float = BATCH_POLL_S,
@@ -699,12 +700,17 @@ def run_generation_batch(
         mode=mode,
         source_index=source_index,
         source_image=source_image,
+        source_images=source_images,
     )
     if not rows:
         raise OpenAIGenError(
             "No sources selected — pick a block_* source image"
             if mode == "test"
-            else "No sources in package — run Analyze / Rebuild package first"
+            else (
+                "None of the selected sources are in the package — re-select them in the Plan tab"
+                if source_images is not None
+                else "No sources in package — run Analyze / Rebuild package first"
+            )
         )
 
     run_dir, img_dir, _lab_dir = _init_run_dir(mode)

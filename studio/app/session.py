@@ -213,6 +213,7 @@ def start_generation(
     model: str | None = None,
     source_index: int | None = None,
     source_image: str | None = None,
+    source_images: list[str] | None = None,
     per_source: int | None = None,
     openai_api_key: str | None = None,
     gemini_api_key: str | None = None,
@@ -294,6 +295,7 @@ def start_generation(
                     model=model.strip(),
                     source_index=source_index,
                     source_image=source_image,
+                    source_images=source_images,
                     per_source=per_source,
                     progress_cb=cb,
                 )
@@ -314,6 +316,7 @@ def start_generation(
                     model=model_name,
                     source_index=source_index,
                     source_image=source_image,
+                    source_images=source_images,
                     per_source=per_source,
                     progress_cb=cb,
                     **(openai_options or {}),

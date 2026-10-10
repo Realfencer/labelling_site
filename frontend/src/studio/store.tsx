@@ -100,6 +100,34 @@ function useStudioState() {
 
   const sources = useMemo(() => (pkg?.sources || []).filter((s) => s.source_image.includes("block_")), [pkg]);
 
+  // Which sources a Final run uses: null = every source; a list = only those (ticked on the Plan tab).
+  const [finalPick, setFinalPick] = useState<string[] | null>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem("studio_final_sel") || "null");
+      return Array.isArray(v) ? v.map(String) : null;
+    } catch {
+      return null;
+    }
+  });
+  const setFinalSel = useCallback((v: string[] | null) => {
+    setFinalPick(v);
+    try {
+      if (v == null) localStorage.removeItem("studio_final_sel");
+      else localStorage.setItem("studio_final_sel", JSON.stringify(v));
+    } catch {
+      /* private mode */
+    }
+  }, []);
+  /** The ticked sources that still exist in the package (null = all of them). */
+  const finalSel = useMemo(() => {
+    if (finalPick == null) return null;
+    const have = new Set(sources.map((s) => s.source_image));
+    const keep = finalPick.filter((x) => have.has(x));
+    // A new eval set replaced every ticked source: fall back to "all" instead of an empty run.
+    return keep.length === 0 && finalPick.length > 0 && sources.length > 0 ? null : keep;
+  }, [finalPick, sources]);
+  const nFinal = finalSel ? finalSel.length : Math.max(sources.length, nAllSources);
+
   return {
     status,
     health,
@@ -112,6 +140,9 @@ function useStudioState() {
     setActiveRun,
     source,
     pickSource,
+    finalSel,
+    setFinalSel,
+    nFinal,
     toast,
     setToast,
     offline,
@@ -177,5 +208,6 @@ export function nextStep(st: StudioState): NextStep {
       cta: "Review",
       tone: "emerald",
     };
-  return { key: "final", title: "Generate the full set", detail: `${nAllSources} sources are ready.`, cta: "Final generate", tone: "violet" };
+  const detail = st.finalSel ? `${st.nFinal} of ${nAllSources} sources ticked on the Plan tab.` : `${nAllSources} sources are ready.`;
+  return { key: "final", title: "Generate the full set", detail, cta: "Final generate", tone: "violet" };
 }

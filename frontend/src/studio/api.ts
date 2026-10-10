@@ -2,6 +2,7 @@ import type {
   AnalyzeJob,
   CkptJob,
   ClearPreview,
+  GtCandidate,
   Distribution,
   Gallery,
   GenItem,
@@ -59,6 +60,7 @@ const post = <T,>(p: string, body?: unknown, timeoutMs?: number) =>
 
 /** Image URL helpers (the server snaps w to 320/480/640/800/1024). */
 export const img = {
+  gt: (block: number, kind: "thumb" | "preview") => `/api/studio-admin/gt-image/${block}?kind=${kind}`,
   dataset: (fn: string, w?: number) => `${BASE}/dataset/image/${encodeURIComponent(fn)}${w ? `?w=${w}` : ""}`,
   annotated: (fn: string, w?: number) => `${BASE}/image/${encodeURIComponent(fn)}/annotated${w ? `?w=${w}` : ""}`,
   overlay: (fn: string, version: string, w?: number) =>
@@ -75,12 +77,14 @@ export const studio = {
   saveSettings: (body: { allowed_users?: string[]; hf_repo?: string }) =>
     call<StudioStatus>("/api/studio-admin/settings", { method: "PUT", body: JSON.stringify(body) }),
   restart: () => call<{ ok: boolean }>("/api/studio-admin/restart", { method: "POST" }),
-  syncGt: (analyze: boolean, latest_n: number) =>
+  /** latest_n: the newest N Done images; item_keys: exactly these images (from gtCandidates). */
+  syncGt: (analyze: boolean, pick: { latest_n: number } | { item_keys: string[] }) =>
     call<{ ok: boolean; n_images: number; gt_images: number; gt_updated_at: number | null; analyze?: { error?: string } }>("/api/studio-admin/sync-gt", {
       method: "POST",
-      body: JSON.stringify({ analyze, latest_n }),
+      body: JSON.stringify({ analyze, ...pick }),
       timeoutMs: 10 * 60_000,
     }),
+  gtCandidates: () => call<{ items: GtCandidate[] }>("/api/studio-admin/gt-candidates", { timeoutMs: 120_000 }),
 
   health: () => get<Health>("/health", 30_000),
   analyzeJob: () => get<AnalyzeJob>("/job"),
@@ -126,6 +130,8 @@ export const studio = {
     model: string;
     per_source: number;
     source_image: string | null;
+    /** Final only: run on just these sources (null → every source in the package). */
+    source_images?: string[] | null;
     quality?: string | null;
     input_fidelity?: string | null;
   }) => post<GenJob>("/gen/start", { ...body, source_index: null, cctv_degrade: false }, 120_000),

@@ -70,6 +70,8 @@ class GenerateBody(BaseModel):
     model: str | None = None
     source_index: int | None = None
     source_image: str | None = None
+    # Final only: restrict the run to these package sources (None → all)
+    source_images: list[str] | None = None
     per_source: int | None = None
     # Provider keys (None → .env defaults)
     openai_api_key: str | None = None
@@ -759,6 +761,7 @@ def api_gen_start(body: GenerateBody) -> dict:
             model=body.model,
             source_index=body.source_index,
             source_image=body.source_image,
+            source_images=body.source_images,
             per_source=body.per_source,
             openai_api_key=body.openai_api_key,
             gemini_api_key=body.gemini_api_key,

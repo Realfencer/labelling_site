@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, RefreshCw } from "lucide-react";
 import { cn } from "../lib/utils";
 import { img, studio } from "./api";
 import { useStudio } from "./store";
@@ -63,9 +63,34 @@ export default function PlanPanel() {
 }
 
 function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSource[]; selected: string; onPick: (s: string) => void; pkg: Package | null }) {
+  const st = useStudio();
+  const [showAll, setShowAll] = useState(false);
+  const last = useRef<number | null>(null);
+  const ticked = useMemo(() => new Set(st.finalSel ?? sources.map((s) => s.source_image)), [st.finalSel, sources]);
+  const set = (names: Iterable<string>) => {
+    const next = new Set(names);
+    // Every source ticked is the same as "all" — keep it null so new frames join automatically.
+    st.setFinalSel(sources.every((s) => next.has(s.source_image)) ? null : sources.filter((s) => next.has(s.source_image)).map((s) => s.source_image));
+  };
+  /** Tick / untick one card; Shift+click applies the same to every card since the last click. */
+  const toggle = (i: number, shift: boolean) => {
+    const on = !ticked.has(sources[i].source_image);
+    const next = new Set(ticked);
+    const [lo, hi] = shift && last.current != null ? [Math.min(last.current, i), Math.max(last.current, i)] : [i, i];
+    for (let k = lo; k <= hi; k++) {
+      if (on) next.add(sources[k].source_image);
+      else next.delete(sources[k].source_image);
+    }
+    last.current = i;
+    set(next);
+  };
+  const withMisses = sources.filter((s) => s.detector_errors > 0);
+  const shown = showAll ? sources : sources.slice(0, 64);
+  const link = "font-bold text-violet-600 hover:underline disabled:opacity-40 dark:text-violet-300";
+
   return (
     <Card
-      title="Sources · click one to test it"
+      title="Sources · click to test · tick for Final"
       right={
         pkg?.ready ? (
           <span className="text-[11px] text-slate-400">
@@ -77,27 +102,68 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
       {!pkg?.ready ? (
         <Empty>No package yet — run Analyze &amp; cluster, then Rebuild package.</Empty>
       ) : (
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
-          {sources.slice(0, 64).map((s) => (
-            <button
-              key={s.source_image}
-              type="button"
-              onClick={() => onPick(s.source_image)}
-              className={cn("overflow-hidden rounded-lg border text-left", selected === s.source_image ? "border-violet-500 ring-2 ring-violet-500/40" : "border-slate-200 dark:border-slate-700")}
-            >
-              <div className="relative">
-                <img src={img.dataset(s.source_image, 320)} alt={s.source_image} loading="lazy" className="aspect-square w-full bg-black object-cover" />
-                {s.detector_errors > 0 && <span className="absolute right-1 top-1 rounded bg-rose-600 px-1 text-[9px] font-bold text-white">{s.detector_errors} err</span>}
-              </div>
-              <div className="px-1 py-0.5 text-[9px] leading-tight">
-                <div className="truncate font-mono">{s.source_image.replace(/\.png$/, "")}</div>
-                <div className="truncate text-slate-400">{s.regimes.split("|").slice(0, 2).join(", ")}</div>
-              </div>
+        <>
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-violet-500/10 px-2.5 py-1.5 text-[11px]">
+            <span>
+              Final runs on <b>{st.finalSel ? `${st.finalSel.length} of ${sources.length}` : `all ${sources.length}`}</b> sources
+            </span>
+            <button type="button" className={link} disabled={!st.finalSel} onClick={() => st.setFinalSel(null)}>
+              all
             </button>
-          ))}
-        </div>
+            <button type="button" className={link} onClick={() => st.setFinalSel([])}>
+              none
+            </button>
+            <button type="button" className={link} disabled={!withMisses.length} onClick={() => set(withMisses.map((s) => s.source_image))} title="Only the frames where the base model misses drinks">
+              only with misses ({withMisses.length})
+            </button>
+            <span className="text-slate-400">Shift+click a box to tick a run of cards</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
+            {shown.map((s, i) => {
+              const on = ticked.has(s.source_image);
+              return (
+                <div
+                  key={s.source_image}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onPick(s.source_image)}
+                  onKeyDown={(e) => e.key === "Enter" && onPick(s.source_image)}
+                  className={cn(
+                    "cursor-pointer overflow-hidden rounded-lg border text-left transition",
+                    selected === s.source_image ? "border-violet-500 ring-2 ring-violet-500/40" : "border-slate-200 dark:border-slate-700",
+                    !on && "opacity-45 grayscale",
+                  )}
+                >
+                  <div className="relative">
+                    <img src={img.dataset(s.source_image, 320)} alt={s.source_image} loading="lazy" className="aspect-square w-full bg-black object-cover" />
+                    <button
+                      type="button"
+                      onClick={(e) => (e.stopPropagation(), toggle(i, e.shiftKey))}
+                      title={on ? "In the Final run — click to leave it out" : "Left out of the Final run — click to include"}
+                      className={cn(
+                        "absolute left-1 top-1 flex h-5 w-5 items-center justify-center rounded border-2 shadow",
+                        on ? "border-violet-500 bg-violet-600 text-white" : "border-white/80 bg-black/40",
+                      )}
+                    >
+                      {on && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+                    </button>
+                    {s.detector_errors > 0 && <span className="absolute right-1 top-1 rounded bg-rose-600 px-1 text-[9px] font-bold text-white">{s.detector_errors} err</span>}
+                  </div>
+                  <div className="px-1 py-0.5 text-[9px] leading-tight">
+                    <div className="truncate font-mono">{s.source_image.replace(/\.png$/, "")}</div>
+                    <div className="truncate text-slate-400">{s.regimes.split("|").slice(0, 2).join(", ")}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {sources.length > 64 && (
+            <button type="button" className={cn(link, "mt-2 text-[11px]")} onClick={() => setShowAll((v) => !v)}>
+              {showAll ? "Show fewer" : `Show all ${sources.length}`}
+            </button>
+          )}
+        </>
       )}
-      {sources.length > 64 && <div className="mt-2 text-[11px] text-slate-400">+{sources.length - 64} more (use the search on the left)</div>}
     </Card>
   );
 }
