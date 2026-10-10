@@ -123,6 +123,7 @@ def studio_status(request: Request) -> dict:
         "hf_accounts": [a["account"] for a in keys["hf"]],
         "hf_repo": HF_REPO_FILE.read_text(encoding="utf-8").strip() if HF_REPO_FILE.is_file() else "",
         "allowed_users": s["allowed_users"],
+        **_gt_info(),
         "me": _who(request),
         "can_spend": can_spend(_who(request)),
     }
@@ -146,6 +147,76 @@ def studio_settings(body: StudioSettingsBody, request: Request) -> dict:
         HF_REPO_FILE.write_text(repo, encoding="utf-8")
         restart_studio_when_idle("Hugging Face repo changed")
     return studio_status(request)
+
+
+GT_DIR = STUDIO / "beverage_gt"
+_sync_lock = threading.Lock()
+SYNC_SID = "studio-gt-sync-session"  # a server-side labeler session used only to read the Platform GT
+
+
+def _gt_info() -> dict:
+    meta = GT_DIR / "stage_meta.json"
+    images = GT_DIR / "images"
+    names = [p.name for p in images.iterdir()] if images.is_dir() else []
+    blocks = sorted(int(n.split("_")[1].split(".")[0]) for n in names if n.startswith("block_") and n.split("_")[1].split(".")[0].isdigit())
+    return {
+        "gt_images": len(names),
+        "gt_updated_at": meta.stat().st_mtime if meta.is_file() else None,
+        "gt_block_min": blocks[0] if blocks else None,
+        "gt_block_max": blocks[-1] if blocks else None,
+    }
+
+
+class SyncGtBody(BaseModel):
+    analyze: bool = True
+    # The newest N Done Platform images. The eval set should look like the CURRENT challenges (and every source
+    # costs money in a final run), so this is a recent slice, never the whole history.
+    latest_n: int = Field(default=110, ge=10, le=2000)
+    quality: str = Field(default="all", pattern="^(all|pass)$")
+
+
+@router.post("/api/studio-admin/sync-gt")
+def studio_sync_gt(body: SyncGtBody, request: Request) -> dict:
+    """Copy the Done Platform GT (beverage) into the Studio's eval set, then (optionally) start the analysis."""
+    from .main import sessions
+
+    if not _sync_lock.acquire(blocking=False):
+        raise HTTPException(409, "An update is already running")
+    try:
+        _sid, st, _ = sessions.get_or_create(SYNC_SID)
+        skill = getattr(st.active_skill, "element_path", "") or ""
+        if "beverage" not in skill or st.review_mode != "challenge":
+            st.enter_topic("beverage-detect", start_collect=False, workspace="platform")
+        else:
+            st.refresh_topic_from_disk()
+        done = sorted(
+            (it for it in st.challenge_items if getattr(it, "reviewed", False) and getattr(it, "loaded", True) and int(it.block or 0) > 0),
+            key=lambda it: int(it.block),
+            reverse=True,
+        )[: body.latest_n]
+        if not done:
+            raise HTTPException(400, "No Done Platform images yet")
+        try:
+            result = st.send_reviewed_gt_remote(quality=body.quality, item_keys=[str(it.item_key) for it in done])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    finally:
+        _sync_lock.release()
+    out = {
+        "ok": True,
+        "n_images": result.get("n_images"),
+        "block_min": result.get("block_min"),
+        "block_max": result.get("block_max"),
+        **_gt_info(),
+    }
+    if body.analyze:
+        try:
+            mode = (httpx.get(f"{UPSTREAM}/api/health", timeout=20).json() or {}).get("gen_mode") or "openai"
+            r = httpx.post(f"{UPSTREAM}/api/analyze", json={"mode": mode}, headers={"x-studio-proxy": _secret()}, timeout=60)
+            out["analyze"] = r.json() if r.status_code == 200 else {"error": r.text[:200]}
+        except Exception as exc:  # noqa: BLE001
+            out["analyze"] = {"error": str(exc)[:200]}
+    return out
 
 
 @router.post("/api/studio-admin/restart")

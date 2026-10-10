@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, FolderUp, ScanSearch, Search, Upload, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, DatabaseZap, FolderUp, ScanSearch, Search, Upload, X } from "lucide-react";
 import { cn } from "../lib/utils";
 import { img, studio } from "./api";
-import type { AnalyzeJob, CkptJob, DeError, DeSource, Gallery, GenMode, Health, MiningReport, ModelErrors, RecordRow, Summary, SwitchName } from "./types";
+import type { AnalyzeJob, CkptJob, DeError, DeSource, Gallery, GenMode, Health, MiningReport, ModelErrors, RecordRow, StudioStatus, Summary, SwitchName } from "./types";
+import { timeAgo } from "../store/useTeam";
 import { Banner, Btn, Card, Chip, CLASS_COLORS, Empty, errText, Lightbox, Progress, pct, useJob } from "./ui";
 
 const MODE_LABEL: Record<GenMode, string> = { openai: "OpenAI", gemini: "Gemini" };
@@ -22,7 +23,17 @@ type Analysis = {
   errors: ModelErrors | null;
 };
 
-export default function AnalyzeTab({ health, reloadHealth, onAnalyzed }: { health: Health | null; reloadHealth: () => void; onAnalyzed: () => void }) {
+export default function AnalyzeTab({
+  health,
+  status,
+  reloadHealth,
+  onAnalyzed,
+}: {
+  health: Health | null;
+  status: StudioStatus | null;
+  reloadHealth: () => void;
+  onAnalyzed: () => void;
+}) {
   const [mode, setMode] = useState<GenMode>("openai");
   const [dirty, setDirty] = useState<Record<GenMode, boolean>>({ openai: false, gemini: false });
   const [data, setData] = useState<Analysis>({ summary: null, galleries: [], overlaps: [], mining: null, errors: null });
@@ -84,7 +95,7 @@ export default function AnalyzeTab({ health, reloadHealth, onAnalyzed }: { healt
     <div className="space-y-4">
       {error && <Banner kind="error">{error}</Banner>}
       <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
-        <DatasetCard health={health} onUploaded={() => analyzeJob.kick()} busy={running} />
+        <DatasetCard health={health} status={status} onStarted={() => (analyzeJob.kick(), onAnalyzed())} busy={running} />
         <Card
           title="Detector & analysis"
           right={
@@ -167,7 +178,78 @@ export default function AnalyzeTab({ health, reloadHealth, onAnalyzed }: { healt
   );
 }
 
-function DatasetCard({ health, onUploaded, busy }: { health: Health | null; onUploaded: () => void; busy: boolean }) {
+function DatasetCard({ health, status, onStarted, busy }: { health: Health | null; status: StudioStatus | null; onStarted: () => void; busy: boolean }) {
+  const [reanalyze, setReanalyze] = useState(true);
+  const [latest, setLatest] = useState(() => status?.gt_images || 110);
+  const [syncing, setSyncing] = useState(false);
+  const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const n = status?.gt_images ?? health?.images ?? 0;
+  const updated = status?.gt_updated_at ? timeAgo(status.gt_updated_at) : null;
+
+  const sync = async () => {
+    setSyncing(true);
+    setNote(null);
+    try {
+      const r = await studio.syncGt(reanalyze, latest);
+      if (r.analyze?.error) setNote({ kind: "error", text: `Copied ${r.n_images} images, but the analysis did not start: ${r.analyze.error}` });
+      else setNote({ kind: "ok", text: `Copied the latest ${r.n_images} Done Platform images${reanalyze ? " — analysis started." : "."}` });
+      if (reanalyze) onStarted();
+    } catch (e) {
+      setNote({ kind: "error", text: errText(e) });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <Card
+      title="Eval set"
+      right={
+        <span className="text-[11px] text-slate-500">
+          <b className="text-slate-800 dark:text-slate-100">{n}</b> images
+          {status?.gt_block_min ? ` · blocks ${status.gt_block_min}–${status.gt_block_max}` : ""}
+          {updated ? ` · updated ${updated}` : ""}
+        </span>
+      }
+    >
+      <div className="space-y-3 text-[12px] text-slate-600 dark:text-slate-300">
+        <p>
+          The Studio studies these challenge images (your Done Platform labels) and makes new images that look like them. Use a recent slice: the newest
+          challenges show the look the validator uses now, and every image here becomes a source in a final run.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <Btn kind="success" busy={syncing} disabled={busy} onClick={() => void sync()}>
+            <DatabaseZap className="h-3.5 w-3.5" /> Update from labeler
+          </Btn>
+          <label className="flex items-center gap-1.5 text-[11px]">
+            latest
+            <input
+              type="number"
+              min={10}
+              max={2000}
+              step={10}
+              value={latest}
+              onChange={(e) => setLatest(Math.max(10, Math.min(2000, Number(e.target.value) || 10)))}
+              className="w-16 rounded-md border border-slate-300 bg-white px-1.5 py-0.5 text-right tabular-nums dark:border-slate-600 dark:bg-ink-800"
+            />
+            Done images
+          </label>
+          <label className="flex items-center gap-1.5 text-[11px]">
+            <input type="checkbox" checked={reanalyze} onChange={(e) => setReanalyze(e.target.checked)} />
+            then re-analyze
+          </label>
+        </div>
+        {note && <Banner kind={note.kind}>{note.text}</Banner>}
+        <details className="group rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700">
+          <summary className="cursor-pointer select-none text-[11px] font-semibold text-slate-500">Upload a YOLO folder instead</summary>
+          <FolderUpload onUploaded={onStarted} busy={busy} />
+        </details>
+      </div>
+    </Card>
+  );
+}
+
+function FolderUpload({ onUploaded, busy }: { onUploaded: () => void; busy: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   const [staged, setStaged] = useState<{ file: File; rel: string }[]>([]);
   const [phase, setPhase] = useState<"idle" | "uploading" | "done" | "error">("idle");
@@ -214,51 +296,44 @@ function DatasetCard({ health, onUploaded, busy }: { health: Health | null; onUp
   };
 
   return (
-    <Card title="Eval dataset (beverage_gt)" right={health && <Chip tone="sky">{health.images} images</Chip>}>
-      <div className="space-y-3 text-[12px] text-slate-600 dark:text-slate-300">
-        <p>
-          The Studio learns the look of the challenge from these images. Refresh them from the labeler: <b>Platform workspace → Send GT</b> copies your Done GT
-          here (it replaces this set), then run <b>Analyze &amp; cluster</b>.
-        </p>
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => input.current?.click()}
-          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && input.current?.click()}
-          className="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed border-slate-300 px-4 py-3 hover:border-sky-400 hover:bg-sky-50/50 dark:border-slate-700 dark:hover:bg-sky-950/20"
-        >
-          <FolderUp className="h-6 w-6 shrink-0 text-sky-500" />
-          <div className="min-w-0">
-            <div className="font-bold text-slate-700 dark:text-slate-200">…or upload a YOLO folder (images/ + labels/)</div>
-            <div className="text-[11px]">{staged.length ? `${counts.imgs} images · ${counts.labels} labels selected` : "Click to choose a folder. It replaces the current set."}</div>
-          </div>
-          {staged.length > 0 && (
-            <button type="button" onClick={(e) => (e.stopPropagation(), setStaged([]))} className="ml-auto rounded p-1 hover:bg-slate-200 dark:hover:bg-slate-700">
-              <X className="h-4 w-4" />
-            </button>
-          )}
+    <div className="mt-2 space-y-2">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => input.current?.click()}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && input.current?.click()}
+        className="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed border-slate-300 px-4 py-3 hover:border-sky-400 hover:bg-sky-50/50 dark:border-slate-700 dark:hover:bg-sky-950/20"
+      >
+        <FolderUp className="h-6 w-6 shrink-0 text-sky-500" />
+        <div className="min-w-0 text-[11px]">
+          {staged.length ? `${counts.imgs} images · ${counts.labels} labels selected` : "Choose a folder with images/ and labels/. It replaces the eval set."}
         </div>
-        <input
-          ref={input}
-          type="file"
-          className="hidden"
-          multiple
-          // @ts-expect-error non-standard attribute for folder picking
-          webkitdirectory=""
-          onChange={(e) => pick(e.target.files)}
-        />
         {staged.length > 0 && (
-          <div className="flex items-center gap-2">
-            <Btn kind="primary" busy={phase === "uploading"} disabled={busy || counts.imgs === 0} onClick={() => void upload()}>
-              <Upload className="h-3.5 w-3.5" /> Replace dataset with {counts.imgs} images
-            </Btn>
-            {counts.labels === 0 && <span className="text-[11px] text-amber-600">No labels found in that folder.</span>}
-          </div>
+          <button type="button" onClick={(e) => (e.stopPropagation(), setStaged([]))} className="ml-auto rounded p-1 hover:bg-slate-200 dark:hover:bg-slate-700">
+            <X className="h-4 w-4" />
+          </button>
         )}
-        {phase === "uploading" && <Progress value={progress} />}
-        {msg && <Banner kind={phase === "error" ? "error" : "ok"}>{msg}</Banner>}
       </div>
-    </Card>
+      <input
+        ref={input}
+        type="file"
+        className="hidden"
+        multiple
+        // @ts-expect-error non-standard attribute for folder picking
+        webkitdirectory=""
+        onChange={(e) => pick(e.target.files)}
+      />
+      {staged.length > 0 && (
+        <div className="flex items-center gap-2">
+          <Btn kind="primary" busy={phase === "uploading"} disabled={busy || counts.imgs === 0} onClick={() => void upload()}>
+            <Upload className="h-3.5 w-3.5" /> Replace with {counts.imgs} images
+          </Btn>
+          {counts.labels === 0 && <span className="text-[11px] text-amber-600">No labels found in that folder.</span>}
+        </div>
+      )}
+      {phase === "uploading" && <Progress value={progress} />}
+      {msg && <Banner kind={phase === "error" ? "error" : "ok"}>{msg}</Banner>}
+    </div>
   );
 }
 

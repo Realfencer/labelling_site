@@ -74,6 +74,12 @@ export const studio = {
   saveSettings: (body: { allowed_users?: string[]; hf_repo?: string }) =>
     call<StudioStatus>("/api/studio-admin/settings", { method: "PUT", body: JSON.stringify(body) }),
   restart: () => call<{ ok: boolean }>("/api/studio-admin/restart", { method: "POST" }),
+  syncGt: (analyze: boolean, latest_n: number) =>
+    call<{ ok: boolean; n_images: number; gt_images: number; gt_updated_at: number | null; analyze?: { error?: string } }>("/api/studio-admin/sync-gt", {
+      method: "POST",
+      body: JSON.stringify({ analyze, latest_n }),
+      timeoutMs: 10 * 60_000,
+    }),
 
   health: () => get<Health>("/health", 30_000),
   analyzeJob: () => get<AnalyzeJob>("/job"),
@@ -112,7 +118,7 @@ export const studio = {
 
   distribution: () => get<Distribution>("/gen/distribution"),
   prepare: (per_source: number) => post<Package & { quotas?: unknown[] }>("/gen/prepare", { per_source }, 10 * 60_000),
-  pkg: () => get<Package>("/gen/package?block_only=true"),
+  pkg: (blockOnly = true) => get<Package>(`/gen/package?block_only=${blockOnly}`),
   genJob: () => get<GenJob>("/gen/job"),
   start: (body: {
     mode: "test" | "final";

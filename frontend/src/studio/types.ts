@@ -259,6 +259,10 @@ export type StudioStatus = {
   hf_accounts: string[];
   hf_repo: string;
   allowed_users: string[];
+  gt_images: number;
+  gt_updated_at: number | null;
+  gt_block_min: number | null;
+  gt_block_max: number | null;
   me: string;
   can_spend: boolean;
 };

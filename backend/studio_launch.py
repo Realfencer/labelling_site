@@ -61,7 +61,7 @@ def build_env() -> dict[str, str]:
         GEMINI_API_KEY=vault.service_key("gemini"),
         OPENROUTER_API_KEY=vault.service_key("openrouter"),
         ULTRALYTICS_API_KEY=vault.ultralytics_key(),
-        HF_TOKEN=vault.hf_token(),
+        HF_TOKEN=vault.hf_token(repo=hf_repo()),
         DEFAULT_IMAGE_MODEL=env.get("DEFAULT_IMAGE_MODEL", "gpt-image-2"),
         OPENAI_IMAGE_QUALITY=env.get("OPENAI_IMAGE_QUALITY", "medium"),
         HF_DATASET_PRIVATE="true",
@@ -70,10 +70,15 @@ def build_env() -> dict[str, str]:
     own = own_pool_dir()
     if own is not None:
         env["REMOTE_SEND_PATH"] = str(own)
-    hf_repo_file = STUDIO / "outputs" / "hf_repo.txt"  # set from the Generate page (dataset repo for uploads)
-    if hf_repo_file.is_file():
-        env["HF_BASIC"] = hf_repo_file.read_text(encoding="utf-8").strip()
+    if hf_repo():
+        env["HF_BASIC"] = hf_repo()
     return env
+
+
+def hf_repo() -> str:
+    """Dataset repo for uploads, chosen in Studio → Settings."""
+    f = STUDIO / "outputs" / "hf_repo.txt"
+    return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
 
 
 def main() -> None:

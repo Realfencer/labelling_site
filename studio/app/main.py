@@ -106,14 +106,14 @@ class LoginBody(BaseModel):
 
 
 @app.get("/login")
-async def login_page(request: Request):
+def login_page(request: Request):
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
     return FileResponse(STATIC_DIR / "login.html")
 
 
 @app.post("/api/login")
-async def api_login(request: Request, body: LoginBody) -> dict:
+def api_login(request: Request, body: LoginBody) -> dict:
     if not verify_credentials(body.username, body.password):
         raise HTTPException(401, "Invalid username or password")
     request.session.clear()
@@ -122,18 +122,18 @@ async def api_login(request: Request, body: LoginBody) -> dict:
 
 
 @app.post("/api/logout")
-async def api_logout(request: Request) -> dict:
+def api_logout(request: Request) -> dict:
     request.session.clear()
     return {"ok": True}
 
 
 @app.get("/")
-async def index() -> FileResponse:
+def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+def health() -> dict[str, Any]:
     s = sess.load_session()
     settings = get_settings()
     ds = s.get("dataset") or ""
@@ -270,12 +270,12 @@ class StudioClearBody(BaseModel):
 
 
 @app.get("/api/studio/clear-preview")
-async def api_studio_clear_preview() -> dict:
+def api_studio_clear_preview() -> dict:
     return _studio_clear_preview()
 
 
 @app.post("/api/studio/clear")
-async def api_studio_clear(body: StudioClearBody) -> dict:
+def api_studio_clear(body: StudioClearBody) -> dict:
     """Wipe beverage_gt and/or generate history (and stale analysis). Blocked while jobs run."""
     if (body.confirm or "").strip().upper() != "CLEAR":
         raise HTTPException(400, 'Type confirm: "CLEAR" to wipe data')
@@ -422,12 +422,12 @@ async def api_import_upload(
 
 
 @app.get("/api/job")
-async def api_job() -> dict:
+def api_job() -> dict:
     return sess.get_job()
 
 
 @app.post("/api/analyze")
-async def api_analyze(body: AnalyzeBody) -> dict:
+def api_analyze(body: AnalyzeBody) -> dict:
     try:
         return sess.start_analyze(dataset=body.dataset, workers=body.workers, mode=body.mode)
     except Exception as e:
@@ -435,7 +435,7 @@ async def api_analyze(body: AnalyzeBody) -> dict:
 
 
 @app.get("/api/summary")
-async def api_summary() -> dict:
+def api_summary() -> dict:
     path = ANALYSIS / "score_summary.json"
     if not path.exists():
         return {"count": 0}
@@ -443,7 +443,7 @@ async def api_summary() -> dict:
 
 
 @app.get("/api/galleries")
-async def api_galleries() -> dict:
+def api_galleries() -> dict:
     path = ANALYSIS / "score_galleries.json"
     if not path.exists():
         return {}
@@ -451,7 +451,7 @@ async def api_galleries() -> dict:
 
 
 @app.get("/api/overlaps")
-async def api_overlaps() -> dict:
+def api_overlaps() -> dict:
     path = ANALYSIS / "score_overlaps.json"
     if not path.exists():
         return {}
@@ -460,7 +460,7 @@ async def api_overlaps() -> dict:
 
 @app.get("/api/mining")
 @app.get("/api/mining-report")
-async def api_mining() -> dict:
+def api_mining() -> dict:
     path = ANALYSIS / "mining_report.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -500,12 +500,12 @@ async def api_detector_upload(mode: str, file: UploadFile = File(...)) -> dict:
 
 
 @app.get("/api/detector/job")
-async def api_detector_job() -> dict:
+def api_detector_job() -> dict:
     return sess.get_ckpt_job()
 
 
 @app.post("/api/detector/{mode}/reset")
-async def api_detector_reset(mode: str) -> dict:
+def api_detector_reset(mode: str) -> dict:
     """Drop the uploaded checkpoint for a mode → back to the .env / config default."""
     from app.model_errors import MODES, set_detector
 
@@ -516,7 +516,7 @@ async def api_detector_reset(mode: str) -> dict:
 
 
 @app.post("/api/checkpoints/{name}")
-async def api_checkpoint_switch(name: str, body: SwitchBody) -> dict:
+def api_checkpoint_switch(name: str, body: SwitchBody) -> dict:
     """Turn a checkpoint on / off (overrides .env). Off → the pipeline steps that need it are skipped."""
     try:
         set_switch(name, body.enabled)
@@ -527,7 +527,7 @@ async def api_checkpoint_switch(name: str, body: SwitchBody) -> dict:
 
 
 @app.get("/api/model-errors")
-async def api_model_errors() -> dict:
+def api_model_errors() -> dict:
     """Best detector's misses / wrong classes per source (+ Gemini descriptions) from Analyze & cluster."""
     from app.model_errors import load_report, report_version
 
@@ -575,7 +575,7 @@ def api_model_error_overlay(request: Request, filename: str, w: int | None = Non
 
 
 @app.get("/api/records")
-async def api_records(
+def api_records(
     regime: str | None = None,
     q: str | None = None,
     limit: int = 120,
@@ -666,14 +666,14 @@ def _draw_annotated(path: Path, label: Path):
 
 
 @app.get("/api/gen/distribution")
-async def api_dist() -> dict:
+def api_dist() -> dict:
     if not (ANALYSIS / "score_summary.json").exists():
         return {"eval_total": 0, "galleries": [], "overlaps": []}
     return distribution_snapshot(ANALYSIS)
 
 
 @app.post("/api/gen/prepare")
-async def api_prepare(body: PrepareBody) -> dict:
+def api_prepare(body: PrepareBody) -> dict:
     s = sess.load_session()
     if not (ANALYSIS / "score_records.json").exists():
         raise HTTPException(400, "Run analyze first")
@@ -688,7 +688,7 @@ async def api_prepare(body: PrepareBody) -> dict:
 
 
 @app.get("/api/gen/package")
-async def api_package(block_only: bool = Query(True)) -> dict:
+def api_package(block_only: bool = Query(True)) -> dict:
     pkg = ANALYSIS / "gen_package"
     meta_path = pkg / "prepare_meta.json"
     man = pkg / "manifest.csv"
@@ -724,7 +724,7 @@ async def api_package(block_only: bool = Query(True)) -> dict:
 
 
 @app.post("/api/gen/start")
-async def api_gen_start(body: GenerateBody) -> dict:
+def api_gen_start(body: GenerateBody) -> dict:
     try:
         return sess.start_generation(
             mode=body.mode,
@@ -763,21 +763,21 @@ def _pending_openai_job(run: str) -> dict:
 
 
 @app.post("/api/openai/check")
-async def api_openai_check(body: KeyCheckBody) -> dict:
+def api_openai_check(body: KeyCheckBody) -> dict:
     from app.openai_generate import check_api_key as check_openai_key
 
     return check_openai_key(body.api_key)
 
 
 @app.post("/api/gemini/check")
-async def api_gemini_check(body: KeyCheckBody) -> dict:
+def api_gemini_check(body: KeyCheckBody) -> dict:
     from app.gemini_generate import check_api_key as check_gemini_key
 
     return check_gemini_key(body.api_key)
 
 
 @app.post("/api/gen/collect")
-async def api_gen_collect(body: RunActionBody) -> dict:
+def api_gen_collect(body: RunActionBody) -> dict:
     """Resume a pending OpenAI / Gemini batch (e.g. after a download failure): wait, download, save."""
     job = _pending_batch_job(body.run, providers={"openai", "gemini"})
     try:
@@ -817,7 +817,7 @@ def api_gen_delete_images(body: DeleteImagesBody) -> dict:
 
 
 @app.post("/api/gen/autolabel")
-async def api_gen_autolabel(body: RunActionBody) -> dict:
+def api_gen_autolabel(body: RunActionBody) -> dict:
     """Replace a run's labels with the best detector's predictions (runs made before auto-labelling)."""
     try:
         return sess.start_autolabel(Path(body.run).name)
@@ -826,7 +826,7 @@ async def api_gen_autolabel(body: RunActionBody) -> dict:
 
 
 @app.post("/api/gen/cancel")
-async def api_gen_cancel(body: RunActionBody) -> dict:
+def api_gen_cancel(body: RunActionBody) -> dict:
     from app.openai_generate import cancel_run
 
     _pending_openai_job(body.run)
@@ -837,17 +837,17 @@ async def api_gen_cancel(body: RunActionBody) -> dict:
 
 
 @app.get("/api/gen/job")
-async def api_gen_job() -> dict:
+def api_gen_job() -> dict:
     return sess.get_gen_job()
 
 
 @app.get("/api/gen/runs")
-async def api_runs() -> dict:
+def api_runs() -> dict:
     return {"runs": list_runs()}
 
 
 @app.get("/api/gen/images")
-async def api_gen_images(run: str | None = Query(None), run_dir: str | None = Query(None)) -> dict:
+def api_gen_images(run: str | None = Query(None), run_dir: str | None = Query(None)) -> dict:
     name = run or (Path(run_dir).name if run_dir else "")
     if not name:
         runs = list_runs()
@@ -909,7 +909,7 @@ class RemoteSendBody(BaseModel):
 
 
 @app.post("/api/gen/upload-hf")
-async def api_upload_hf(body: HfUploadBody | None = None) -> dict:
+def api_upload_hf(body: HfUploadBody | None = None) -> dict:
     """Upload active/latest final run into one HF dataset repo under runs/YYYYMMDD_HHMMSS/."""
     run_name = (body.run if body else None) or None
     try:
@@ -921,7 +921,7 @@ async def api_upload_hf(body: HfUploadBody | None = None) -> dict:
 
 
 @app.post("/api/gen/send-remote")
-async def api_send_remote(body: RemoteSendBody) -> dict:
+def api_send_remote(body: RemoteSendBody) -> dict:
     """Start a background send (stretch 1024×1024 → scp in batches) to Score Labeler Own local/images/.
 
     Returns at once; poll /api/gen/send-job. (A synchronous send of a final run outlived the browser / proxy
@@ -937,7 +937,7 @@ async def api_send_remote(body: RemoteSendBody) -> dict:
 
 
 @app.get("/api/gen/send-job")
-async def api_send_job() -> dict:
+def api_send_job() -> dict:
     return sess.get_send_job()
 
 

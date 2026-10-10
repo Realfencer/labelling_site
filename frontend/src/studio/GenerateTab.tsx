@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, CloudUpload, Download, Eraser, FlaskConical, RefreshCw, Rocket, Send, Tag, Trash2, Wand2 } from "lucide-react";
+import { Ban, CloudUpload, Download, FlaskConical, RefreshCw, Rocket, Send, Tag, Trash2, Wand2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { img, studio } from "./api";
-import type { Distribution, GenItem, GenJob, GenMode, Health, ModelErrors, Package, PackageSource, Run, SendJob, StudioStatus } from "./types";
+import type { AnalyzeJob, Distribution, GenItem, GenJob, GenMode, Health, ModelErrors, Package, PackageSource, Run, SendJob, StudioStatus } from "./types";
 import { Banner, Btn, Card, Chip, Confirm, Empty, errText, Lightbox, Progress, useJob } from "./ui";
 
 /** $ per 1024² image on the OpenAI Batch API (low / medium / high). */
@@ -40,7 +40,15 @@ function runTime(name: string): string {
   return d.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-export default function GenerateTab({ health, status, reloadStatus }: { health: Health | null; status: StudioStatus | null; reloadStatus: () => void }) {
+export default function GenerateTab({
+  health,
+  status,
+  reloadHealth,
+}: {
+  health: Health | null;
+  status: StudioStatus | null;
+  reloadHealth: () => void;
+}) {
   const mode: GenMode = health?.gen_mode || "openai";
   const models = useMemo(() => (health?.image_models || []).filter((m) => m.provider === mode), [health, mode]);
   const [model, setModel] = useState("");
@@ -48,6 +56,7 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
   const [fidelity, setFidelity] = useState("");
   const [per, setPer] = useState(() => Number(ls.get(LS.per)) || 4);
   const [pkg, setPkg] = useState<Package | null>(null);
+  const [nAllSources, setNAllSources] = useState(0); // a final run uses EVERY package source, not only block_* ones
   const [dist, setDist] = useState<Distribution | null>(null);
   const [errors, setErrors] = useState<ModelErrors | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -56,9 +65,10 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
   const [source, setSource] = useState(() => ls.get(LS.source));
   const [srcFilter, setSrcFilter] = useState("");
   const [msg, setMsg] = useState<{ kind: "info" | "ok" | "error"; text: string; link?: string } | null>(null);
-  const [confirm, setConfirm] = useState<null | "final" | "test" | "clear">(null);
+  const [confirm, setConfirm] = useState<null | "final" | "test" | "switch">(null);
   const [busy, setBusy] = useState<string | null>(null);
   const canSpend = Boolean(status?.can_spend);
+  const [wantMode, setWantMode] = useState<GenMode | null>(null);
 
   // model choice follows the analyzed provider
   useEffect(() => {
@@ -75,13 +85,15 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
   }, [health?.openai_defaults]);
 
   const refresh = useCallback(async () => {
-    const [p, d, r, e] = await Promise.all([
+    const [p, all, d, r, e] = await Promise.all([
       studio.pkg().catch(() => null),
+      studio.pkg(false).catch(() => null),
       studio.distribution().catch(() => null),
       studio.runs().catch(() => ({ runs: [] as Run[] })),
       studio.modelErrors().catch(() => null),
     ]);
     setPkg(p);
+    setNAllSources(all?.sources?.length ?? p?.sources?.length ?? 0);
     setDist(d);
     setRuns(r.runs);
     setErrors(e);
@@ -122,6 +134,16 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
   });
   const genRunning = gen.job?.status === "running";
 
+  // Switching provider = re-analyzing in that mode (prompts, detector-error targets and auto-labels follow the mode).
+  const analyze = useJob<AnalyzeJob>(studio.analyzeJob, 1000, (j) => {
+    if (j.status === "done") {
+      setMsg({ kind: "ok", text: "Analysis finished — the package was rebuilt for this provider." });
+      reloadHealth();
+      void refresh();
+    } else if (j.status === "error") setMsg({ kind: "error", text: j.error || j.message });
+  });
+  const analyzing = analyze.job?.status === "running";
+
   const sendJob = useJob<SendJob>(studio.sendJob, 1000, (j) => {
     if (j.status === "done" && j.result) setMsg({ kind: "ok", text: `Sent ${j.result.images} images (1024×1024) to the Own pool of the labeler.` });
     else if (j.status === "error") setMsg({ kind: "error", text: j.error || j.message });
@@ -135,7 +157,8 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
 
   const unit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
   const testCost = unit * per;
-  const finalCount = nSrc * per;
+  const nFinal = Math.max(nSrc, nAllSources);
+  const finalCount = nFinal * per;
   const finalCost = unit * finalCount;
 
   const run = async (key: string, fn: () => Promise<void>) => {
@@ -170,7 +193,31 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
     <div className="grid gap-4 xl:grid-cols-[360px_1fr]">
       {/* ---- left rail ------------------------------------------------------------------------------------ */}
       <div className="space-y-4 xl:sticky xl:top-[72px] xl:max-h-[calc(100vh-88px)] xl:overflow-y-auto xl:pr-1">
-        <Card title="Generate" right={<Chip tone={isGemini ? "violet" : "sky"}>{isGemini ? "Gemini" : "OpenAI"} mode</Chip>}>
+        <Card
+          title="Generate"
+          right={
+            <div className="flex rounded-lg bg-slate-100 p-0.5 text-[11px] font-bold dark:bg-slate-800" title="Image provider">
+              {(["openai", "gemini"] as GenMode[]).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  disabled={analyzing || genRunning}
+                  onClick={() => {
+                    if (p === mode) return;
+                    setWantMode(p);
+                    setConfirm("switch");
+                  }}
+                  className={cn(
+                    "rounded-md px-2.5 py-1 transition disabled:opacity-50",
+                    p === mode ? (p === "gemini" ? "bg-violet-600 text-white" : "bg-sky-600 text-white") : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
+                  )}
+                >
+                  {p === "openai" ? "OpenAI" : "Gemini"}
+                </button>
+              ))}
+            </div>
+          }
+        >
           <div className="space-y-3 text-[12px]">
             <label className="block">
               <span className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-slate-400">Model</span>
@@ -195,7 +242,6 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
                     ? ` · auto-labels with ${health.detectors[mode]!.weights.split("/").pop()} @ ${health.detectors[mode]!.conf}`
                     : " · detector off: source labels are copied")}
               </span>
-              <span className="mt-0.5 block text-[10px] text-slate-400">To use the other provider, re-analyze in that mode (Analyze tab).</span>
             </label>
             {!isGemini && (
               <div className="grid grid-cols-2 gap-2">
@@ -233,7 +279,7 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
             </label>
             <div className="rounded-xl bg-slate-50 p-2.5 text-[11px] dark:bg-slate-800/50">
               <div className="flex justify-between">
-                <span className="text-slate-500">Price</span>
+                <span className="text-slate-500">Price{isGemini ? " (list price — batch is usually cheaper)" : " (batch API)"}</span>
                 <b>≈ ${unit.toFixed(3)} / image</b>
               </div>
               <div className="flex justify-between">
@@ -242,11 +288,11 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">
-                  Final ({nSrc} sources × {per} = {finalCount})
+                  Final ({nFinal} sources × {per} = {finalCount})
                 </span>
                 <b className={cn(finalCost > 20 && "text-amber-600 dark:text-amber-300")}>≈ ${finalCost.toFixed(2)}</b>
               </div>
-              {!isGemini && nSrc > 0 && <div className="mt-0.5 text-[10px] text-slate-400">submitted as {Math.ceil(nSrc / CHUNK)} batch(es) of ≤{CHUNK} sources · batch API is ~50% cheaper</div>}
+              {!isGemini && nFinal > 0 && <div className="mt-0.5 text-[10px] text-slate-400">submitted as {Math.ceil(nFinal / CHUNK)} batch(es) of ≤{CHUNK} sources · batch API is ~50% cheaper</div>}
             </div>
 
             <div>
@@ -295,14 +341,24 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
               })}>
                 <RefreshCw className="h-3.5 w-3.5" /> Rebuild package from analysis
               </Btn>
-              <Btn kind="secondary" disabled={!canSpend || genRunning || !selectedSource} onClick={() => setConfirm("test")} title={!selectedSource ? "Pick a source above" : undefined}>
+              <Btn kind="secondary" disabled={!canSpend || genRunning || analyzing || !selectedSource} onClick={() => setConfirm("test")} title={!selectedSource ? "Pick a source above" : undefined}>
                 <FlaskConical className="h-3.5 w-3.5" /> Test generate · 1 source · ≈ ${testCost.toFixed(2)}
               </Btn>
-              <Btn kind="primary" disabled={!canSpend || genRunning || nSrc === 0} onClick={() => setConfirm("final")}>
+              <Btn kind="primary" disabled={!canSpend || genRunning || analyzing || nFinal === 0} onClick={() => setConfirm("final")}>
                 <Rocket className="h-3.5 w-3.5" /> Final generate · {finalCount} images · ≈ ${finalCost.toFixed(2)}
               </Btn>
             </div>
 
+            {analyzing && analyze.job && (
+              <div className="space-y-1 rounded-xl border border-sky-300 bg-sky-50 p-2.5 dark:border-sky-900 dark:bg-sky-950/30">
+                <div className="flex justify-between text-[11px] font-semibold">
+                  <span>Re-analyzing for {wantMode === "gemini" ? "Gemini" : "OpenAI"}</span>
+                  <span className="tabular-nums">{Math.round(analyze.job.progress * 100)}%</span>
+                </div>
+                <Progress value={analyze.job.progress} tone="sky" />
+                <div className="text-[11px] text-slate-600 dark:text-slate-300">{analyze.job.message}</div>
+              </div>
+            )}
             {gen.job && gen.job.status === "running" && (
               <div className="space-y-1 rounded-xl border border-violet-300 bg-violet-50 p-2.5 dark:border-violet-900 dark:bg-violet-950/30">
                 <div className="flex justify-between text-[11px] font-semibold">
@@ -376,11 +432,6 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
           </div>
         </Card>
 
-        <Card title="Danger zone">
-          <Btn kind="danger" onClick={() => setConfirm("clear")} disabled={genRunning}>
-            <Eraser className="h-3.5 w-3.5" /> Clear dataset, runs and analysis…
-          </Btn>
-        </Card>
       </div>
 
       {/* ---- workspace ------------------------------------------------------------------------------------- */}
@@ -409,6 +460,26 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
         <SourceCards sources={sources} selected={source} onPick={(s) => (setSource(s), ls.set(LS.source, s))} pkg={pkg} />
       </div>
 
+      {confirm === "switch" && wantMode && (
+        <Confirm
+          title={`Switch to ${wantMode === "gemini" ? "Gemini" : "OpenAI"}?`}
+          confirmLabel="Re-analyze and switch"
+          onCancel={() => setConfirm(null)}
+          onConfirm={async () => {
+            setConfirm(null);
+            await run("switch", async () => {
+              analyze.setJob(await studio.analyze(wantMode));
+              analyze.kick();
+            });
+          }}
+        >
+          <p>
+            The prompts, the detector errors they target and the auto-labels all depend on the provider, so the Studio re-analyzes the eval set in{" "}
+            {wantMode === "gemini" ? "Gemini" : "OpenAI"} mode first.
+          </p>
+          <p>It costs nothing and takes a few minutes. Earlier runs are kept.</p>
+        </Confirm>
+      )}
       {confirm === "test" && selectedSource && (
         <Confirm
           title="Start a test run?"
@@ -439,59 +510,16 @@ export default function GenerateTab({ health, status, reloadStatus }: { health: 
         >
           <p>
             <b>{model}</b>
-            {!isGemini && <> · {quality} quality</>} makes <b>{finalCount}</b> images ({nSrc} sources × {per}).
+            {!isGemini && <> · {quality} quality</>} makes <b>{finalCount}</b> images ({nFinal} sources × {per}).
           </p>
           <p>
             Estimated cost <b className="text-amber-600 dark:text-amber-300">≈ ${finalCost.toFixed(2)}</b>
-            {!isGemini && <> in {Math.ceil(nSrc / CHUNK)} batch(es)</>}. Results usually arrive within minutes to a few hours; you can leave this page.
+            {!isGemini && <> in {Math.ceil(nFinal / CHUNK)} batch(es)</>}. Results usually arrive within minutes to a few hours; you can leave this page.
           </p>
         </Confirm>
       )}
-      {confirm === "clear" && (
-        <ClearConfirm
-          onDone={async () => {
-            setConfirm(null);
-            setActiveRun("");
-            await refresh();
-            reloadStatus();
-          }}
-          onCancel={() => setConfirm(null)}
-        />
-      )}
-    </div>
-  );
-}
 
-function ClearConfirm({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
-  const [preview, setPreview] = useState<Awaited<ReturnType<typeof studio.clearPreview>> | null>(null);
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    studio.clearPreview().then(setPreview).catch((e) => setErr(errText(e)));
-  }, []);
-  const busy = preview && (preview.gen_running || preview.analyze_running);
-  return (
-    <Confirm title="Clear the Studio?" danger typeToConfirm={busy ? "—" : "CLEAR"} confirmLabel="Delete everything" onCancel={onCancel} onConfirm={async () => {
-      await studio.clear();
-      onDone();
-    }}>
-      {err && <p className="text-rose-600">{err}</p>}
-      {!preview ? (
-        <p>Loading…</p>
-      ) : busy ? (
-        <p className="text-amber-600">A job is running — wait for it to finish first.</p>
-      ) : (
-        <ul className="list-disc pl-5 text-[12px]">
-          <li>
-            Eval dataset: {preview.beverage_gt_images} images + {preview.beverage_gt_labels} labels
-          </li>
-          <li>
-            {preview.history_runs} generated runs{preview.history_run_names.length ? ` (${preview.history_run_names.slice(0, 4).join(", ")}…)` : ""}
-          </li>
-          <li>{preview.analysis_files} analysis files</li>
-        </ul>
-      )}
-      <p>This cannot be undone. Type CLEAR to confirm.</p>
-    </Confirm>
+    </div>
   );
 }
 

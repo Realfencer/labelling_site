@@ -6,6 +6,7 @@ import KeysButton from "../components/KeysButton";
 import { studio } from "../studio/api";
 import type { Health, StudioStatus } from "../studio/types";
 import { Banner, Btn, Chip, errText } from "../studio/ui";
+import ClearConfirm from "../studio/ClearConfirm";
 
 const AnalyzeTab = lazy(() => import("../studio/AnalyzeTab"));
 const GenerateTab = lazy(() => import("../studio/GenerateTab"));
@@ -137,9 +138,9 @@ export default function StudioPage() {
             }
           >
             {tab === "analyze" ? (
-              <AnalyzeTab health={health} reloadHealth={() => void reloadHealth()} onAnalyzed={() => void reloadStatus()} />
+              <AnalyzeTab health={health} status={status} reloadHealth={() => void reloadHealth()} onAnalyzed={() => void reloadStatus()} />
             ) : (
-              <GenerateTab health={health} status={status} reloadStatus={() => void reloadStatus()} />
+              <GenerateTab health={health} status={status} reloadHealth={() => void reloadHealth()} />
             )}
           </Suspense>
         )}
@@ -155,6 +156,7 @@ function SettingsDialog({ status, onClose, onSaved }: { status: StudioStatus; on
   const [repo, setRepo] = useState(status.hf_repo);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [clearing, setClearing] = useState(false);
   const editable = status.can_spend;
   const suggestions = status.hf_accounts.map((a) => `${a}/beverage-gen`);
 
@@ -222,8 +224,26 @@ function SettingsDialog({ status, onClose, onSaved }: { status: StudioStatus; on
           <div className="rounded-xl bg-slate-50 p-3 text-[11px] text-slate-600 dark:bg-slate-800/50 dark:text-slate-300">
             Generator keys (OpenAI, Gemini, OpenRouter) live in <b>Keys</b>. Saving a key restarts the Studio automatically once no generation is running.
           </div>
+          <details className="rounded-xl border border-rose-300/60 px-3 py-2 dark:border-rose-900/60">
+            <summary className="cursor-pointer select-none text-[11px] font-bold text-rose-600 dark:text-rose-300">Danger zone</summary>
+            <div className="mt-2 flex items-center gap-2">
+              <Btn kind="danger" disabled={!editable} onClick={() => setClearing(true)}>
+                Clear eval set, runs and analysis…
+              </Btn>
+              <span className="text-[11px] text-slate-500">Starts the Studio from zero.</span>
+            </div>
+          </details>
           {msg && <Banner kind={msg.ok ? "ok" : "error"}>{msg.text}</Banner>}
         </div>
+        {clearing && (
+          <ClearConfirm
+            onCancel={() => setClearing(false)}
+            onDone={() => {
+              setClearing(false);
+              setMsg({ ok: true, text: "Cleared. Reload the page to start fresh." });
+            }}
+          />
+        )}
         <div className="mt-5 flex items-center gap-2">
           <Btn
             kind="ghost"
