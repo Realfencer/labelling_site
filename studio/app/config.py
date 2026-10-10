@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # (app/look.py; parameters and before/after numbers per image in <run>/postprocess.json).
     use_post_openai: bool = True
     use_post_gemini: bool = True
+    # Texture smoothing toward each source: OFF — the platform does not smooth its frames (its unresized 16:9 frames
+    # have crisper edges than raw Gemini output), and smoothed images looked unfamiliar; the look comes from the
+    # prompt (CAMERA LOOK). With it off the post-process is only the platform's 224-colour palette.
+    post_match_texture: bool = False
 
     # Hugging Face — one dataset repo + dated runs/ folder
     hf_token: str = ""

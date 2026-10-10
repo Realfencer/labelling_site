@@ -125,9 +125,10 @@ VIEW_CHANGES: tuple[str, ...] = (
 CCTV_APPEARANCE = """CCTV / SURVEILLANCE CAMERA APPEARANCE (match the eval frames — fixed HD security cameras):
 - Make the image look like a single frame from a real fixed security camera, not a photograph.
 - CAMERA: wall or ceiling mount about 2–3.5 m up, looking DOWN at roughly 25–45° — people are seen slightly from
-  above. Wide-angle lens with mild barrel distortion — no fisheye circle, no black rounded corners. Natural body
-  proportions.
-- IMAGE QUALITY: follow this source's IMAGE QUALITY LOCK (focus, grain, motion blur). In general: CCTV softness —
+  above. Lens: follow this source's CAMERA LOOK (field of view, barrel distortion); without one, a wide-angle lens with
+  mild barrel distortion — no fisheye circle, no black rounded corners. Natural body proportions.
+- IMAGE QUALITY: follow this source's CAMERA LOOK and IMAGE QUALITY LOCK (focus, grain, color, exposure, motion
+  blur) — every frame of the eval set has its own camera look. In general: CCTV softness —
   fine texture, printed text and small objects are NOT resolved; visible sensor grain, strongest in shadows; mild
   compression; flat tone curve; slightly muted full color. Never photo-sharp; no HDR, no bokeh, no cinematic grading.
 - NO OVERLAY TEXT: no timestamp, date, camera name or any other text."""
@@ -433,6 +434,11 @@ def prepare_package(
     from app.scene_tags import conditions_text, load_or_describe, trash_bin_line
 
     scene_tags = load_or_describe(analysis_dir, records, Path(dataset_root) if dataset_root else None)
+    # How each source's camera renders (sharpness, smear, noise, color, exposure, lens) in words — cached
+    from app.look_caption import camera_look_line
+    from app.look_caption import load_or_describe as load_camera_looks
+
+    camera_looks = load_camera_looks(analysis_dir, records, Path(dataset_root) if dataset_root else None)
     master = TASK_HEADER + "\n\n" + general_rules(eval_set_look(records, scene_tags, dataset_root))
     # Best detector's misses / wrong classes per source (mined by Analyze & cluster; {} when unavailable)
     from app.camera_geometry import camera_lock_line
@@ -465,6 +471,7 @@ def prepare_package(
         )
         profile = _source_profile_block(
             fn, rec, ctx, boxes=_label_boxes(dataset_root, fn), scene_line=conditions_text(scene_tags.get(fn)),
+            look_line=camera_look_line(camera_looks.get(fn)),
             degr_stats=degr_stats, caption=_load_caption_quality(dataset_root, fn),
         )
         bins = trash_bin_line(scene_tags.get(fn))
@@ -728,6 +735,7 @@ def _source_profile_block(
     ctx: dict,
     boxes: list[tuple[str, float, float]],
     scene_line: str = "",
+    look_line: str = "",
     degr_stats: dict[str, list[float]] | None = None,
     caption: dict | None = None,
 ) -> str:
@@ -757,6 +765,8 @@ def _source_profile_block(
         lines.append(f"- {scene_line}")
     if people:
         lines.append(f"- {people}")
+    if look_line:
+        lines.append(f"- {look_line}")
     out = "\n".join(lines)
     return out + ("\n" + quality if quality else "")
 

@@ -371,10 +371,10 @@ def start_generation(
                     from app.look import match_run
 
                     pp = match_run(
-                        Path(run_dir), out_dir,
-                        progress_cb=lambda d, n: cb(d, n, f"{base_msg} · matching each source's look {d}/{n}…"),
+                        Path(run_dir), out_dir, texture=settings.post_match_texture,
+                        progress_cb=lambda d, n: cb(d, n, f"{base_msg} · post-processing {d}/{n}…"),
                     )
-                    base_msg += f" · source-matched look ({pp['processed']} imgs, 224 colours)"
+                    base_msg += f" · {pp['method']} ({pp['processed']} imgs)"
                 except Exception as e:  # noqa: BLE001 — images stay as generated
                     base_msg += f" · look matching failed: {e}"
 

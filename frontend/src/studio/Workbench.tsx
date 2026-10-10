@@ -319,8 +319,8 @@ function FolderUpload() {
 
 const ADVANCED: { name: SwitchName; label: string; hint: string }[] = [
   { name: "person_detector", label: "Camera lock (person detector)", hint: "Keeps camera height / tilt like the source and flags drift" },
-  { name: "post_openai", label: "Source-matched look on OpenAI runs", hint: "Texture + edge softness matched to each image's source, then the 224-colour palette" },
-  { name: "post_gemini", label: "Source-matched look on Gemini runs", hint: "Texture + edge softness matched to each image's source, then the 224-colour palette" },
+  { name: "post_openai", label: "Platform palette on OpenAI runs", hint: "224-colour palette PNG, exactly like every challenge frame (no smoothing)" },
+  { name: "post_gemini", label: "Platform palette on Gemini runs", hint: "224-colour palette PNG, exactly like every challenge frame (no smoothing)" },
 ];
 
 export function AnalyzeCard({ analyzeRef }: { analyzeRef: React.MutableRefObject<((mode?: GenMode) => void) | null> }) {
@@ -734,8 +734,9 @@ function ProviderSwitch({ to, onCancel }: { to: GenMode; onCancel: () => void })
     >
       <p>The prompts and the error targets depend on the provider, so the eval set is re-analyzed in {to === "gemini" ? "Gemini" : "OpenAI"} mode first.</p>
       <p>
-        Takes a few minutes. Gemini (gemini-3.6-flash) describes the base model's misses: about $0.01–0.02 per frame with misses, so
-        roughly $1–2 for a new eval set of ~100 frames. Answers are cached, so re-analyzing the same frames is free. Earlier runs are kept.
+        Takes a few minutes. Gemini (gemini-3.6-flash) describes the base model's misses (about $0.01–0.02 per frame with misses) and
+        each new frame's camera look (under $0.01 per frame) — roughly $1–2 for a new eval set of ~100 frames. Answers are cached, so
+        re-analyzing the same frames is free. Earlier runs are kept.
       </p>
     </Confirm>
   );

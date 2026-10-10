@@ -1,10 +1,15 @@
-"""Source-matched CCTV look: measure how a frame looks (texture, edge crispness, color, corner darkening) and bring
-each generated image to the look of ITS OWN source frame after generation.
+"""CCTV look numbers + post-processing: measure how a frame looks (texture, edge crispness, color, corner darkening);
+after generation apply the platform's 224-colour palette and — only when post_match_texture is on — smooth each image's
+texture toward ITS OWN source frame.
 
-Why: image models ignore low-level prompt instructions ("fine texture not resolved", "soft") and render their own clean
-detail. Measured 2026-10-10 on 20 Gemini images vs their 5 sources: +61% fine texture, +64% coarse texture (carpet,
-fabric), corners 0.76 vs 1.06 of the centre brightness, and full color where every eval frame is a 224-color palette
-PNG. A deterministic, measured post-process fixes that per image; the same numbers verify it (postprocess.json).
+2026-10-11: texture smoothing is OFF by default. The platform does not smooth its frames (its unresized 16:9 frames have
+crisper edges than our raw Gemini output); the smoothed images looked unfamiliar. The look is now asked for in the
+prompt (app/look_caption.py); these numbers verify it.
+
+Background (2026-10-10, 20 Gemini images vs their 5 sources): +61% fine texture, +64% coarse texture (carpet, fabric)
+and full color where every eval frame is a 224-color palette PNG. Smoothing closes the numbers (fine 1.35 → 0.89,
+coarse 1.28 → 1.10 of the source) but is not what the platform does; per-image parameters and before / after numbers
+go to <run>/postprocess.json either way.
 """
 
 from __future__ import annotations
@@ -126,7 +131,7 @@ def _paletted(rgb: np.ndarray) -> np.ndarray:
     return np.asarray(Image.fromarray(rgb).quantize(PALETTE_COLORS, method=Image.Quantize.MEDIANCUT).convert("RGB"))
 
 
-def match(img: Image.Image | str | Path, target: dict) -> tuple[Image.Image, dict]:
+def match(img: Image.Image | str | Path, target: dict, texture: bool = True) -> tuple[Image.Image, dict]:
     """Bring a generated image to its source's texture + edge crispness, then the platform's 224-color palette.
 
     Only texture/edges are matched: color and corner brightness depend too much on what is in the scene (a source with
@@ -137,7 +142,8 @@ def match(img: Image.Image | str | Path, target: dict) -> tuple[Image.Image, dic
     rgb = _load_rgb(img)
     before = measure_rgb(rgb)
     params: dict = {}
-    if before["mid_texture"] > target["mid_texture"] * 1.05 or before["fine_texture"] > target["fine_texture"] * 1.05:
+    if texture and (before["mid_texture"] > target["mid_texture"] * 1.05
+                    or before["fine_texture"] > target["fine_texture"] * 1.05):
         c = (SIZE - SEARCH_CROP) // 2
         crop = np.ascontiguousarray(rgb[c:c + SEARCH_CROP, c:c + SEARCH_CROP])
         best, best_e = (BILATERAL[0], 0.0), _texture_err(measure_rgb(_paletted(crop)), target)
@@ -187,7 +193,7 @@ def source_look(run_dir: Path, source_image: str, source_path: str | None, analy
     return None
 
 
-def match_run(run_dir: Path, analysis_dir: Path | None = None,
+def match_run(run_dir: Path, analysis_dir: Path | None = None, texture: bool = False,
               progress_cb: Callable[[int, int], None] | None = None) -> dict:
     """Source-match every image of a run in place (palette PNGs are already done and skipped); writes
     <run>/postprocess.json with the chosen parameters and the before / after / target numbers per image."""
@@ -212,7 +218,7 @@ def match_run(run_dir: Path, analysis_dir: Path | None = None,
         target = looks[src]
         if not target:
             return p, None, "no source"
-        out, info = match(p, target)
+        out, info = match(p, target, texture=texture)
         out.save(p, format="PNG")
         return p, {"source": src, **info}, None
 
@@ -225,7 +231,8 @@ def match_run(run_dir: Path, analysis_dir: Path | None = None,
                 skipped += 1
             if progress_cb:
                 progress_cb(i, len(paths))
-    meta = {"method": "source-matched look", "images": len(paths), "processed": done, "skipped": skipped,
+    meta = {"method": "source-matched texture + 224-colour palette" if texture else "224-colour palette (as the platform)",
+            "images": len(paths), "processed": done, "skipped": skipped,
             "at": datetime.now(timezone.utc).isoformat(), "per_image": report}
     (run_dir / "postprocess.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return meta
