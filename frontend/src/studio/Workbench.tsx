@@ -16,7 +16,7 @@ const PRICE: Record<string, [number, number, number]> = {
   "gpt-image-2": [0.008, 0.038, 0.11],
   "gpt-image-1-mini": [0.002, 0.005, 0.018],
 };
-const GEMINI_PRICE = 0.039; // list price per image; batch is usually cheaper
+const GEMINI_PRICE = 0.036; // gemini-3.1-flash-image batch, measured: $0.0358/image incl. prompt input (2026-10-10)
 const CHUNK = 13;
 
 type StepState = "done" | "todo" | "running" | "idle";
@@ -471,6 +471,11 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   const nFinal = st.nFinal;
   const nAll = Math.max(st.sources.length, st.nAllSources);
   const source = st.sources.find((s) => s.source_image === st.source) || st.sources[0] || null;
+  // Test on several sources at once: the sources ticked on the Plan tab (2–20), like a small Final without HF upload.
+  const [testTicked, setTestTicked] = useState(false);
+  const ticked = st.finalSel && st.finalSel.length >= 2 && st.finalSel.length <= 20 ? st.finalSel : null;
+  const multiTest = Boolean(testTicked && ticked);
+  const nTest = multiTest && ticked ? ticked.length : 1;
 
   const start = async (kind: "test" | "final") => {
     try {
@@ -479,13 +484,13 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         model,
         per_source: per,
         source_image: kind === "test" ? source?.source_image || null : null,
-        source_images: kind === "final" ? st.finalSel : null,
+        source_images: kind === "final" ? st.finalSel : multiTest ? ticked : null,
         quality: isGemini ? null : quality,
         input_fidelity: isGemini ? null : fidelity,
       });
       st.gen.setJob(job);
       st.gen.kick();
-      st.setToast({ kind: "info", text: kind === "test" ? `Test started on ${source?.source_image}.` : "Final run submitted — results arrive within minutes to a few hours." });
+      st.setToast({ kind: "info", text: kind === "test" ? (multiTest ? `Test started on ${nTest} ticked sources.` : `Test started on ${source?.source_image}.`) : "Final run submitted — results arrive within minutes to a few hours." });
     } catch (e) {
       st.setToast({ kind: "error", text: errText(e) });
     }
@@ -578,11 +583,36 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
             <div className="h-12 w-12 rounded-lg bg-slate-200 dark:bg-slate-700" />
           )}
           <div className="min-w-0 flex-1 text-[11px]">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Test source</div>
-            <div className="truncate font-mono">{source?.source_image || "—"}</div>
-            <div className="truncate text-slate-500">
-              {source ? `${source.regimes.split("|").slice(0, 2).join(", ")}${source.detector_errors ? ` · ${source.detector_errors} misses targeted` : ""}` : "pick one in the Plan tab"}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Test on</span>
+              {ticked && (
+                <span className="flex overflow-hidden rounded-md border border-slate-300 text-[10px] font-bold dark:border-slate-600">
+                  {[false, true].map((multi) => (
+                    <button
+                      key={String(multi)}
+                      type="button"
+                      onClick={() => setTestTicked(multi)}
+                      className={cn("px-1.5 py-0.5", testTicked === multi ? "bg-violet-600 text-white" : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700")}
+                    >
+                      {multi ? `${ticked.length} ticked` : "this one"}
+                    </button>
+                  ))}
+                </span>
+              )}
             </div>
+            {multiTest ? (
+              <>
+                <div className="truncate font-mono">{ticked?.length} sources ticked on the Plan tab</div>
+                <div className="truncate text-slate-500">{ticked?.map((x) => x.replace(/^block_|\.png$/g, "")).join(", ")}</div>
+              </>
+            ) : (
+              <>
+                <div className="truncate font-mono">{source?.source_image || "—"}</div>
+                <div className="truncate text-slate-500">
+                  {source ? `${source.regimes.split("|").slice(0, 2).join(", ")}${source.detector_errors ? ` · ${source.detector_errors} misses targeted` : ""}` : "pick one in the Plan tab"}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -612,12 +642,12 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <Btn kind="secondary" disabled={!canSpend || genRunning || analyzing || !source} onClick={() => setConfirm("test")} className="flex-col gap-0 py-2">
+          <Btn kind="secondary" disabled={!canSpend || genRunning || analyzing || (!source && !multiTest)} onClick={() => setConfirm("test")} className="flex-col gap-0 py-2">
             <span className="flex items-center gap-1">
               <FlaskConical className="h-3.5 w-3.5" /> Test
             </span>
             <span className="text-[10px] font-semibold opacity-70">
-              {per} img · ≈ ${(unit * per).toFixed(2)}
+              {nTest * per} img · ≈ ${(unit * nTest * per).toFixed(2)}
             </span>
           </Btn>
           <Btn kind="primary" disabled={!canSpend || genRunning || analyzing || nFinal === 0} onClick={() => setConfirm("final")} className="flex-col gap-0 py-2">
@@ -643,7 +673,20 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         )}
       </div>
 
-      {confirm === "test" && source && (
+      {confirm === "test" && multiTest && (
+        <Confirm
+          title={`Test on ${nTest} sources?`}
+          confirmLabel={`Generate ${nTest * per} images · ≈ $${(unit * nTest * per).toFixed(2)}`}
+          onCancel={() => setConfirm(null)}
+          onConfirm={async () => (setConfirm(null), await start("test"))}
+        >
+          <p>
+            <b>{model}</b> makes {per} new scenes for each of the {nTest} sources ticked on the Plan tab ({nTest} × {per} = <b>{nTest * per}</b> images).
+          </p>
+          <p>A test run: nothing is uploaded to Hugging Face or sent to Own.</p>
+        </Confirm>
+      )}
+      {confirm === "test" && !multiTest && source && (
         <Confirm title="Test on one source?" confirmLabel={`Generate ${per} images · ≈ $${(unit * per).toFixed(2)}`} onCancel={() => setConfirm(null)} onConfirm={async () => (setConfirm(null), await start("test"))}>
           <div className="flex items-center gap-3">
             <img src={img.dataset(source.source_image, 320)} alt="" className="h-20 w-20 rounded-lg object-cover" />
@@ -690,7 +733,10 @@ function ProviderSwitch({ to, onCancel }: { to: GenMode; onCancel: () => void })
       }}
     >
       <p>The prompts and the error targets depend on the provider, so the eval set is re-analyzed in {to === "gemini" ? "Gemini" : "OpenAI"} mode first.</p>
-      <p>Takes a few minutes; Gemini describes the base model's misses (a few cents). Earlier runs are kept.</p>
+      <p>
+        Takes a few minutes. Gemini (gemini-3.6-flash) describes the base model's misses: about $0.01–0.02 per frame with misses, so
+        roughly $1–2 for a new eval set of ~100 frames. Answers are cached, so re-analyzing the same frames is free. Earlier runs are kept.
+      </p>
     </Confirm>
   );
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Loader2, X } from "lucide-react";
 import { cn } from "../lib/utils";
 
@@ -160,7 +161,8 @@ export function Lightbox({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  return (
+  // Portal: the step column is its own stacking context, so an in-place overlay sits under the results.
+  return createPortal(
     <div className="fixed inset-0 z-[90] flex flex-col bg-black/85 p-4" onClick={onClose}>
       <div className="mb-2 flex items-center gap-3 text-[12px] text-slate-200" onClick={(e) => e.stopPropagation()}>
         <div className="min-w-0 flex-1 truncate">{caption}</div>
@@ -176,7 +178,8 @@ export function Lightbox({
           </figure>
         ))}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -208,7 +211,7 @@ export function Confirm({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [busy, onCancel]);
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-4">
       <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-slate-700 dark:bg-ink-900">
         <h3 className={cn("text-base font-extrabold", danger ? "text-rose-600 dark:text-rose-300" : "text-slate-800 dark:text-slate-100")}>{title}</h3>
@@ -243,7 +246,8 @@ export function Confirm({
           </Btn>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
