@@ -40,6 +40,46 @@ from app.gen_plan import MASTER_PROMPT, prepare_package
 
 # Gemini image models: widescreen CCTV frame (user preference). OpenAI stays 1:1.
 GEMINI_ASPECT_RATIO = "16:9"
+# The platform's square challenge frames are Gemini 16:9 frames (1408×768) squashed to 1024² — people are ~0.57×
+# as wide as real ones. Sent as-is, Gemini copies those thin people into its 16:9 output and our square stretch
+# squashes them a second time. So a square reference is first stretched back to its 16:9 shape.
+UNSQUASH_SIZE = (1408, 768)
+
+
+def _checkerboard(g, axis: int) -> float:
+    """Pixel-period (Nyquist) energy vs its neighbourhood along one axis. OpenAI-style generators leave ~×2.4 on
+    both axes; resizing removes it on the resized axis; Gemini output has none (~×0.8)."""
+    import numpy as np
+
+    if axis == 0:
+        g = g.T
+    F = np.abs(np.fft.rfft((g - g.mean(1, keepdims=True)) * np.hanning(g.shape[1]), axis=1)).mean(0)
+    f = np.fft.rfftfreq(g.shape[1])
+    return float(F[f > 0.497].mean() / (np.median(F[(f > 0.40) & (f < 0.47)]) + 1e-9))
+
+
+def is_squashed(im) -> bool:
+    """True when a square frame is a 16:9 picture squashed to 1:1 (most platform frames since block 8379600).
+    Only an untouched 1:1 generator frame counts as unsquashed: OpenAI-style pixel checkerboard vertically (>1.5;
+    squashed platform frames never pass 1.43) and not wiped out horizontally (a horizontal squeeze drops it to
+    ~0.8; untouched frames stay > 1.0). Measured on 804 platform frames + 25 of our OpenAI frames."""
+    import numpy as np
+
+    g = np.asarray(im.convert("L"), dtype=np.float64)
+    return not (_checkerboard(g, 0) > 1.5 and _checkerboard(g, 1) > 1.0)
+
+
+def unsquash_reference(src_path: Path, out_dir: Path) -> Path:
+    """A squashed square source → the same picture at 1408×768 (natural proportions); anything else unchanged."""
+    from PIL import Image
+
+    with Image.open(src_path) as im:
+        if GEMINI_ASPECT_RATIO != "16:9" or im.width != im.height or not is_squashed(im):
+            return Path(src_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{Path(src_path).stem}.png"
+        im.convert("RGB").resize(UNSQUASH_SIZE, Image.Resampling.LANCZOS).save(out, format="PNG")
+        return out
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-image"
 BATCH_POLL_S = 20.0
@@ -446,13 +486,14 @@ def run_generation_batch(
     unique_sources = {row["source_image"]: row for row, _ in jobs}
     for i, (src_name, row) in enumerate(unique_sources.items(), start=1):
         src_path = _resolve_source_path(row, dataset_root)
-        mime = mimetypes.guess_type(str(src_path))[0] or "image/png"
+        ref_path = unsquash_reference(src_path, bdir / "refs")
+        mime = mimetypes.guess_type(str(ref_path))[0] or "image/png"
         if progress_cb:
             progress_cb(0, total, f"Uploading source {i}/{len(unique_sources)}: {src_name}")
         uploaded = _wait_file_active(
             client,
             client.files.upload(
-                file=str(src_path),
+                file=str(ref_path),
                 config=types.UploadFileConfig(
                     display_name=f"bs-src-{Path(src_name).stem}"[:40],
                     mime_type=mime,
@@ -550,6 +591,7 @@ def run_generation_batch(
                 "model": model_name,
                 "mode": mode,
                 "n_requests": len(request_rows),
+                "reference": f"unsquashed to {UNSQUASH_SIZE[0]}x{UNSQUASH_SIZE[1]}",
                 "created_at": datetime.now(timezone.utc).isoformat(),
             },
             indent=2,

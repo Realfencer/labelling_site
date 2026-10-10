@@ -70,7 +70,7 @@ class GenerateBody(BaseModel):
     model: str | None = None
     source_index: int | None = None
     source_image: str | None = None
-    # Final only: restrict the run to these package sources (None → all)
+    # Restrict the run to these package sources (final: None → all; test: overrides source_image)
     source_images: list[str] | None = None
     per_source: int | None = None
     # Provider keys (None → .env defaults)

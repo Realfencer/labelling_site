@@ -270,10 +270,11 @@ def _select_manifest_rows(
     source_image: str | None,
     source_images: list[str] | None = None,
 ) -> list[dict]:
+    # An explicit list (Plan-tab ticks, or a multi-source test) wins in both modes.
+    if source_images is not None:
+        want = {Path(str(x)).name for x in source_images}
+        return [r for r in rows if Path(r["source_image"]).name in want]
     if mode != "test":
-        if source_images is not None:
-            want = {Path(str(x)).name for x in source_images}
-            return [r for r in rows if Path(r["source_image"]).name in want]
         return rows
     if source_image:
         want = Path(str(source_image)).name
