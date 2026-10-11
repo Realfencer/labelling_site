@@ -163,6 +163,60 @@ def _source_scores(analysis_dir: Path, report: dict, names: set[str]) -> dict[st
     return out
 
 
+LABELER_LABELS = Path(__file__).resolve().parents[2] / "review_datasets" / "projects"
+
+
+def _gt_label_file(fn: str, analysis_dir: Path) -> Path | None:
+    """The frame's labels: the Studio's eval set while it is in it, else the labeler's Platform labels."""
+    from app import session as sess
+
+    stem = Path(fn).stem
+    ds = Path(sess.load_session().get("dataset") or sess.DEFAULT_DATASET)
+    cand = [ds / "labels" / f"{stem}.txt", *sorted(LABELER_LABELS.glob(f"*/challenge/labels/{stem}.txt"))]
+    return next((c for c in cand if c.is_file()), None)
+
+
+def _rebuild_faults(fn: str, run_dir: Path, analysis_dir: Path) -> dict | None:
+    """The base model's faults on a frame that left the current analysis — from the caches the analysis keeps
+    (predictions per base model, Gemini's descriptions of the misses) + the frame's labels. No Gemini call; a frame
+    the base model never saw is predicted locally once."""
+    from PIL import Image
+
+    from app import session as sess
+    from app.model_errors import (CAPTION_VERSION, CLASSES, ERRORS_DIR, detector, load_gt, predict, source_entry,
+                                  weights_key)
+    from app.sv_metric import evaluate
+
+    img = run_dir / "sources" / fn
+    lab = _gt_label_file(fn, analysis_dir)
+    if not img.is_file() or lab is None:
+        return None
+    try:
+        det = detector(sess.load_session().get("gen_mode") or "openai")
+    except Exception:  # noqa: BLE001
+        return None
+    wkey, conf = weights_key(det["path"]), float(det["conf"])
+    cache = Path(analysis_dir) / ERRORS_DIR / f"preds_{wkey}_{det['imgsz']}.json"
+    preds = _read(cache)
+    if fn not in preds:
+        preds.update(predict([img], det["path"], det["imgsz"]))
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(preds), encoding="utf-8")
+    with Image.open(img) as im:
+        w, h = im.size
+    gt = load_gt(lab, w, h)
+    entry = source_entry(img, gt, preds.get(fn, []), conf, w, h)
+    caps = _read(Path(analysis_dir) / ERRORS_DIR / f"{Path(fn).stem}__{wkey}_c{conf:g}_{CAPTION_VERSION}.json")
+    if caps.get("_labels") in (None, entry["labels_sig"]):
+        for e in entry["errors"]:
+            if str(e["id"]) in caps:
+                e["caption"] = caps[str(e["id"])]
+    row = {"id": fn, "width": w, "height": h, "gt": [(CLASSES[g["cls"]], g["xyxy"]) for g in gt if g["cls"] in CLASSES],
+           "pred": [(CLASSES[d["cls"]], d["conf"], d["xyxy"]) for d in preds.get(fn, []) if d["cls"] in CLASSES]}
+    score = round(float(evaluate([row], conf)["composite"]), 3) if row["gt"] else None
+    return _fault_entry(entry, score)
+
+
 def snapshot_faults(run_dir: Path, analysis_dir: Path) -> int:
     """Write <run>/source_faults.json for the run's sources (called when a run is made, so the Results page keeps
     showing each source's faults after the eval set is replaced)."""
@@ -259,18 +313,27 @@ def run_insight(run_name: str, analysis_dir: Path) -> dict:
     names = {Path(str(it.get("source_image") or "")).name for it in items} - {""}
     sources = _read(run_dir / FAULTS_FILE)
     missing = names - set(sources)
-    if missing:  # older runs: the current analysis, while those sources are still in it
+    if missing:  # runs made before the snapshot existed: current analysis, else rebuilt from the caches
         from app.model_errors import load_report
 
         report = load_report(analysis_dir)
         scores = _source_scores(Path(analysis_dir), report, missing)
         looks = _read(Path(analysis_dir) / "source_look_caption.json")
         scene = _read(Path(analysis_dir) / "source_scene.json")
+        rebuilt = {}
         for fn in missing:
             entry = (report.get("sources") or {}).get(fn)
-            sources[fn] = {"detector": report.get("detector"), "current_analysis": True,
-                           "faults": _fault_entry(entry, scores.get(fn)) if entry is not None else None,
+            faults = _fault_entry(entry, scores.get(fn)) if entry is not None else None
+            if faults is None:
+                faults = _rebuild_faults(fn, run_dir, Path(analysis_dir))
+            sources[fn] = {"detector": report.get("detector"), "faults": faults,
                            "look": (looks.get(fn) or {}).get("directive"), "scene": _scene_bits(scene.get(fn))}
+            rebuilt[fn] = sources[fn]
+        try:  # remember it with the run, so the next view does not depend on the current eval set
+            (run_dir / FAULTS_FILE).write_text(json.dumps({**_read(run_dir / FAULTS_FILE), **rebuilt}, indent=1),
+                                               encoding="utf-8")
+        except OSError:
+            pass
     plans = run_plan(run_dir)
     return {
         "run": run_dir.name,

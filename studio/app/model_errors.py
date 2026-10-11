@@ -442,6 +442,25 @@ def _resolve(rec: dict, dataset_root: Path | None) -> Path | None:
     return None
 
 
+def source_entry(path: Path, gt: list[dict], dets: list[dict], conf: float, w: int, h: int) -> dict:
+    """One frame's judged boxes: matches, numbered errors (misses, wrong classes, background false alarms), counts."""
+    matches, false_alarms = match_source(gt, dets, conf, w, h)
+    errs = [dict(o) for o in matches if o["status"] in ("missed", "wrong_class")]
+    errs += [dict(fa) for fa in false_alarms if fa["kind"] == "background"]
+    for k, e in enumerate(errs, 1):
+        e["id"] = k
+        e["reason"] = _miss_reason(e, conf)
+        x1, y1, x2, y2 = e["xyxy"]
+        e["frame_pct"] = {"h": round((y2 - y1) / h * 100, 1), "y": round((y1 + y2) / 2 / h * 100),
+                          "x": round((x1 + x2) / 2 / w * 100)}
+    return {"path": str(path), "matches": matches, "errors": errs, "labels_sig": _labels_sig(gt),
+            "counts": {"gt": len(gt), "hit": sum(o["status"] == "hit" for o in matches),
+                       "missed": sum(o["status"] == "missed" for o in matches),
+                       "wrong_class": sum(o["status"] == "wrong_class" for o in matches),
+                       "false_positive": len(false_alarms),
+                       "false_alarm_objects": sum(fa["kind"] == "background" for fa in false_alarms)}}
+
+
 def mine_errors(
     analysis_dir: str | Path,
     records: list[dict],
@@ -479,21 +498,7 @@ def mine_errors(
         with Image.open(p) as im:
             w, h = im.size
         gt = load_gt((labels_dir or p.parent.parent / "labels") / f"{Path(fn).stem}.txt", w, h)
-        matches, false_alarms = match_source(gt, preds.get(fn, []), conf, w, h)
-        errs = [dict(o) for o in matches if o["status"] in ("missed", "wrong_class")]
-        errs += [dict(fa) for fa in false_alarms if fa["kind"] == "background"]
-        for k, e in enumerate(errs, 1):
-            e["id"] = k
-            e["reason"] = _miss_reason(e, conf)
-            x1, y1, x2, y2 = e["xyxy"]
-            e["frame_pct"] = {"h": round((y2 - y1) / h * 100, 1), "y": round((y1 + y2) / 2 / h * 100),
-                              "x": round((x1 + x2) / 2 / w * 100)}
-        per_source[fn] = {"path": str(p), "matches": matches, "errors": errs, "labels_sig": _labels_sig(gt),
-                          "counts": {"gt": len(gt), "hit": sum(o["status"] == "hit" for o in matches),
-                                     "missed": sum(o["status"] == "missed" for o in matches),
-                                     "wrong_class": sum(o["status"] == "wrong_class" for o in matches),
-                                     "false_positive": len(false_alarms),
-                                     "false_alarm_objects": sum(fa["kind"] == "background" for fa in false_alarms)}}
+        per_source[fn] = source_entry(p, gt, preds.get(fn, []), conf, w, h)
 
     # Gemini captions, cached per source + weights + conf (errors change if either changes)
     cap_key = f"{wkey}_c{conf:g}_{CAPTION_VERSION}"
