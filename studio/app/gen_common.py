@@ -446,7 +446,11 @@ def list_runs() -> list[dict]:
     if not GENERATED_ROOT.exists():
         return []
     runs = []
-    for p in sorted(GENERATED_ROOT.iterdir(), reverse=True):
+    def stamp(p: Path) -> str:  # "<mode>_<YYYYMMDD>_<HHMMSS>_<id>": newest first across test_ and final_ runs
+        bits = p.name.split("_")
+        return "_".join(bits[1:3]) if len(bits) >= 3 else p.name
+
+    for p in sorted(GENERATED_ROOT.iterdir(), key=stamp, reverse=True):
         if not p.is_dir():
             continue
         man = p / "run_manifest.json"

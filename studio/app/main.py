@@ -896,6 +896,17 @@ def api_gen_image(request: Request, filename: str, run: str = Query(...), w: int
     return file_response(request, path, clamp_width(w))
 
 
+@app.get("/api/gen/insight")
+def api_gen_insight(run: str = Query(...)) -> dict:
+    """One request for the Results page: per source faults, per image plan (from its prompt), all labels."""
+    from app.run_insight import run_insight
+
+    try:
+        return run_insight(run, Path(sess.load_session().get("out_dir") or sess.DEFAULT_OUT))
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"Run not found: {e}") from e
+
+
 @app.get("/api/gen/labels/{filename}")
 def api_gen_labels(filename: str, run: str = Query(...)) -> dict:
     """The run's label boxes for one image (normalised xyxy, 0..1) — drawn over the gallery and viewer."""

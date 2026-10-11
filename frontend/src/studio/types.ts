@@ -274,3 +274,48 @@ export type StudioStatus = {
 
 /** A Done Platform image the eval set can be built from. */
 export type GtCandidate = { item_key: string; block: number; quality: "pass" | "mid" | "fail" | null; in_eval: boolean };
+
+/** Results page data for one run (GET /gen/insight). */
+export type LabelBox = { cls: number; name: string; x1: number; y1: number; x2: number; y2: number };
+export type SourceFault = {
+  status: "missed" | "wrong_class" | "false_positive";
+  cls: string;
+  pred_class?: string | null;
+  size_px?: [number, number];
+  height_pct?: number | null;
+  xyxy?: [number, number, number, number];
+  reason?: string;
+  distance?: string | null;
+  what?: string | null;
+  where?: string | null;
+  orientation?: string | null;
+  occlusion?: string | null;
+  why?: string | null;
+  is_drink?: boolean | null;
+};
+export type SourceInsight = {
+  detector?: string | null;
+  current_analysis?: boolean;
+  faults: { counts: Record<string, number>; score: number | null; errors: SourceFault[] } | null;
+  look?: string | null;
+  scene?: { place?: string; time_of_day?: string; light?: string; weather?: string; indoor?: boolean; people?: number } | null;
+};
+export type ImagePlan = {
+  variant?: number;
+  of?: number;
+  regime?: string;
+  view?: string;
+  targets?: { distance: string; height_pct: number | null; directive: string; why: string }[];
+  negative?: string;
+  motion_blur?: boolean;
+  deep_scene?: boolean;
+  camera_look?: boolean;
+  prompt_chars?: number;
+};
+export type RunInsight = {
+  run: string;
+  sources: Record<string, SourceInsight | null>;
+  plans: Record<string, ImagePlan>;
+  labels: Record<string, LabelBox[]>;
+  label_source: "detector" | "copied_from_source";
+};

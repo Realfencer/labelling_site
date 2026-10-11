@@ -13,6 +13,7 @@ import type {
   ModelErrors,
   Package,
   RecordRow,
+  RunInsight,
   Run,
   SendJob,
   StudioStatus,
@@ -139,6 +140,7 @@ export const studio = {
   cancel: (run: string) => post<{ status: string }>("/gen/cancel", { run }, 120_000),
   autolabel: (run: string) => post<GenJob>("/gen/autolabel", { run }),
   runs: () => get<{ runs: Run[] }>("/gen/runs"),
+  insight: (run: string) => get<RunInsight>(`/gen/insight?run=${encodeURIComponent(run)}`, 60_000),
   runImages: (run: string) => get<{ run: string; images: GenItem[] }>(`/gen/images?run=${encodeURIComponent(run)}`),
   deleteImages: (run: string, filenames: string[]) =>
     post<{ deleted: number; remaining: number }>("/gen/delete-images", { run, filenames }),

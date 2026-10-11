@@ -357,8 +357,10 @@ def start_generation(
             if run_dir and int(result.get("count") or 0) > 0:
                 try:
                     from app.gen_common import keep_sources
+                    from app.run_insight import snapshot_faults
 
                     keep_sources(Path(run_dir))
+                    snapshot_faults(Path(run_dir), out_dir)  # each source's faults, kept with the run
                 except Exception as e:  # noqa: BLE001 — a missing copy only affects the Results view
                     base_msg += f" · keeping source copies failed: {e}"
 
@@ -408,6 +410,11 @@ def start_generation(
                                  f" {al['empty_images']} empty)")
                 except Exception as e:  # noqa: BLE001
                     base_msg += f" · AUTO-LABEL FAILED (labels are still source copies): {e}"
+
+            if run_name:
+                from app.run_insight import warm_thumbs
+
+                warm_thumbs(run_name)  # the Results page opens on this run: its thumbnails are ready by then
 
             hf_info = None
             if mode == "final" and run_name:
