@@ -256,3 +256,20 @@ export const CLASS_COLORS: Record<string, string> = { cup: "#ef4444", can: "#22c
 export function pct(v: number | null | undefined, d = 0): string {
   return v == null || !Number.isFinite(v) ? "—" : `${(v * 100).toFixed(d)}%`;
 }
+
+/** Which generator made a frame (OpenAI / Gemini). */
+export function GenBadge({ gen, long, className }: { gen: "openai" | "gemini" | null | undefined; long?: boolean; className?: string }) {
+  if (!gen) return null;
+  return (
+    <span
+      title={gen === "openai" ? "Made by OpenAI (gpt-image)" : "Made by Gemini"}
+      className={cn(
+        "inline-flex items-center rounded px-1 text-[9px] font-black uppercase leading-[14px] tracking-wide text-white",
+        gen === "openai" ? "bg-sky-600" : "bg-violet-600",
+        className,
+      )}
+    >
+      {long ? (gen === "openai" ? "OpenAI" : "Gemini") : gen === "openai" ? "O" : "G"}
+    </span>
+  );
+}

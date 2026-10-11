@@ -438,6 +438,9 @@ function checksPassComplete(c: ChallengeItem): boolean {
 }
 
 type StripFilter = "all" | "new" | "fail" | "mid" | "pass";
+/** OpenAI / Gemini images (beverage) — module-level so every strip helper honours it without extra parameters. */
+type GenFilter = "all" | "openai" | "gemini";
+let genFilterNow: GenFilter = "all";
 
 function matchesOwnFilter(c: ChallengeItem | undefined, filter: OwnFilter): boolean {
   if (!c?.loaded) return false;
@@ -453,6 +456,7 @@ function matchesFilmstripFilter(
   stripFilter: StripFilter,
   ownFilter: OwnFilter,
 ): boolean {
+  if (genFilterNow !== "all" && c?.generator !== genFilterNow) return false;
   if (app.review_mode === "local") return matchesOwnFilter(c, ownFilter);
   return matchesStripFilter(c, stripFilter);
 }
@@ -1042,6 +1046,23 @@ export default function App({
   const [baseModelOpen, setBaseModelOpen] = useState(false);
   const [stopCollectBusy, setStopCollectBusy] = useState(false);
   const [stripFilter, setStripFilter] = useState<StripFilter>("all");
+  const [genFilter, setGenFilterState] = useState<GenFilter>(() => {
+    try {
+      return (localStorage.getItem("labeler_gen_filter") as GenFilter) || "all";
+    } catch {
+      return "all";
+    }
+  });
+  genFilterNow = genFilter;
+  const setGenFilter = (g: GenFilter) => {
+    genFilterNow = g;
+    setGenFilterState(g);
+    try {
+      localStorage.setItem("labeler_gen_filter", g);
+    } catch {
+      /* private mode */
+    }
+  };
   const stripFilterRef = useRef<StripFilter>("all");
   stripFilterRef.current = stripFilter;
   const [ownFilter, setOwnFilter] = useState<OwnFilter>("all");
@@ -2385,7 +2406,7 @@ export default function App({
       imageCacheToken,
       filteredNeighbors(index, stripFilterRef.current, 2, ownFilterRef.current),
     );
-  }, [detail?.index, detail?.challenge?.item_key, appState?.challenges.length, appState?.review_mode, imageCacheToken, stripFilter]);
+  }, [detail?.index, detail?.challenge?.item_key, appState?.challenges.length, appState?.review_mode, imageCacheToken, stripFilter, genFilter]);
 
   // The URL's ?workspace= is rewritten by switchWorkspace(); re-entering the topic on that
   // change cleared all panes and raced the in-flight setWorkspace request. Only the topic
@@ -2846,7 +2867,7 @@ export default function App({
     // Only jump when the strip filter hides the open image — never on workspace switch
     // (switchWorkspace already opens the right frame).
     if (indices.length) void selectChallenge(indices[0], "filter");
-  }, [stripFilter, ownFilter]);
+  }, [stripFilter, ownFilter, genFilter]);
 
   useEffect(() => {
     if (!appState) return;
@@ -4287,12 +4308,17 @@ export default function App({
           : appState.miner_class_names;
   const reviewedCount = appState.challenges.filter((c) => c.reviewed).length;
   const stripCounts = { all: 0, new: 0, fail: 0, mid: 0, pass: 0 };
+  const genCounts = { all: 0, openai: 0, gemini: 0 };
   appState.challenges.forEach((raw, i) => {
     const c = viewItem(raw, i);
     if (!c.loaded) return;
+    genCounts.all += 1;
+    if (c.generator === "openai" || c.generator === "gemini") genCounts[c.generator] += 1;
+    if (genFilter !== "all" && c.generator !== genFilter) return;
     stripCounts.all += 1;
     stripCounts[stripBucket(c)] += 1;
   });
+  const showGenFilter = genCounts.openai + genCounts.gemini > 0 || genFilter !== "all";
   const showBeverageHfImport = !isPlatform && /beverage/i.test(topicSlug || "");
   const showBeverageSam3 = showBeverageHfImport;
   const showBeverageSendGt = isPlatform && /beverage/i.test(topicSlug || "");
@@ -4365,6 +4391,31 @@ export default function App({
       ) : (
       <>
       <div className="flex min-h-[84px] w-full min-w-0 items-stretch gap-1.5">
+        {showGenFilter && (
+          <div className="flex h-[80px] w-[4.4rem] shrink-0 flex-col justify-center gap-1 py-px" title="Which image generator made the image">
+            {(
+              [
+                ["all", "Any", genCounts.all, "border-slate-300 text-slate-700 dark:border-slate-600 dark:text-slate-200", "border-slate-700 bg-slate-700 text-white dark:border-slate-200 dark:bg-slate-200 dark:text-slate-900"],
+                ["openai", "OpenAI", genCounts.openai, "border-sky-300 text-sky-700 dark:border-sky-800 dark:text-sky-200", "border-sky-500 bg-sky-500 text-white"],
+                ["gemini", "Gemini", genCounts.gemini, "border-violet-300 text-violet-700 dark:border-violet-800 dark:text-violet-200", "border-violet-500 bg-violet-500 text-white"],
+              ] as const
+            ).map(([id, label, count, idle, active]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setGenFilter(id)}
+                title={id === "all" ? "Every image" : id === "openai" ? "Images made by OpenAI (gpt-image)" : "Images made by Gemini"}
+                className={cn(
+                  "flex h-[20px] items-center justify-between rounded border px-1 text-[8px] font-extrabold uppercase leading-none tracking-wide",
+                  genFilter === id ? active : idle,
+                )}
+              >
+                <span>{label}</span>
+                <span className="tabular-nums">{count}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {isPlatform ? (
         <div className="flex h-[80px] w-[4.7rem] shrink-0 flex-col justify-between py-px">
           {(

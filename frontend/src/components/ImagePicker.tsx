@@ -15,6 +15,8 @@ export type PickItem = {
   tag?: string;
   /** Platform label checks: all 3 miners close / some / none. */
   quality?: "pass" | "mid" | "fail" | null;
+  /** Which image generator made it (beverage). */
+  gen?: "openai" | "gemini" | null;
 };
 
 export type PickCtx = { selected: string[]; n: number; bMin: number | null; bMax: number | null };
@@ -102,8 +104,13 @@ export function ImagePickerModal({
   const byId = useMemo(() => new Map(items.map((i, k) => [i.id, { item: i, idx: k }])), [items]);
   // An image whose quality class is switched off is disabled: it cannot be picked and is not used. Switching
   // the class back on re-enables it with its earlier pick state, because `sel` itself is left untouched.
-  const isOff = useCallback((it: PickItem) => Boolean(it.quality && off.has(it.quality)), [off]);
-  const enabled = useMemo(() => items.filter((i) => !(i.quality && off.has(i.quality))), [items, off]);
+  // classes that can be switched off: quality (pass / mid / fail) and generator ("gen:openai" / "gen:gemini")
+  const offOf = useCallback(
+    (it: PickItem) => Boolean((it.quality && off.has(it.quality)) || (it.gen && off.has(`gen:${it.gen}`))),
+    [off],
+  );
+  const isOff = offOf;
+  const enabled = useMemo(() => items.filter((i) => !offOf(i)), [items, offOf]);
   const enabledIds = useMemo(() => enabled.map((i) => i.id), [enabled]);
   const setMany = useCallback(
     (list: string[], on: boolean) => {
@@ -111,14 +118,14 @@ export function ImagePickerModal({
         const next = new Set(prev);
         list.forEach((b) => {
           const it = byId.get(b)?.item;
-          if (on && it && it.quality && off.has(it.quality)) return; // disabled: cannot be picked
+          if (on && it && offOf(it)) return; // disabled: cannot be picked
           if (on) next.add(b);
           else next.delete(b);
         });
         return next;
       });
     },
-    [byId, off],
+    [byId, offOf],
   );
   const toggleQuality = (q: string) =>
     setOff((prev) => {
@@ -155,6 +162,7 @@ export function ImagePickerModal({
   const previewId = hover ?? (lastIdx.current != null ? ids[lastIdx.current] : (selected[0] ?? null));
   const prev = previewId != null ? byId.get(previewId) : undefined;
   const hasQuality = items.some((i) => i.quality);
+  const hasGen = items.some((i) => i.gen);
   const tilePx = TILE_SIZES[tile];
   const useBig = tilePx > 170;
   const ctx: PickCtx = { selected, n, bMin, bMax };
@@ -249,6 +257,28 @@ export function ImagePickerModal({
                   })}
                 </>
               )}
+              {hasGen && (
+                <>
+                  <span className="mx-1 h-4 w-px bg-slate-700" />
+                  {([["openai", "OpenAI", "border-sky-400 bg-sky-500/20 text-sky-200"], ["gemini", "Gemini", "border-violet-400 bg-violet-500/20 text-violet-200"]] as const).map(([g, label, on]) => {
+                    const total = items.filter((x) => x.gen === g).length;
+                    const picked = items.filter((x) => x.gen === g && sel.has(x.id)).length;
+                    const isOffG = off.has(`gen:${g}`);
+                    return (
+                      <button
+                        key={g}
+                        type="button"
+                        disabled={busy || total === 0}
+                        onClick={() => toggleQuality(`gen:${g}`)}
+                        title={isOffG ? `${label} images are disabled — click to use them again` : `Click to disable the ${label} images (they stay out of the selection)`}
+                        className={cn("rounded border px-2 py-0.5 font-semibold tabular-nums disabled:opacity-30", isOffG ? "border-slate-600 text-slate-500 line-through" : on)}
+                      >
+                        {label} <span className="font-normal opacity-80">{isOffG ? total : picked}</span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
               <label className="ml-auto flex items-center gap-1.5 text-slate-400">
                 size
                 <input type="range" min={0} max={2} step={1} value={tile} onChange={(e) => setTile(Number(e.target.value))} />
@@ -278,6 +308,11 @@ export function ImagePickerModal({
                       <img src={useBig ? it.preview : it.thumb} loading="lazy" decoding="async" draggable={false} alt="" className="pointer-events-none h-full w-full object-cover" />
                       <span className="absolute bottom-0 left-0 max-w-full truncate rounded-tr bg-black/70 px-1 text-[9px] font-semibold tabular-nums text-slate-200">{it.label}</span>
                       {it.quality && <span className={cn("absolute bottom-1 right-1 h-2 w-2 rounded-full ring-1 ring-black/50", QUALITY_DOT[it.quality])} />}
+                      {it.gen && (
+                        <span className={cn("absolute bottom-0.5 right-4 rounded px-0.5 text-[8px] font-black leading-tight text-white", it.gen === "openai" ? "bg-sky-600/90" : "bg-violet-600/90")} title={it.gen === "openai" ? "OpenAI" : "Gemini"}>
+                          {it.gen === "openai" ? "O" : "G"}
+                        </span>
+                      )}
                       {it.tag && <span className="absolute left-1 top-1 max-w-[70%] truncate rounded bg-black/65 px-1 text-[8px] font-bold text-slate-100">{it.tag}</span>}
                       {on && (
                         <span className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-sky-500 text-white">

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { studio } from "./api";
-import type { AnalyzeJob, GenJob, Health, ModelErrors, Package, Run, SendJob, StudioStatus } from "./types";
+import type { AnalyzeJob, GenJob, Generator, Health, ModelErrors, Package, Run, SendJob, StudioStatus } from "./types";
 import { errText, useJob } from "./ui";
 
 export type Toast = { kind: "info" | "ok" | "error"; text: string; link?: string } | null;
@@ -22,6 +22,15 @@ function useStudioState() {
     }
   });
   const [toast, setToast] = useState<Toast>(null);
+  const [generators, setGenerators] = useState<Record<string, Generator>>({});
+  useEffect(() => {
+    studio
+      .generators()
+      .then((r) => setGenerators(r.blocks || {}))
+      .catch(() => undefined);
+  }, []);
+  /** openai | gemini | null for a source frame name like "block_9246600.png". */
+  const genOf = useCallback((fn: string) => generators[fn.replace(/^block_/, "").replace(/\.[a-z]+$/i, "")] ?? null, [generators]);
   const [offline, setOffline] = useState("");
 
   const loadStatus = useCallback(async () => {
@@ -142,6 +151,7 @@ function useStudioState() {
     pickSource,
     finalSel,
     setFinalSel,
+    genOf,
     nFinal,
     toast,
     setToast,

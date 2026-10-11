@@ -582,6 +582,26 @@ def winner_sync_all() -> dict:
     return {"ok": True, "results": results}
 
 
+class GeneratorRulesBody(BaseModel):
+    own_openai_days: list[str] | None = None
+    platform: str | None = None
+
+
+@app.get("/api/generator")
+def generator_status() -> dict:
+    """Which generator made each beverage image: rules (Own OpenAI days) + Platform pixel classification progress."""
+    from . import generator
+
+    return generator.status()
+
+
+@app.put("/api/generator/rules")
+def generator_rules(body: GeneratorRulesBody) -> dict:
+    from . import generator
+
+    return generator.save_rules(body.model_dump(exclude_none=True))
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "sessions": sessions.session_count()}

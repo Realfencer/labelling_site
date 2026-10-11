@@ -7,7 +7,7 @@ import { img, studio } from "./api";
 import { useStudio } from "./store";
 import { ImagePickerModal, type PickItem } from "../components/ImagePicker";
 import type { AnalyzeNeeded, GenMode, GtCandidate, SwitchName } from "./types";
-import { Btn, Confirm, errText, Progress } from "./ui";
+import { Btn, Confirm, errText, GenBadge, Progress } from "./ui";
 
 /** $ per 1024² image (OpenAI Batch API: low / medium / high). */
 const PRICE: Record<string, [number, number, number]> = {
@@ -196,6 +196,7 @@ function EvalPicker({ busy, onUse, onClose }: { busy: boolean; onUse: (keys: str
         preview: img.gt(c.block, "preview"),
         tag: c.in_eval ? "IN" : undefined,
         quality: c.quality,
+        gen: c.generator ?? null,
       })),
     [cands],
   );
@@ -466,6 +467,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   const unit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
   const nFinal = st.nFinal;
   const nAll = Math.max(st.sources.length, st.nAllSources);
+  const sameGen = st.sources.filter((s) => st.genOf(s.source_image) === mode).map((s) => s.source_image);
   const source = st.sources.find((s) => s.source_image === st.source) || st.sources[0] || null;
   // Test on several sources at once: the sources ticked on the Plan tab (2–20), like a small Final without HF upload.
   const [testTicked, setTestTicked] = useState(false);
@@ -636,7 +638,10 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
 
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 p-2 dark:border-slate-700">
           {source ? (
-            <img src={img.dataset(source.source_image, 320)} alt="" className="h-12 w-12 rounded-lg object-cover" />
+            <span className="relative shrink-0">
+              <img src={img.dataset(source.source_image, 320)} alt="" className="h-12 w-12 rounded-lg object-cover" />
+              <GenBadge gen={st.genOf(source.source_image)} className="absolute -bottom-1 -right-1" />
+            </span>
           ) : (
             <div className="h-12 w-12 rounded-lg bg-slate-200 dark:bg-slate-700" />
           )}
@@ -695,6 +700,16 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
           {st.finalSel && (
             <button type="button" onClick={() => st.setFinalSel(null)} className="font-semibold text-slate-500 hover:underline">
               use all
+            </button>
+          )}
+          {sameGen.length > 0 && sameGen.length < st.sources.length && (
+            <button
+              type="button"
+              onClick={() => st.setFinalSel(sameGen)}
+              className="font-semibold text-slate-500 hover:underline"
+              title={`Tick only the eval frames that ${isGemini ? "Gemini" : "OpenAI"} made`}
+            >
+              only {isGemini ? "Gemini" : "OpenAI"} frames ({sameGen.length})
             </button>
           )}
         </div>

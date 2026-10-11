@@ -4,7 +4,7 @@ import { cn } from "../lib/utils";
 import { img, studio } from "./api";
 import { useStudio } from "./store";
 import type { Distribution, ModelErrors, Package, PackageSource } from "./types";
-import { Banner, Btn, Card, Empty, errText } from "./ui";
+import { Banner, Btn, Card, Empty, errText, GenBadge } from "./ui";
 
 /** Plan tab: the generation package — which sources, how the eval set is mixed, what each source targets. */
 export default function PlanPanel() {
@@ -87,6 +87,7 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
     set(next);
   };
   const withMisses = sources.filter((s) => s.detector_errors > 0);
+  const byGen = (g: "openai" | "gemini") => sources.filter((s) => st.genOf(s.source_image) === g);
   const shown = showAll ? sources : sources.slice(0, 64);
   const link = "font-bold text-violet-600 hover:underline disabled:opacity-40 dark:text-violet-300";
 
@@ -118,6 +119,13 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
             <button type="button" className={link} disabled={!withMisses.length} onClick={() => set(withMisses.map((s) => s.source_image))} title="Only the frames where the base model misses drinks">
               only with misses ({withMisses.length})
             </button>
+            {(["openai", "gemini"] as const).map((g) =>
+              byGen(g).length ? (
+                <button key={g} type="button" className={link} onClick={() => set(byGen(g).map((s) => s.source_image))} title={`Only the frames made by ${g === "openai" ? "OpenAI" : "Gemini"}`}>
+                  only {g === "openai" ? "OpenAI" : "Gemini"} ({byGen(g).length})
+                </button>
+              ) : null,
+            )}
             <span className="text-slate-400">Shift+click a box to tick a run of cards</span>
             <span className="ml-auto flex overflow-hidden rounded-md border border-slate-300 text-[10px] font-bold dark:border-slate-600">
               {(["S", "M", "L"] as const).map((k) => (
@@ -163,6 +171,7 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
                       {on && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
                     </button>
                     {s.detector_errors > 0 && <span className="absolute right-1 top-1 rounded bg-rose-600 px-1 text-[9px] font-bold text-white">{s.detector_errors} err</span>}
+                    <GenBadge gen={st.genOf(s.source_image)} long className="absolute bottom-1 left-1" />
                   </div>
                   <div className="px-1.5 py-1 text-[11px] leading-tight">
                     <div className="truncate font-mono">{s.source_image.replace(/\.png$/, "")}</div>

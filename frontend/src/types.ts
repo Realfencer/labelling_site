@@ -31,6 +31,8 @@ export interface ChallengeItem {
   checks_total?: number | null;
   checks?: { r1?: boolean | null; r2?: boolean | null; r3?: boolean | null } | null;
   checks_kind?: string;
+  /** Which image generator made it (beverage): Platform from the pixels, Own from the OpenAI-days rule. */
+  generator?: "openai" | "gemini" | null;
 }
 
 export interface Skill {

@@ -25,7 +25,7 @@ import { cn } from "../lib/utils";
 import { img, studio } from "./api";
 import { useStudio } from "./store";
 import type { GenItem, ImagePlan, LabelBox, Run, RunInsight, SourceFault, SourceInsight } from "./types";
-import { Btn, Chip, CLASS_COLORS, Confirm, Empty, errText, Progress } from "./ui";
+import { Btn, Chip, CLASS_COLORS, Confirm, Empty, errText, GenBadge, Progress } from "./ui";
 
 type Filter = "all" | "near" | "drift" | "selected";
 type Layout = "source" | "pairs";
@@ -572,6 +572,7 @@ function SourceGroup({
   onToggle: (fn: string) => void;
   onOpen: (fn: string) => void;
 }) {
+  const { genOf } = useStudio();
   const si: SourceInsight | null | undefined = insight?.sources[src];
   const faults = si?.faults?.errors || [];
   const c = si?.faults?.counts || {};
@@ -605,7 +606,9 @@ function SourceGroup({
             )}
           </div>
           <div className="mt-2 flex items-baseline justify-between gap-2">
-            <span className="font-mono text-[12px] font-bold">{blockOf(src)}</span>
+            <span className="flex items-center gap-1.5 font-mono text-[12px] font-bold">
+              {blockOf(src)} <GenBadge gen={genOf(src)} long />
+            </span>
             {si?.faults?.score != null && (
               <span className="text-[11px] text-slate-500" title="The base model's validator-style score on this frame">
                 base model <b className={cn("text-[13px] tabular-nums", scoreTone(si.faults.score))}>{si.faults.score.toFixed(2)}</b>

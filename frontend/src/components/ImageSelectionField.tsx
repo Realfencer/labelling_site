@@ -39,6 +39,7 @@ export function usePickItems(challenges: ChallengeItem[], ownMode: boolean, done
         preview: challengePreviewUrl(i, mode, c.block, token, c.item_key, c.media_rev),
         tag: c.reviewed ? labels[c.item_key]?.u ?? undefined : doneOnly ? undefined : "NEW",
         quality,
+        gen: c.generator ?? null,
       };
     });
   }, [challenges, ownMode, doneOnly, mode, token, labels]);

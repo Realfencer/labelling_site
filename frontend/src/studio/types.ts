@@ -273,7 +273,8 @@ export type StudioStatus = {
 };
 
 /** A Done Platform image the eval set can be built from. */
-export type GtCandidate = { item_key: string; block: number; quality: "pass" | "mid" | "fail" | null; in_eval: boolean };
+export type GtCandidate = { item_key: string; block: number; quality: "pass" | "mid" | "fail" | null; in_eval: boolean; generator?: "openai" | "gemini" | null };
+export type Generator = "openai" | "gemini";
 
 /** Results page data for one run (GET /gen/insight). */
 export type LabelBox = { cls: number; name: string; x1: number; y1: number; x2: number; y2: number };

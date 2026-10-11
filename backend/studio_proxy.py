@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import vault
+from . import generator, vault
 
 log = logging.getLogger(__name__)
 
@@ -215,7 +215,8 @@ def studio_gt_candidates() -> dict:
         quality = None
         if core.checks_total_for_record(it) > 0:
             quality = "pass" if core.checks_pass_complete(it) else "fail" if core.checks_fail_complete(it) else "mid"
-        items.append({"item_key": str(it.item_key), "block": int(it.block), "quality": quality, "in_eval": int(it.block) in in_eval})
+        items.append({"item_key": str(it.item_key), "block": int(it.block), "quality": quality, "in_eval": int(it.block) in in_eval,
+                      "generator": generator.of(it)})
     return {"items": items}
 
 
@@ -235,6 +236,15 @@ def studio_gt_image(block: int, kind: str = "thumb") -> Response:
     if path is None or not path.exists():
         raise HTTPException(404, "Image not found")
     return Response(path.read_bytes(), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.get("/api/studio-admin/generators")
+def studio_generators() -> dict:
+    """{block: openai | gemini} for every classified Platform frame (Studio badges / filters by source)."""
+    st = generator.status()
+    with generator._lock:
+        blocks = {k: v.get("gen") for k, v in generator._load_cache().items()}
+    return {"blocks": blocks, "openai": st["openai"], "gemini": st["gemini"]}
 
 
 class SyncGtBody(BaseModel):

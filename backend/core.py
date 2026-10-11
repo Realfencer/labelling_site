@@ -446,6 +446,7 @@ class ChallengeRecord:
                 if self.checks_passed is not None
                 else None
             ),
+            "generator": _generator_of(self),
         }
 
     def to_summary_dict(self, *, include_boxes: bool = True, include_left_only: bool = False) -> dict:
@@ -489,8 +490,16 @@ class ChallengeRecord:
                 if self.checks_passed is not None
                 else None
             ),
+            "generator": _generator_of(self),
         }
         return payload
+
+
+def _generator_of(item) -> str | None:
+    """openai | gemini | None — which image generator made this beverage image (backend/generator.py)."""
+    from . import generator
+
+    return generator.of(item)
 
 
 def item_keys_match(a: str | None, b: str | None) -> bool:

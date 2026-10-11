@@ -3,6 +3,7 @@ import type {
   AnalyzeNeeded,
   CkptJob,
   ClearPreview,
+  Generator,
   GtCandidate,
   Distribution,
   Gallery,
@@ -87,6 +88,8 @@ export const studio = {
       timeoutMs: 10 * 60_000,
     }),
   gtCandidates: () => call<{ items: GtCandidate[] }>("/api/studio-admin/gt-candidates", { timeoutMs: 120_000 }),
+  /** {block: openai | gemini} for every classified Platform frame. */
+  generators: () => call<{ blocks: Record<string, Generator> }>("/api/studio-admin/generators", { timeoutMs: 30_000 }),
 
   health: () => get<Health>("/health", 30_000),
   analyzeJob: () => get<AnalyzeJob>("/job"),
