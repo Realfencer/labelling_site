@@ -46,11 +46,15 @@ def _describe_one(client, path: Path) -> dict | None:
 
     img = Image.open(path).convert("RGB")
     img.thumbnail((768, 768))
+    from app import gemini_usage
+
     resp = client.models.generate_content(
         model=SCENE_MODEL,
         contents=[_PROMPT, img],
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0,
+                                           thinking_config=types.ThinkingConfig(thinking_level="LOW")),
     )
+    gemini_usage.record("scene", SCENE_MODEL, resp, profile="lean", frame=Path(path).name)
     data = json.loads((resp.text or "").strip())
     return data if isinstance(data, dict) else None
 

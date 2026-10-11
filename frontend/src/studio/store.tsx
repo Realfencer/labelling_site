@@ -80,7 +80,7 @@ function useStudioState() {
   }, [status?.up, loadStatus]);
 
   const analyze = useJob<AnalyzeJob>(studio.analyzeJob, 900, (j) => {
-    if (j.status === "done") setToast({ kind: "ok", text: "Analysis finished — the generation package was rebuilt." });
+    if (j.status === "done") setToast({ kind: "ok", text: `${j.message || "Analysis complete"} — the generation package was rebuilt.` });
     else if (j.status === "error") setToast({ kind: "error", text: j.error || j.message });
     void loadStatus();
     void loadData();

@@ -143,6 +143,9 @@ def start_analyze(dataset: str | None = None, workers: int = 8, mode: str | None
                 _job.progress = (done / total) if total else 0.0
                 _job.message = msg
 
+        from app import gemini_usage
+
+        gemini_usage.start_tally()  # what this analysis' new Gemini calls cost
         try:
             summary = analyze_dataset(ds, out_dir, workers=workers, progress_cb=cb)
             errors_meta = {}
@@ -194,9 +197,11 @@ def start_analyze(dataset: str | None = None, workers: int = 8, mode: str | None
                 meta = json.loads((pkg / "prepare_meta.json").read_text(encoding="utf-8"))
             except Exception as e:
                 meta = {"package_error": str(e)}
+            cost = gemini_usage.tally()
             with _lock:
                 _job.status = "done"
-                _job.message = "Analysis complete"
+                _job.message = (f"Analysis complete · Gemini ${cost['usd']:.2f} ({cost['calls']} calls)" if cost["calls"]
+                                else "Analysis complete · no Gemini calls needed (all cached)")
                 _job.progress = 1.0
                 _job.summary_preview = {
                     "count": summary.get("count"),
@@ -207,6 +212,7 @@ def start_analyze(dataset: str | None = None, workers: int = 8, mode: str | None
                     "package": meta,
                     "model_errors": errors_meta,
                     "camera": camera_meta,
+                    "gemini_cost": cost,
                 }
         except Exception as e:
             with _lock:

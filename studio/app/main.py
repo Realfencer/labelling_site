@@ -522,9 +522,21 @@ def api_analyze_needed() -> dict:
     n_look = len([f for f in frames if f not in looks])
     n_scene = len([f for f in frames if f not in scene])
     n_miss = len(frames) if model_changed else len(new)
-    cost = round(n_look * _COST_LOOK + n_scene * _COST_SCENE + n_miss * _COST_MISSES, 2)
+    # measured averages per call (gemini_usage ledger), else the old guesses; the share of frames with misses
+    # comes from the current analysis (only those frames are captioned)
+    from app.gemini_usage import averages
+
+    avg = averages()
+    a_look = (avg.get("camera_look") or {}).get("avg", _COST_LOOK)
+    a_scene = (avg.get("scene") or {}).get("avg", _COST_SCENE)
+    m = avg.get("miss_captions") or {}
+    a_miss, x_miss = m.get("avg", _COST_MISSES), max(m.get("max", _COST_MISSES), m.get("avg", _COST_MISSES))
+    srcs = errors.get("sources") or {}
+    share = (sum(1 for e in srcs.values() if e.get("errors")) / len(srcs)) if srcs else 0.7
+    est = n_look * a_look + n_scene * a_scene + n_miss * share * a_miss
+    worst = n_look * a_look + n_scene * a_scene + n_miss * x_miss
     return {"needed": bool(reasons), "reasons": reasons, "frames": len(frames), "new_frames": len(new),
-            "est_max_usd": cost, "mode": mode}
+            "est_usd": round(est, 2), "est_max_usd": round(worst, 2), "measured": bool(avg), "mode": mode}
 
 
 @app.get("/api/summary")

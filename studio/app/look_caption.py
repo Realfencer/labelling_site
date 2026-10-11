@@ -36,26 +36,31 @@ Describe ONLY the camera / image look, never the content (no people, objects, la
 }"""
 
 
-def _describe_one(client, path: Path) -> dict | None:
+LOOK_PROFILE = "lean"  # "lean": Gemini thinks LOW (2026-10-11 cost cut); "full": default thinking (A/B checks)
+
+
+def _describe_one(client, path: Path, profile: str = LOOK_PROFILE) -> dict | None:
     from google.genai import types
     from PIL import Image
 
+    from app import gemini_usage
+
     buf = io.BytesIO()
     Image.open(path).convert("RGB").save(buf, format="PNG")  # lossless: JPEG would add the artifacts we ask about
+    config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+    if profile == "lean":
+        config.thinking_config = types.ThinkingConfig(thinking_level="LOW")
     resp = client.models.generate_content(
         model=LOOK_MODEL,
         contents=[types.Part.from_text(text=_PROMPT), types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")],
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0),
+        config=config,
     )
+    use = gemini_usage.record("camera_look", LOOK_MODEL, resp, profile=profile, frame=Path(path).name)
     text = (resp.text or "").strip()
     data, _ = json.JSONDecoder().raw_decode(text[text.find("{"):] if "{" in text else text)
     if not isinstance(data, dict):
         return None
-    um = getattr(resp, "usage_metadata", None)
-    if um is not None:  # kept for cost reporting
-        data["usage"] = {"input": int(getattr(um, "prompt_token_count", 0) or 0),
-                         "output": int(getattr(um, "candidates_token_count", 0) or 0)
-                         + int(getattr(um, "thoughts_token_count", 0) or 0)}
+    data["usage"] = {"input": use["input"], "output": use["output"] + use["thinking"]}
     return data
 
 

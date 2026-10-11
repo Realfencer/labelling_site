@@ -547,7 +547,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   };
   startRef.current = ask;
   const analysisNote = need?.needed ? <AnalyzeFirst need={need} /> : null;
-  const plus = need?.needed ? ` + analysis ≤ $${need.est_max_usd.toFixed(2)}` : "";
+  const plus = need?.needed ? ` + analysis ≈ $${need.est_usd.toFixed(2)}` : "";
 
   const job = st.gen.job;
   const state: StepState = genRunning ? "running" : st.runs.length ? "done" : "idle";
@@ -812,7 +812,8 @@ function AnalyzeFirst({ need }: { need: AnalyzeNeeded }) {
     <div className="rounded-lg border border-amber-400/60 bg-amber-500/10 p-2.5 text-[12px]">
       <b>The analysis runs first</b> — {need.reasons.join("; ")}. It measures the {need.frames} eval frames, finds what the base model
       misses and writes the prompts; Gemini describes {need.new_frames ? `the ${need.new_frames} new frames` : "the frames"} (cached
-      afterwards) for <b>≈ up to ${need.est_max_usd.toFixed(2)}</b>. Generation then starts by itself.
+      afterwards) for <b>≈ ${need.est_usd.toFixed(2)}</b> (at most ${need.est_max_usd.toFixed(2)}
+      {need.measured ? ", from measured costs" : ", estimated"}). Generation then starts by itself.
     </div>
   );
 }

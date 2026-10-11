@@ -33,7 +33,12 @@ ERRORS_DIR = "model_errors"
 ERRORS_FILE = "model_errors.json"
 CAPTION_MODEL = "gemini-3.6-flash"
 CAPTION_VERSION = "v2"  # bump when the caption schema changes (v2: distance / depth / relative size)
-MAX_CROPS = 20
+# Cost profile of the miss captions (2026-10-11): "lean" = Gemini thinks LOW, the overlay at medium and the zoomed
+# crops at low resolution, at most 8 crops (frames have a median of 2 errors); "full" = the earlier calls (default
+# thinking, every image at full resolution, up to 20 crops) — kept for A/B checks.
+MAX_CROPS = 8
+FULL_CROPS = 20
+CAPTION_PROFILE = "lean"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 _model_lock = threading.Lock()
@@ -397,12 +402,16 @@ def _jpeg(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def caption_errors(client, image_path: Path, matches: list[dict], errs: list[dict]) -> dict[int, dict]:
+def caption_errors(client, image_path: Path, matches: list[dict], errs: list[dict],
+                   profile: str = CAPTION_PROFILE) -> dict[int, dict]:
     from google.genai import types
 
+    from app import gemini_usage
+
+    lean = profile == "lean"
     img = Image.open(image_path)
     w, h = img.size
-    shown = errs[:MAX_CROPS]
+    shown = errs[:MAX_CROPS if lean else FULL_CROPS]
     lines = [
         (f"  id {e['id']}: {e['status'].upper()} {e['gt_class']}"
         + (f" (detector said {e['pred_class']})" if e["status"] == "wrong_class" else "")
@@ -412,15 +421,25 @@ def caption_errors(client, image_path: Path, matches: list[dict], errs: list[dic
              f" = {e['frame_pct']['h']}% of the frame height, centre {e['frame_pct']['y']}% from the top — {e['reason']}")
         for e in shown
     ]
+    def part(data: bytes, level: str | None) -> types.Part:
+        pt = types.Part.from_bytes(data=data, mime_type="image/jpeg")
+        if lean and level:
+            pt.media_resolution = types.PartMediaResolution(level=level)
+        return pt
+
     parts = [types.Part.from_text(text=_PROMPT.format(w=w, h=h, errors="\n".join(lines))),
-             types.Part.from_bytes(data=_jpeg(img.convert("RGB")), mime_type="image/jpeg"),
-             types.Part.from_bytes(data=_jpeg(_overlay(img, matches, shown)), mime_type="image/jpeg")]
-    parts += [types.Part.from_bytes(data=_jpeg(_crop(img, e["xyxy"])), mime_type="image/jpeg") for e in shown]
+             part(_jpeg(img.convert("RGB")), None),  # the frame itself stays at full resolution
+             part(_jpeg(_overlay(img, matches, shown)), "MEDIA_RESOLUTION_MEDIUM")]
+    parts += [part(_jpeg(_crop(img, e["xyxy"])), "MEDIA_RESOLUTION_LOW") for e in shown]
+    config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
+    if lean:
+        config.thinking_config = types.ThinkingConfig(thinking_level="LOW")
     resp = client.models.generate_content(
         model=CAPTION_MODEL,
         contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+        config=config,
     )
+    gemini_usage.record("miss_captions", CAPTION_MODEL, resp, profile=profile, errors=len(shown), frame=Path(image_path).name)
     text = (resp.text or "").strip()
     # Gemini occasionally appends a second JSON object / stray text after the answer — take the first value only
     data, _ = json.JSONDecoder().raw_decode(text[text.find("{"):] if "{" in text else text)

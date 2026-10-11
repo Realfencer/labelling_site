@@ -322,4 +322,15 @@ export type RunInsight = {
 };
 
 /** GET /analyze/needed — is the analysis up to date for the eval set + base model (generation runs it first if not). */
-export type AnalyzeNeeded = { needed: boolean; reasons: string[]; frames: number; new_frames: number; est_max_usd: number; mode: GenMode };
+export type AnalyzeNeeded = {
+  needed: boolean;
+  reasons: string[];
+  frames: number;
+  new_frames: number;
+  /** Likely Gemini cost (measured average per call × the frames that need it) and the worst case. */
+  est_usd: number;
+  est_max_usd: number;
+  /** true once the cost ledger has real measurements */
+  measured?: boolean;
+  mode: GenMode;
+};
