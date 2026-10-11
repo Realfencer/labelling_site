@@ -131,6 +131,8 @@ CCTV_APPEARANCE = """CCTV / SURVEILLANCE CAMERA APPEARANCE (match the eval frame
   blur) — every frame of the eval set has its own camera look. In general: CCTV softness —
   fine texture, printed text and small objects are NOT resolved; visible sensor grain, strongest in shadows; mild
   compression; flat tone curve; slightly muted full color. Never photo-sharp; no HDR, no bokeh, no cinematic grading.
+  Compression shows as SMEARING and mushy shadows only — measured on the eval set: no visible 8×8 block grid, so never
+  paint blocky / pixelated macroblocks, even where a CAMERA LOOK mentions macroblocking.
 - NO OVERLAY TEXT: no timestamp, date, camera name or any other text."""
 
 DRINK_LOOK = """HOW THE DRINKS LOOK (hard — this is what makes the eval drinks hard for a detector; reproduce it):

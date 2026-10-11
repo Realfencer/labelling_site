@@ -49,7 +49,14 @@ def _describe_one(client, path: Path) -> dict | None:
     )
     text = (resp.text or "").strip()
     data, _ = json.JSONDecoder().raw_decode(text[text.find("{"):] if "{" in text else text)
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    um = getattr(resp, "usage_metadata", None)
+    if um is not None:  # kept for cost reporting
+        data["usage"] = {"input": int(getattr(um, "prompt_token_count", 0) or 0),
+                         "output": int(getattr(um, "candidates_token_count", 0) or 0)
+                         + int(getattr(um, "thoughts_token_count", 0) or 0)}
+    return data
 
 
 def _sig(path: Path) -> str:
