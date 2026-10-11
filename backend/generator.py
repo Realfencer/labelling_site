@@ -31,7 +31,15 @@ DEFAULT_RULES = {
     # 19 no trace). "pixels" = only frames with the signature are OpenAI.
     "platform": "ranges",
     "platform_openai_ranges": [[9245100, 9246900], [9199200, 9215100], [9150300, 9167400]],
+    # Every Platform frame up to this block is decided by the ranges (in = OpenAI, out = Gemini). Newer frames are
+    # decided automatically (auto_platform below) until the user adds / confirms a range.
+    "decided_through": 9253800,
 }
+# Newer frames: an OpenAI period runs from its first to its last frame with OpenAI's pixel signature, and closes
+# after AUTO_GAP frames without one. Measured on the history: inside the OpenAI periods the signature never goes
+# missing for more than 4 frames in a row; between periods there are 71-106 frames without it. Replaying this rule
+# reproduces the user's three periods within 1-3 frames at their edges (5 of 119 frames differ).
+AUTO_GAP = 8
 # Own images whose generator is known exactly (the Studio records its run's provider when it sends to Own):
 # {stem: "openai" | "gemini"}; wins over the day rule.
 OWN_REGISTRY = ROOT / "own_generator.json"
@@ -69,6 +77,8 @@ def save_rules(new: dict) -> dict:
         data["platform"] = new["platform"]
     if isinstance(new.get("platform_openai_ranges"), list):
         data["platform_openai_ranges"] = [[int(a), int(z)] for a, z in new["platform_openai_ranges"]]
+    if new.get("decided_through") is not None:
+        data["decided_through"] = int(new["decided_through"])
     RULES_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
     _rules = data
     return data
@@ -180,19 +190,22 @@ def of(item) -> str | None:
     """openai | gemini | None for a ChallengeRecord (fast: rules + cache lookups; pixels are read in the background)."""
     try:
         if item.source_type == "local":
-            stem = str(item.record.get("stem", ""))
-            known = own_registry().get(stem)
+            known = own_registry().get(str(item.record.get("stem", "")))
             if known:
                 return known
-            m = _OWN_DAY.search(stem)
-            if not m:
-                return None
-            return "openai" if f"{m.group(1)}-{m.group(2)}-{m.group(3)}" in rules()["own_openai_days"] else "gemini"
+            return "openai" if _own_day(item) in rules()["own_openai_days"] else "gemini"
         if not _is_beverage(item):
             return None
         block = int(item.block)
         if rules().get("platform") == "ranges":
-            return "openai" if any(a <= block <= z for a, z in rules()["platform_openai_ranges"]) else "gemini"
+            if any(a <= block <= z for a, z in rules()["platform_openai_ranges"]):
+                return "openai"
+            if block <= int(rules().get("decided_through") or 0):
+                return "gemini"
+            path = item.image_path
+            if path is not None and path.exists() and str(block) not in _load_cache():
+                _enqueue(str(block), path)  # its pixels feed the automatic period rule
+            return auto_platform(block)
         key = str(block)
         hit = _load_cache().get(key)
         path = item.image_path
@@ -205,19 +218,85 @@ def of(item) -> str | None:
         return None
 
 
-def platform_blocks() -> dict[str, str]:
-    """{block: openai | gemini} for every known Platform frame, under the current rule (ranges or pixels)."""
+def _own_day(item) -> str | None:
+    """The Own page's day of an image: file mtime, server local time (same as ReviewAppState._item_day_key)."""
+    from datetime import datetime
+
+    ns = item.record.get("_mtime_ns") if isinstance(item.record, dict) else None
+    try:
+        if ns:
+            return datetime.fromtimestamp(int(ns) / 1e9).strftime("%Y-%m-%d")
+        if item.image_path is not None:
+            return datetime.fromtimestamp(item.image_path.stat().st_mtime).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):
+        pass
+    return None
+
+
+_auto_memo: tuple[int, int, list[tuple[int, int]], int | None] | None = None
+
+
+def auto_periods() -> tuple[list[tuple[int, int]], int | None]:
+    """OpenAI periods among frames newer than decided_through: ([(first, last) closed periods], open period start).
+    A period stays open while fewer than AUTO_GAP frames have passed since its last signature frame."""
+    global _auto_memo
+    cut = int(rules().get("decided_through") or 0)
     with _lock:
-        cache = dict(_load_cache())
+        cache = _load_cache()
+        if _auto_memo and _auto_memo[0] == len(cache) and _auto_memo[1] == cut:
+            return _auto_memo[2], _auto_memo[3]
+        newer = sorted((int(k), v.get("gen")) for k, v in cache.items() if int(k) > cut)
+    periods: list[tuple[int, int]] = []
+    start = last = None
+    since = 0
+    for b, gen in newer:
+        if gen == "openai":
+            if start is None:
+                start = b
+            last, since = b, 0
+        elif start is not None:
+            since += 1
+            if since >= AUTO_GAP:
+                periods.append((start, last))
+                start = last = None
+    open_start = start
+    if start is not None and since >= AUTO_GAP:
+        periods.append((start, last))
+        open_start = None
+    with _lock:
+        _auto_memo = (len(cache), cut, periods, open_start)
+    return periods, open_start
+
+
+def auto_platform(block: int) -> str:
+    periods, open_start = auto_periods()
+    if any(a <= block <= z for a, z in periods) or (open_start is not None and block >= open_start):
+        return "openai"
+    return "gemini"
+
+
+def platform_gen(block: int) -> str:
+    """openai | gemini for a beverage Platform frame by block, under the current rule."""
     if rules().get("platform") == "ranges":
-        rr = rules()["platform_openai_ranges"]
-        return {k: ("openai" if any(a <= int(k) <= z for a, z in rr) else "gemini") for k in cache}
-    return {k: v.get("gen") for k, v in cache.items()}
+        if any(a <= block <= z for a, z in rules()["platform_openai_ranges"]):
+            return "openai"
+        return "gemini" if block <= int(rules().get("decided_through") or 0) else auto_platform(block)
+    hit = _load_cache().get(str(block))
+    return (hit or {}).get("gen") or "gemini"
+
+
+def platform_blocks() -> dict[str, str]:
+    """{block: openai | gemini} for every known Platform frame, under the current rule."""
+    with _lock:
+        keys = list(_load_cache())
+    return {k: platform_gen(int(k)) for k in keys}
 
 
 def status() -> dict:
     blocks = platform_blocks()
+    periods, open_start = auto_periods()
     with _lock:
-        return {"rules": rules(), "classified": len(blocks), "pending": len(_queued),
+        return {"rules": rules(), "auto_periods": periods, "auto_open_since": open_start,
+                "classified": len(blocks), "pending": len(_queued),
                 "openai": sum(1 for v in blocks.values() if v == "openai"),
                 "gemini": sum(1 for v in blocks.values() if v == "gemini")}
