@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -57,6 +59,38 @@ def _stretch_to_square(src: Path, dest: Path, size: int = SEND_SIZE) -> None:
         square_frame(im, size).save(dest, format="PNG", compress_level=1)
 
 
+# The labeler's registry of Own images whose generator is known exactly ({stem: "openai" | "gemini"}; read by
+# backend/generator.py — it wins over the "OpenAI days" rule).
+OWN_GENERATOR_REGISTRY = Path(__file__).resolve().parents[2] / "review_datasets" / "own_generator.json"
+
+
+def _run_provider(run_dir: Path) -> str | None:
+    for f in (run_dir / "batch" / "job.json", run_dir / "run_manifest.json"):
+        try:
+            meta = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        prov = meta.get("provider") or ("gemini" if str(meta.get("model", "")).startswith("gemini")
+                                        else "openai" if str(meta.get("model", "")).startswith(("gpt-image", "dall-e")) else None)
+        if prov in ("openai", "gemini"):
+            return prov
+    return None
+
+
+def _register_provider(run_dir: Path, stems: list[str]) -> None:
+    prov = _run_provider(run_dir)
+    if not prov or not stems or not OWN_GENERATOR_REGISTRY.parent.is_dir():
+        return
+    try:
+        data = json.loads(OWN_GENERATOR_REGISTRY.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data.update({st: prov for st in stems})
+    tmp = OWN_GENERATOR_REGISTRY.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(OWN_GENERATOR_REGISTRY)
+
+
 def send_run_to_labeler(
     run: str,
     filenames: list[str] | None = None,
@@ -100,6 +134,8 @@ def send_run_to_labeler(
         # Studio runs on the labeler's server: write straight into the Own pool (same names as an scp send).
         out_dir = Path(dest_root) / "images"
         out_dir.mkdir(parents=True, exist_ok=True)
+        # the labeler files each image under OpenAI or Gemini: record the run's provider BEFORE the images appear
+        _register_provider(run_dir, [Path(_dated_name(n, stamp)).stem for n in names])
         sent: list[str] = []
         total = len(names)
         for i, name in enumerate(names, 1):

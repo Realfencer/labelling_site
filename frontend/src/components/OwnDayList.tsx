@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronRight, CloudUpload, Loader2, Trash2 } from "lucide-react";
-import { api, type OwnDayRow, type OwnDaysResponse } from "../api";
+import { api, type OwnDayRow, type OwnDaysResponse, type OwnField } from "../api";
 import { cn } from "../lib/utils";
 
 type Props = {
+  /** OpenAI / Gemini images only (null = every image). */
+  field: OwnField | null;
+  onFieldChange: (field: OwnField | null) => void;
   onEnterDay: (date: string) => void | Promise<void>;
   busy?: boolean;
   /** Days ticked in the list (kept by the page so the toolbar's Ultralytics button can use them too). */
@@ -15,7 +18,7 @@ type Props = {
   onDeleteDays: (days: string[]) => Promise<void>;
 };
 
-export default function OwnDayList({ onEnterDay, busy = false, selected, onSelectedChange, onSendDays, onDeleteDays }: Props) {
+export default function OwnDayList({ field, onFieldChange, onEnterDay, busy = false, selected, onSelectedChange, onSendDays, onDeleteDays }: Props) {
   const [data, setData] = useState<OwnDaysResponse | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -40,7 +43,30 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
     void refresh();
   }, [refresh]);
 
-  const days: OwnDayRow[] = data?.days ?? [];
+  const allDays: OwnDayRow[] = data?.days ?? [];
+  // a field shows only its days, with that generator's counts
+  const days: OwnDayRow[] = useMemo(
+    () => (field ? allDays.filter((d) => (d.fields?.[field]?.total ?? 0) > 0).map((d) => ({ ...d, ...d.fields![field] })) : allDays),
+    [allDays, field],
+  );
+  const fieldTotals = useMemo(() => {
+    const out: Record<string, { images: number; days: number; done: number }> = {};
+    for (const key of ["all", "openai", "gemini"]) out[key] = { images: 0, days: 0, done: 0 };
+    for (const d of allDays) {
+      out.all.images += d.total;
+      out.all.days += 1;
+      out.all.done += d.done;
+      for (const g of ["openai", "gemini"] as const) {
+        const c = d.fields?.[g];
+        if (c?.total) {
+          out[g].images += c.total;
+          out[g].days += 1;
+          out[g].done += c.done;
+        }
+      }
+    }
+    return out;
+  }, [allDays]);
   const byDate = useMemo(() => new Map(days.map((d) => [d.date, d])), [days]);
   const sel = useMemo(() => selected.filter((d) => byDate.has(d)), [selected, byDate]);
   const sum = (list: string[], key: "total" | "done" | "new") => list.reduce((n, d) => n + (byDate.get(d)?.[key] ?? 0), 0);
@@ -89,6 +115,31 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
         </button>
       </div>
 
+      {allDays.length > 0 && (
+        <div className="grid gap-2 sm:grid-cols-3">
+          {(
+            [
+              [null, "All images", "border-slate-300 dark:border-slate-600", "border-slate-800 bg-slate-800 text-white dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900", fieldTotals.all],
+              ["openai", "OpenAI images", "border-sky-300 dark:border-sky-800", "border-sky-500 bg-sky-500 text-white", fieldTotals.openai],
+              ["gemini", "Gemini images", "border-violet-300 dark:border-violet-800", "border-violet-500 bg-violet-500 text-white", fieldTotals.gemini],
+            ] as const
+          ).map(([f, label, idle, active, t]) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => (onFieldChange(f), onSelectedChange([]))}
+              className={cn("rounded-xl border px-3 py-2 text-left transition", field === f ? active : cn(idle, "hover:border-violet-400"))}
+              title={f ? `Only the images ${f === "openai" ? "OpenAI" : "Gemini"} made, by day` : "Every Own image, by day"}
+            >
+              <div className="text-[13px] font-extrabold">{label}</div>
+              <div className={cn("text-[11px] tabular-nums", field === f ? "opacity-90" : "text-slate-500 dark:text-slate-400")}>
+                {t.images} images · {t.days} days · {t.done} done
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
       {days.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-[12px] dark:bg-slate-800/50">
           <label className="flex items-center gap-1.5 font-semibold">
@@ -105,12 +156,12 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
               type="button"
               disabled={sel.length === 0 || sum(sel, "done") === 0 || busy}
               onClick={() => onSendDays(sel)}
-              title="Send the Done images of the selected days to Ultralytics as one dataset"
+              title={field ? "Send the Done images of the selected days (whole days: OpenAI and Gemini) to Ultralytics as one dataset" : "Send the Done images of the selected days to Ultralytics as one dataset"}
               className="inline-flex items-center gap-1 rounded-md bg-rose-600 px-2.5 py-1 font-bold text-white hover:bg-rose-500 disabled:opacity-40"
             >
               <CloudUpload className="h-3.5 w-3.5" /> Send {sel.length || ""} {sel.length === 1 ? "day" : "days"} to Ultralytics
             </button>
-            <button
+            {!field && <button
               type="button"
               disabled={sel.length === 0 || busy || deleting}
               onClick={() => setConfirm(sel)}
@@ -118,7 +169,7 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
               className="inline-flex items-center gap-1 rounded-md border border-rose-400 px-2.5 py-1 font-bold text-rose-600 hover:bg-rose-500/10 disabled:opacity-40 dark:text-rose-300"
             >
               <Trash2 className="h-3.5 w-3.5" /> Delete {sel.length || ""}
-            </button>
+            </button>}
           </div>
         </div>
       )}
@@ -157,7 +208,7 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
         </div>
       ) : days.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-sm text-slate-500 dark:text-slate-400">
-          <p>No Own images yet.</p>
+          <p>{field && allDays.length ? `No ${field === "openai" ? "OpenAI" : "Gemini"} images in Own.` : "No Own images yet."}</p>
           <p className="text-xs text-slate-400">Upload or HF-import images, then pick a day here.</p>
         </div>
       ) : (
@@ -212,7 +263,7 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
                     >
                       <CloudUpload className="h-4 w-4" />
                     </button>
-                    <button
+                    {!field && <button
                       type="button"
                       disabled={busy || deleting}
                       onClick={() => setConfirm([row.date])}
@@ -220,7 +271,7 @@ export default function OwnDayList({ onEnterDay, busy = false, selected, onSelec
                       className="rounded p-1.5 text-slate-400 hover:bg-rose-500/10 hover:text-rose-500 disabled:opacity-25"
                     >
                       <Trash2 className="h-4 w-4" />
-                    </button>
+                    </button>}
                   </div>
                 </li>
               );

@@ -16,6 +16,7 @@ import "./index.css";
  * /t/<topic>/own                  Own workspace (as you left it)
  * /t/<topic>/own/days             Own: the day-selection page
  * /t/<topic>/own/days/2026-10-07  Own: that day (every day has its own link)
+ * /t/<topic>/own/openai/days[/…]  Own: only the images OpenAI made (…/own/gemini/… for Gemini)
  * (?workspace=own|platform on /t/<topic> keeps working.) One route with a splat, so moving between these
  * does not remount the labeler.
  */
@@ -27,10 +28,13 @@ function LabelerRoute() {
   const pathOwn = parts[0] === "own";
   const q = searchParams.get("workspace");
   const workspace = pathOwn ? "own" : q === "own" || q === "platform" ? q : undefined;
-  const dayPart = pathOwn && parts[1] === "days" ? parts[2] : undefined;
+  // /own/<openai|gemini>/days[/<date>] = one generator's images; /own/days[/<date>] = all
+  const field = pathOwn && (parts[1] === "openai" || parts[1] === "gemini") ? parts[1] : undefined;
+  const after = pathOwn ? parts.slice(field ? 2 : 1) : [];
+  const dayPart = after[0] === "days" ? after[1] : undefined;
   const day = dayPart && /^\d{4}-\d{2}-\d{2}$/.test(dayPart) ? dayPart : undefined;
-  const daysPage = pathOwn && parts[1] === "days" && !day;
-  return <App topicSlug={slug} initialWorkspace={workspace} initialOwnDay={day} ownDaysPage={daysPage} />;
+  const daysPage = pathOwn && after[0] === "days" && !day;
+  return <App topicSlug={slug} initialWorkspace={workspace} initialOwnDay={day} initialOwnField={field} ownDaysPage={daysPage} />;
 }
 
 function Root() {

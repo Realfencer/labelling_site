@@ -241,10 +241,9 @@ def studio_gt_image(block: int, kind: str = "thumb") -> Response:
 @router.get("/api/studio-admin/generators")
 def studio_generators() -> dict:
     """{block: openai | gemini} for every classified Platform frame (Studio badges / filters by source)."""
-    st = generator.status()
-    with generator._lock:
-        blocks = {k: v.get("gen") for k, v in generator._load_cache().items()}
-    return {"blocks": blocks, "openai": st["openai"], "gemini": st["gemini"]}
+    blocks = generator.platform_blocks()
+    return {"blocks": blocks, "openai": sum(v == "openai" for v in blocks.values()),
+            "gemini": sum(v == "gemini" for v in blocks.values())}
 
 
 class SyncGtBody(BaseModel):

@@ -122,6 +122,8 @@ class ReviewAppState:
         self.review_mode = "challenge"
         # Own calendar-day cluster: None = day-list mode (no filmstrip payload).
         self.own_day: str | None = None
+        # Own "field": only the images one generator made (openai | gemini), None = every image of the day
+        self.own_field: str | None = None
         self.own_cursor_item_key: str | None = None
         self.platform_cursor_item_key: str | None = None
         self.active_skill: core.Skill | None = None
@@ -211,49 +213,53 @@ class ReviewAppState:
         # changes when the pool list is rebuilt, so cache it per (day, pool object, size).
         cache = self._day_items_cache
         pool = self.local_items
-        if cache is not None and cache[0] == day and cache[1] is pool and cache[2] == len(pool):
+        key = (day, self.own_field)
+        if cache is not None and cache[0] == key and cache[1] is pool and cache[2] == len(pool):
             return cache[3]
         out = [item for item in pool if self._item_day_key(item) == day]
-        self._day_items_cache = (day, pool, len(pool), out)
+        if self.own_field:
+            from . import generator
+
+            out = [item for item in out if generator.of(item) == self.own_field]
+        self._day_items_cache = (key, pool, len(pool), out)
         return out
 
     def list_own_days(self) -> dict:
-        """Lightweight Own day clusters (mtime calendar day, server local)."""
+        """Lightweight Own day clusters (mtime calendar day, server local), with per-generator counts
+        ("fields": openai / gemini / other) so the page can show OpenAI days and Gemini days."""
+        from . import generator
+
         self.reload_own_pool(force=False, dedupe=False)
-        buckets: dict[str, dict[str, int]] = {}
+        buckets: dict[str, dict] = {}
+
+        def empty() -> dict:
+            return {"total": 0, "new": 0, "sam3": 0, "done": 0}
+
         for item in self.local_items:
             if not item.loaded:
                 continue
             day = self._item_day_key(item)
             if not day:
                 continue
-            row = buckets.setdefault(day, {"total": 0, "new": 0, "sam3": 0, "done": 0})
-            row["total"] += 1
-            if item.reviewed:
-                row["done"] += 1
-            elif getattr(item, "has_label", False):
-                row["sam3"] += 1
-            else:
-                row["new"] += 1
-        days = [
-            {
-                "date": date,
-                "total": row["total"],
-                "new": row["new"],
-                "sam3": row["sam3"],
-                "done": row["done"],
-            }
-            for date, row in sorted(buckets.items(), reverse=True)
-        ]
+            row = buckets.setdefault(day, {**empty(), "fields": {}})
+            gen = generator.of(item) or "other"
+            sub = row["fields"].setdefault(gen, empty())
+            kind = "done" if item.reviewed else "sam3" if getattr(item, "has_label", False) else "new"
+            for r in (row, sub):
+                r["total"] += 1
+                r[kind] += 1
+        days = [{"date": date, **row} for date, row in sorted(buckets.items(), reverse=True)]
         return {
             "days": days,
             "timezone": self._server_timezone_label(),
             "own_day": self.own_day,
+            "own_field": self.own_field,
             "today": self._server_local_today(),
         }
 
-    def set_own_day(self, date: str | None, *, prefer_item_key: str | None = None) -> None:
-        """Enter an Own calendar-day cluster, or None to return to the day list."""
+    def set_own_day(self, date: str | None, *, prefer_item_key: str | None = None, field: str | None = None) -> None:
+        """Enter an Own calendar-day cluster (optionally only one generator's images), or None for the day list."""
+        self.own_field = field if field in ("openai", "gemini") else None
         if self.review_mode != "local":
             self.reload_own_pool(force=False, dedupe=False)
             self.review_mode = "local"
@@ -271,7 +277,7 @@ class ReviewAppState:
         self.reload_own_pool(force=False, dedupe=False)
         items = self._local_items_for_day(day)
         if not items:
-            raise ValueError(f"No Own images on {day}")
+            raise ValueError(f"No Own {self.own_field + ' ' if self.own_field else ''}images on {day}")
         self.own_day = day
         key = prefer_item_key or self._saved_cursor_item_key("local")
         if key and self._apply_cursor_item_key(key):
@@ -6052,6 +6058,7 @@ class ReviewAppState:
                 "review_mode": self.review_mode,
                 "workspace": "platform" if self.review_mode == "challenge" else "own",
                 "own_day": self.own_day if self.review_mode == "local" else None,
+                "own_field": self.own_field if self.review_mode == "local" else None,
                 "project_id": self.project_id,
                 "project_root": str(self.project_root),
                 "session_id": self.session_id,

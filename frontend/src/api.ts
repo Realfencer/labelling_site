@@ -238,12 +238,13 @@ export const api = {
     request<AppState>("/own/refresh", { method: "POST", timeoutMs: ENTER_TOPIC_TIMEOUT_MS }),
   listOwnDays: () =>
     request<OwnDaysResponse>("/own/days", { timeoutMs: ENTER_TOPIC_TIMEOUT_MS }),
-  setOwnDay: (date: string | null, preferItemKey?: string | null) =>
+  setOwnDay: (date: string | null, preferItemKey?: string | null, field?: OwnField | null) =>
     request<AppState>("/own/day", {
       method: "POST",
       body: JSON.stringify({
         date,
         ...(preferItemKey ? { prefer_item_key: preferItemKey } : {}),
+        ...(field ? { field } : {}),
       }),
       timeoutMs: ENTER_TOPIC_TIMEOUT_MS,
     }),
@@ -1926,18 +1927,21 @@ export type HfCompareResultRow = {
   pack_dir?: string | null;
 };
 
-export type OwnDayRow = {
+/** Own "field": the images one generator made. */
+export type OwnField = "openai" | "gemini";
+export type OwnDayCounts = { total: number; new: number; sam3?: number; done: number };
+
+export type OwnDayRow = OwnDayCounts & {
   date: string;
-  total: number;
-  new: number;
-  sam3?: number;
-  done: number;
+  /** Per generator ("openai" / "gemini" / "other"). */
+  fields?: Record<string, OwnDayCounts>;
 };
 
 export type OwnDaysResponse = {
   days: OwnDayRow[];
   timezone: string;
   own_day?: string | null;
+  own_field?: OwnField | null;
   today?: string;
 };
 

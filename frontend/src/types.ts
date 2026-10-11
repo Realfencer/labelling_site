@@ -84,6 +84,8 @@ export interface AppState {
   workspace?: "platform" | "own";
   /** Own calendar-day cluster (YYYY-MM-DD); null/undefined = day-list mode. */
   own_day?: string | null;
+  /** Own day opened for one generator's images only. */
+  own_field?: "openai" | "gemini" | null;
   project_id: string;
   project_root: string;
   session_id?: string | null;

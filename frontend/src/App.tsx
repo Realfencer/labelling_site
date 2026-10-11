@@ -19,7 +19,7 @@ import {
   Loader2,
   Send,
 } from "lucide-react";
-import { api, workspaceFromState, HttpError, type WorkspaceMode } from "./api";
+import { api, workspaceFromState, HttpError, type OwnField, type WorkspaceMode } from "./api";
 import TeamBar from "./components/TeamBar";
 import ImageStatusBar from "./components/ImageStatusBar";
 import StripStatusBar, { STRIP_CODE, type StripCodes } from "./components/StripStatusBar";
@@ -991,12 +991,15 @@ export default function App({
   topicSlug,
   initialWorkspace,
   initialOwnDay,
+  initialOwnField,
   ownDaysPage = false,
 }: {
   topicSlug: string;
   initialWorkspace?: WorkspaceMode;
   /** /t/<topic>/own/days/<date>: open this Own day right away. */
   initialOwnDay?: string;
+  /** /t/<topic>/own/<openai|gemini>/…: only that generator's Own images. */
+  initialOwnField?: OwnField;
   /** /t/<topic>/own/days: show the day-selection page (not a day). */
   ownDaysPage?: boolean;
 }) {
@@ -1081,6 +1084,28 @@ export default function App({
   const location = useLocation();
   const initialOwnDayRef = useRef(initialOwnDay);
   initialOwnDayRef.current = initialOwnDay;
+  // Own "field" (OpenAI / Gemini images, null = all): chosen on the day page, kept while you open and leave days
+  const [ownField, setOwnFieldState] = useState<OwnField | null>(() => {
+    if (initialOwnField) return initialOwnField;
+    if (initialWorkspace === "own") return null; // a link without a field means "all"
+    try {
+      const v = localStorage.getItem("labeler_own_field");
+      return v === "openai" || v === "gemini" ? v : null;
+    } catch {
+      return null;
+    }
+  });
+  const ownFieldRef = useRef(ownField);
+  ownFieldRef.current = ownField;
+  const setOwnField = (f: OwnField | null) => {
+    ownFieldRef.current = f;
+    setOwnFieldState(f);
+    try {
+      localStorage.setItem("labeler_own_field", f || "");
+    } catch {
+      /* private mode */
+    }
+  };
   const ownDaysPageRef = useRef(ownDaysPage);
   ownDaysPageRef.current = ownDaysPage;
   const enterOwnDayRef = useRef<((date: string) => Promise<void>) | null>(null);
@@ -2115,7 +2140,7 @@ export default function App({
       setModeBusy(true);
       try {
         const preferKey = topicSlug ? readOwnCursor(topicSlug) : null;
-        const s = await api.setOwnDay(date, preferKey);
+        const s = await api.setOwnDay(date, preferKey, ownFieldRef.current);
         workspacePoolsRef.current.own = s;
         applyState(s);
         const preferIdx =
@@ -2165,17 +2190,19 @@ export default function App({
   leaveOwnDayRef.current = leaveOwnDay;
 
   // The address bar always shows where you are, so a link can be sent to someone:
-  //   /t/<topic>  ·  /t/<topic>/own/days  ·  /t/<topic>/own/days/<date>
+  //   /t/<topic>  ·  /t/<topic>/own[/<openai|gemini>]/days  ·  …/days/<date>
   useEffect(() => {
     if (!urlSync || !appState) return;
     const ws = workspaceFromState(appState);
     const wantPath =
-      ws === "own" ? `/t/${topicSlug}/own/days${appState.own_day ? `/${appState.own_day}` : ""}` : `/t/${topicSlug}`;
+      ws === "own"
+        ? `/t/${topicSlug}/own${ownField ? `/${ownField}` : ""}/days${appState.own_day ? `/${appState.own_day}` : ""}`
+        : `/t/${topicSlug}`;
     const wantSearch = ws === "own" ? "" : "?workspace=platform";
     if (location.pathname !== wantPath || location.search !== wantSearch) {
       navigate({ pathname: wantPath, search: wantSearch }, { replace: true });
     }
-  }, [urlSync, appState?.own_day, appState?.workspace, appState?.review_mode, topicSlug, location.pathname, location.search, navigate]);
+  }, [urlSync, appState?.own_day, appState?.workspace, appState?.review_mode, ownField, topicSlug, location.pathname, location.search, navigate]);
 
   /** Own day list: delete every image of these days (the list page shows its own confirmation). */
   const deleteOwnDaysFromList = useCallback(
@@ -4370,7 +4397,15 @@ export default function App({
       <TeamBar
         total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
         reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
-        scopeLabel={dayScope ? `Day ${dayScope.day}` : !isPlatform ? "All Own days" : undefined}
+        scopeLabel={
+          dayScope
+            ? `Day ${dayScope.day}${appState.own_field ? ` · ${appState.own_field === "openai" ? "OpenAI" : "Gemini"}` : ""}`
+            : !isPlatform
+              ? ownField
+                ? `${ownField === "openai" ? "OpenAI" : "Gemini"} Own days`
+                : "All Own days"
+              : undefined
+        }
         perUser={dayScope?.perUser}
         onLogout={() => {
           void api.logout().finally(() => window.location.reload());
@@ -4378,6 +4413,8 @@ export default function App({
       />
       {ownDayListMode ? (
         <OwnDayList
+          field={ownField}
+          onFieldChange={setOwnField}
           onEnterDay={enterOwnDay}
           busy={modeBusy}
           selected={daySel}

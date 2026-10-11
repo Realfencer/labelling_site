@@ -382,6 +382,7 @@ class OwnDeleteRangeRequest(BaseModel):
 class OwnDayRequest(BaseModel):
     date: str | None = None
     prefer_item_key: str | None = None
+    field: str | None = Field(default=None, pattern="^(openai|gemini)$")
 
 
 class OwnHfImportStartBody(BaseModel):
@@ -882,7 +883,7 @@ def refresh_own_pool(state: AppStateDep) -> dict:
         # Stay on current day if set; otherwise day-list mode.
         if state.own_day:
             try:
-                state.set_own_day(state.own_day)
+                state.set_own_day(state.own_day, field=state.own_field)
             except ValueError:
                 state.own_day = None
                 state.current_index = -1
@@ -906,7 +907,7 @@ def list_own_days(state: AppStateDep) -> dict:
 @app.post("/api/own/day")
 def set_own_day(body: OwnDayRequest, state: AppStateDep) -> dict:
     try:
-        state.set_own_day(body.date, prefer_item_key=body.prefer_item_key)
+        state.set_own_day(body.date, prefer_item_key=body.prefer_item_key, field=body.field)
         return state.to_public_state(lite=True, boxes_window=8)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
