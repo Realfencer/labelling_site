@@ -148,6 +148,7 @@ export const studio = {
   runs: () => get<{ runs: Run[] }>("/gen/runs"),
   insight: (run: string) => get<RunInsight>(`/gen/insight?run=${encodeURIComponent(run)}`, 60_000),
   runImages: (run: string) => get<{ run: string; images: GenItem[] }>(`/gen/images?run=${encodeURIComponent(run)}`),
+  deleteRuns: (runs: string[]) => post<{ deleted: string[]; images: number }>("/gen/delete-runs", { runs, confirm: "DELETE" }, 120_000),
   deleteImages: (run: string, filenames: string[]) =>
     post<{ deleted: number; remaining: number }>("/gen/delete-images", { run, filenames }),
   uploadHf: (run: string | null) =>

@@ -910,6 +910,49 @@ def api_gen_delete_images(body: DeleteImagesBody) -> dict:
         raise HTTPException(404, str(e)) from e
 
 
+class DeleteRunsBody(BaseModel):
+    runs: list[str]
+    confirm: str = ""
+
+
+@app.post("/api/gen/delete-runs")
+def api_gen_delete_runs(body: DeleteRunsBody) -> dict:
+    """Delete whole runs from the Studio's history (their folders, permanently). Images already sent to Own or
+    uploaded to Hugging Face are not touched. Refused for a run still generating / labelling / sending, and for a
+    batch still pending at the provider (it may already be paid: collect or cancel it first)."""
+    import shutil
+
+    from app.gen_common import list_runs
+
+    if (body.confirm or "").strip().upper() != "DELETE":
+        raise HTTPException(400, 'Type "DELETE" to delete runs')
+    names = list(dict.fromkeys(Path(r).name for r in body.runs if r))
+    if not names:
+        raise HTTPException(400, "No runs selected")
+    info = {r["name"]: r for r in list_runs()}
+    gen, send = sess.get_gen_job(), sess.get_send_job()
+    busy = {Path(gen.get("run_dir") or "").name} if gen.get("status") == "running" else set()
+    if send.get("status") == "running":
+        busy.add(str(send.get("run") or ""))
+    problems = []
+    for n in names:
+        d = GENERATED_ROOT / n
+        if not d.is_dir() or d.parent != GENERATED_ROOT:
+            problems.append(f"{n}: not found")
+        elif n in busy:
+            problems.append(f"{n}: still being generated / labelled / sent")
+        elif (info.get(n) or {}).get("pending"):
+            problems.append(f"{n}: its batch is still pending at the provider — collect or cancel it first")
+    if problems:
+        raise HTTPException(409, "; ".join(problems))
+    images = 0
+    for n in names:
+        d = GENERATED_ROOT / n
+        images += sum(1 for _ in (d / "images").glob("*")) if (d / "images").is_dir() else 0
+        shutil.rmtree(d)
+    return {"deleted": names, "images": images}
+
+
 @app.post("/api/gen/autolabel")
 def api_gen_autolabel(body: RunActionBody) -> dict:
     """Replace a run's labels with the best detector's predictions (runs made before auto-labelling)."""

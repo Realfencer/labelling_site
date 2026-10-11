@@ -440,7 +440,10 @@ export default function Results() {
 
 /** Compact run selector: the current run + ‹ › + a dropdown of every run. */
 function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPick: (r: string) => void }) {
+  const st = useStudio();
   const [open, setOpen] = useState(false);
+  const [del, setDel] = useState<Set<string>>(new Set()); // runs ticked for deletion
+  const [ask, setAsk] = useState<string[] | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const i = runs.findIndex((r) => r.name === active);
   const cur = runs[i];
@@ -450,6 +453,14 @@ function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPi
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [open]);
+  useEffect(() => setDel((d) => new Set([...d].filter((n) => runs.some((r) => r.name === n)))), [runs]);
+  const tick = (n: string) =>
+    setDel((d) => {
+      const x = new Set(d);
+      if (x.has(n)) x.delete(n);
+      else x.add(n);
+      return x;
+    });
   const line = (r: Run) => (
     <>
       <span className={cn("h-2 w-2 shrink-0 rounded-full", r.pending ? "animate-pulse bg-amber-500" : r.mode === "final" ? "bg-emerald-500" : "bg-sky-500")} />
@@ -459,6 +470,7 @@ function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPi
       <span className="text-slate-500">· {(r.provider || "openai") === "gemini" ? "Gemini" : "OpenAI"}</span>
     </>
   );
+  const asking = (ask || []).map((n) => runs.find((r) => r.name === n)).filter(Boolean) as Run[];
   return (
     <div ref={ref} className="relative flex items-center gap-1">
       <button type="button" disabled={i <= 0} onClick={() => onPick(runs[i - 1].name)} className="rounded-md p-1 text-slate-500 hover:bg-slate-100 disabled:opacity-30 dark:hover:bg-slate-800" title="Newer run">
@@ -473,22 +485,76 @@ function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPi
         <ChevronRight className="h-4 w-4" />
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-30 mt-1 max-h-[60vh] w-[420px] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-2xl dark:border-slate-700 dark:bg-ink-900">
-          {runs.map((r) => (
-            <button
-              key={r.name}
-              type="button"
-              onClick={() => (onPick(r.name), setOpen(false))}
-              className={cn("flex w-full flex-wrap items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[12px]", r.name === active ? "bg-violet-500/15" : "hover:bg-slate-100 dark:hover:bg-slate-800")}
-              title={r.note || r.name}
-            >
-              {line(r)}
-              {r.label && <Chip tone="violet">{r.label}</Chip>}
-              {r.near_copies > 0 && <Chip tone="amber">{r.near_copies} near</Chip>}
-              {(r.camera_drift ?? 0) > 0 && <Chip tone="rose">{r.camera_drift} drift</Chip>}
+        <div className="absolute left-0 top-full z-30 mt-1 flex max-h-[65vh] w-[470px] flex-col rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-ink-900">
+          <div className="min-h-0 flex-1 overflow-y-auto p-1">
+            {runs.map((r) => (
+              <div key={r.name} className={cn("group flex items-center gap-1 rounded-lg pl-1.5 pr-1", r.name === active ? "bg-violet-500/15" : del.has(r.name) ? "bg-rose-500/10" : "hover:bg-slate-100 dark:hover:bg-slate-800")}>
+                <input type="checkbox" checked={del.has(r.name)} onChange={() => tick(r.name)} disabled={r.pending} title={r.pending ? "Still generating at the provider" : "Tick to delete"} className="accent-rose-500" />
+                <button type="button" onClick={() => (onPick(r.name), setOpen(false))} className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 px-1 py-1.5 text-left text-[12px]" title={r.note || r.name}>
+                  {line(r)}
+                  {r.label && <Chip tone="violet">{r.label}</Chip>}
+                  {r.near_copies > 0 && <Chip tone="amber">{r.near_copies} near</Chip>}
+                  {(r.camera_drift ?? 0) > 0 && <Chip tone="rose">{r.camera_drift} drift</Chip>}
+                </button>
+                {!r.pending && (
+                  <button type="button" onClick={() => setAsk([r.name])} className="rounded p-1 text-slate-400 opacity-0 transition hover:bg-rose-500/10 hover:text-rose-500 group-hover:opacity-100" title="Delete this run">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 px-2 py-1.5 text-[11px] dark:border-slate-700">
+            <span className="text-slate-500">Select</span>
+            <button type="button" className="font-bold text-violet-600 hover:underline dark:text-violet-300" onClick={() => setDel(new Set())}>none</button>
+            <button type="button" className="font-bold text-violet-600 hover:underline dark:text-violet-300" onClick={() => setDel(new Set(runs.filter((r) => r.mode !== "final" && !r.pending).map((r) => r.name)))}>
+              all tests
             </button>
-          ))}
+            <button type="button" className="font-bold text-violet-600 hover:underline dark:text-violet-300" onClick={() => setDel(new Set(runs.filter((r) => !r.pending).map((r) => r.name)))}>all</button>
+            <button
+              type="button"
+              disabled={!del.size}
+              onClick={() => setAsk([...del])}
+              className="ml-auto inline-flex items-center gap-1 rounded-md bg-rose-600 px-2.5 py-1 font-bold text-white hover:bg-rose-500 disabled:opacity-30"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Delete {del.size || ""} {del.size === 1 ? "run" : "runs"}
+            </button>
+          </div>
         </div>
+      )}
+      {ask && asking.length > 0 && (
+        <Confirm
+          title={`Delete ${asking.length} ${asking.length === 1 ? "run" : "runs"}?`}
+          danger
+          typeToConfirm="DELETE"
+          confirmLabel={`Delete ${asking.reduce((n, r) => n + r.count, 0)} images`}
+          onCancel={() => setAsk(null)}
+          onConfirm={async () => {
+            try {
+              const res = await studio.deleteRuns(asking.map((r) => r.name));
+              st.setToast({ kind: "ok", text: `Deleted ${res.deleted.length} ${res.deleted.length === 1 ? "run" : "runs"} (${res.images} images).` });
+              setDel(new Set());
+              setAsk(null);
+              await st.loadData();
+            } catch (e) {
+              st.setToast({ kind: "error", text: errText(e) });
+              setAsk(null);
+            }
+          }}
+        >
+          <ul className="max-h-40 space-y-0.5 overflow-y-auto text-[12px]">
+            {asking.map((r) => (
+              <li key={r.name} className="flex flex-wrap items-center gap-1.5">
+                {line(r)}
+                {r.label && <Chip tone="violet">{r.label}</Chip>}
+              </li>
+            ))}
+          </ul>
+          <p>
+            Their images, labels and batch files are removed from the Studio for good. Images already <b>sent to Own</b> stay in Own
+            {asking.some((r) => r.mode === "final") ? <>, and Final runs already <b>uploaded to Hugging Face</b> stay there</> : null}.
+          </p>
+        </Confirm>
       )}
     </div>
   );
