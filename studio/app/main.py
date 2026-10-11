@@ -464,6 +464,69 @@ def api_analyze(body: AnalyzeBody) -> dict:
         raise HTTPException(400, str(e)) from e
 
 
+class GenModeBody(BaseModel):
+    mode: str = Field(..., pattern="^(openai|gemini)$")
+
+
+@app.post("/api/gen-mode")
+def api_gen_mode(body: GenModeBody) -> dict:
+    """Switch the image provider. No re-analysis: the analysis (base-model errors, prompts) is the same for both."""
+    sess.save_session({**sess.load_session(), "gen_mode": body.mode})
+    return {"gen_mode": body.mode}
+
+
+# measured: Gemini camera-look description $0.0047/frame (19 frames, $0.089); scene tags ~$0.002/frame;
+# describing the base model's misses $0.01-0.02 per frame with misses
+_COST_LOOK, _COST_SCENE, _COST_MISSES = 0.005, 0.002, 0.02
+
+
+@app.get("/api/analyze/needed")
+def api_analyze_needed() -> dict:
+    """Is the analysis up to date for the current eval set and base model? Generation runs it first when not."""
+    from app.config import get_settings
+    from app.model_errors import detector, weights_key
+
+    s = sess.load_session()
+    out_dir = Path(s.get("out_dir") or sess.DEFAULT_OUT)
+    ds = Path(s.get("dataset") or sess.DEFAULT_DATASET)
+    mode = s.get("gen_mode") or "openai"
+    frames = {p.name for p in (ds / "images").glob("*") if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")}
+
+    def read(name: str) -> dict | list:
+        try:
+            return json.loads((out_dir / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    analysed = {r.get("filename") for r in (read("score_records.json") or [])}
+    reasons = []
+    new = frames - analysed
+    if not analysed:
+        reasons.append("the eval set has not been analysed yet")
+    elif new or (analysed - frames):
+        reasons.append(f"the eval set changed ({len(new)} new frame{'s' if len(new) != 1 else ''}"
+                       f"{f', {len(analysed - frames)} removed' if analysed - frames else ''})")
+    errors = read("model_errors.json") or {}
+    model_changed = False
+    if get_settings().detector_enabled(mode):
+        try:
+            key = weights_key(detector(mode)["path"])
+        except Exception:  # noqa: BLE001
+            key = None
+        if key and errors.get("weights_key") != key:
+            model_changed = True
+            reasons.append("the base model changed" if errors else "the base model's errors have not been mined yet")
+    if not (out_dir / "gen_package" / "manifest.csv").exists():
+        reasons.append("no generation package yet")
+    looks, scene = read("source_look_caption.json") or {}, read("source_scene.json") or {}
+    n_look = len([f for f in frames if f not in looks])
+    n_scene = len([f for f in frames if f not in scene])
+    n_miss = len(frames) if model_changed else len(new)
+    cost = round(n_look * _COST_LOOK + n_scene * _COST_SCENE + n_miss * _COST_MISSES, 2)
+    return {"needed": bool(reasons), "reasons": reasons, "frames": len(frames), "new_frames": len(new),
+            "est_max_usd": cost, "mode": mode}
+
+
 @app.get("/api/summary")
 def api_summary() -> dict:
     path = ANALYSIS / "score_summary.json"

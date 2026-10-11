@@ -319,3 +319,6 @@ export type RunInsight = {
   labels: Record<string, LabelBox[]>;
   label_source: "detector" | "copied_from_source";
 };
+
+/** GET /analyze/needed — is the analysis up to date for the eval set + base model (generation runs it first if not). */
+export type AnalyzeNeeded = { needed: boolean; reasons: string[]; frames: number; new_frames: number; est_max_usd: number; mode: GenMode };

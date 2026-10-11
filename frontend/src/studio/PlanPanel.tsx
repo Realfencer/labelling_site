@@ -32,7 +32,7 @@ export default function PlanPanel() {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 2xl:grid-cols-[1.4fr_1fr]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <SourceCards sources={st.sources} selected={selected?.source_image || ""} onPick={st.pickSource} pkg={st.pkg} />
         <WrongPanel source={selected} errors={st.errors} />
       </div>
@@ -65,6 +65,8 @@ export default function PlanPanel() {
 function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSource[]; selected: string; onPick: (s: string) => void; pkg: Package | null }) {
   const st = useStudio();
   const [showAll, setShowAll] = useState(false);
+  const [size, setSize] = useState<"S" | "M" | "L">(() => (localStorage.getItem("studio_plan_size") as "S" | "M" | "L") || "M");
+  const px = { S: 150, M: 210, L: 300 }[size];
   const last = useRef<number | null>(null);
   const ticked = useMemo(() => new Set(st.finalSel ?? sources.map((s) => s.source_image)), [st.finalSel, sources]);
   const set = (names: Iterable<string>) => {
@@ -117,8 +119,21 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
               only with misses ({withMisses.length})
             </button>
             <span className="text-slate-400">Shift+click a box to tick a run of cards</span>
+            <span className="ml-auto flex overflow-hidden rounded-md border border-slate-300 text-[10px] font-bold dark:border-slate-600">
+              {(["S", "M", "L"] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => (setSize(k), localStorage.setItem("studio_plan_size", k))}
+                  className={cn("px-2 py-0.5", size === k ? "bg-violet-600 text-white" : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700")}
+                  title="Card size"
+                >
+                  {k}
+                </button>
+              ))}
+            </span>
           </div>
-          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 2xl:grid-cols-8">
+          <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${px}px, 1fr))` }}>
             {shown.map((s, i) => {
               const on = ticked.has(s.source_image);
               return (
@@ -135,7 +150,7 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
                   )}
                 >
                   <div className="relative">
-                    <img src={img.dataset(s.source_image, 320)} alt={s.source_image} loading="lazy" className="aspect-square w-full bg-black object-cover" />
+                    <img src={img.dataset(s.source_image, px > 220 ? 480 : 320)} alt={s.source_image} loading="lazy" className="aspect-square w-full bg-black object-cover" />
                     <button
                       type="button"
                       onClick={(e) => (e.stopPropagation(), toggle(i, e.shiftKey))}
@@ -149,7 +164,7 @@ function SourceCards({ sources, selected, onPick, pkg }: { sources: PackageSourc
                     </button>
                     {s.detector_errors > 0 && <span className="absolute right-1 top-1 rounded bg-rose-600 px-1 text-[9px] font-bold text-white">{s.detector_errors} err</span>}
                   </div>
-                  <div className="px-1 py-0.5 text-[9px] leading-tight">
+                  <div className="px-1.5 py-1 text-[11px] leading-tight">
                     <div className="truncate font-mono">{s.source_image.replace(/\.png$/, "")}</div>
                     <div className="truncate text-slate-400">{s.regimes.split("|").slice(0, 2).join(", ")}</div>
                   </div>

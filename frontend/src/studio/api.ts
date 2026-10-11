@@ -1,5 +1,6 @@
 import type {
   AnalyzeJob,
+  AnalyzeNeeded,
   CkptJob,
   ClearPreview,
   GtCandidate,
@@ -90,6 +91,8 @@ export const studio = {
   health: () => get<Health>("/health", 30_000),
   analyzeJob: () => get<AnalyzeJob>("/job"),
   analyze: (mode: GenMode) => post<AnalyzeJob>("/analyze", { mode }),
+  analyzeNeeded: () => get<AnalyzeNeeded>("/analyze/needed", 30_000),
+  setMode: (mode: GenMode) => post<{ gen_mode: GenMode }>("/gen-mode", { mode }),
   summary: () => get<Summary>("/summary"),
   galleries: () => get<Record<string, Gallery>>("/galleries"),
   overlaps: () => get<Record<string, Gallery>>("/overlaps"),

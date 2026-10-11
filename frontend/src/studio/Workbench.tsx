@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Bot, Check, ChevronDown, DatabaseZap, FlaskConical, FolderUp, Images, Loader2, Rocket, ScanSearch, Sparkles, Upload, X } from "lucide-react";
 import { cn } from "../lib/utils";
@@ -6,7 +6,7 @@ import { timeAgo } from "../store/useTeam";
 import { img, studio } from "./api";
 import { useStudio } from "./store";
 import { ImagePickerModal, type PickItem } from "../components/ImagePicker";
-import type { GenMode, GtCandidate, SwitchName } from "./types";
+import type { AnalyzeNeeded, GenMode, GtCandidate, SwitchName } from "./types";
 import { Btn, Confirm, errText, Progress } from "./ui";
 
 /** $ per 1024² image (OpenAI Batch API: low / medium / high). */
@@ -99,7 +99,6 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
   const st = useStudio();
   const [open, toggle] = useOpen("evalset", false);
   const [latest, setLatest] = useState(110);
-  const [reanalyze, setReanalyze] = useState(true);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (st.status?.gt_images) setLatest(st.status.gt_images);
@@ -111,15 +110,10 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
   const sync = async (keys?: string[]) => {
     setBusy(true);
     try {
-      const r = await studio.syncGt(reanalyze, keys ? { item_keys: keys } : { latest_n: latest });
+      const r = await studio.syncGt(false, keys ? { item_keys: keys } : { latest_n: latest });
       const what = keys ? `${r.n_images} chosen` : `the newest ${r.n_images}`;
-      st.setToast(
-        r.analyze?.error
-          ? { kind: "error", text: `Copied ${r.n_images} images, but the analysis did not start: ${r.analyze.error}` }
-          : { kind: "ok", text: `Copied ${what} Done Platform images${reanalyze ? " — analyzing now." : "."}` },
-      );
+      st.setToast({ kind: "ok", text: `Copied ${what} Done Platform images. They are analyzed automatically before the next generation.` });
       setPicking(false);
-      if (reanalyze) st.analyze.kick();
       void st.loadStatus();
     } catch (e) {
       st.setToast({ kind: "error", text: errText(e) });
@@ -169,9 +163,6 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
           />
           Done
         </label>
-        <label className="flex items-center gap-1">
-          <input type="checkbox" checked={reanalyze} onChange={(e) => setReanalyze(e.target.checked)} /> analyze after
-        </label>
       </div>
       <div className="mt-2 flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
         <Btn className="whitespace-nowrap" disabled={busy || st.analyze.job?.status === "running"} onClick={() => setPicking(true)}>
@@ -179,14 +170,14 @@ export function EvalSetCard({ syncRef }: { syncRef: React.MutableRefObject<(() =
         </Btn>
         or pick the exact frames
       </div>
-      {picking && <EvalPicker busy={busy} reanalyze={reanalyze} onUse={(keys) => void sync(keys)} onClose={() => setPicking(false)} />}
+      {picking && <EvalPicker busy={busy} onUse={(keys) => void sync(keys)} onClose={() => setPicking(false)} />}
       <FolderUpload />
     </StepCard>
   );
 }
 
 /** Pick the eval set image by image from every Done Platform frame (the site's image picker). */
-function EvalPicker({ busy, reanalyze, onUse, onClose }: { busy: boolean; reanalyze: boolean; onUse: (keys: string[]) => void; onClose: () => void }) {
+function EvalPicker({ busy, onUse, onClose }: { busy: boolean; onUse: (keys: string[]) => void; onClose: () => void }) {
   const [cands, setCands] = useState<GtCandidate[] | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -237,7 +228,7 @@ function EvalPicker({ busy, reanalyze, onUse, onClose }: { busy: boolean; reanal
             className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-4 py-2.5 text-[13px] font-bold text-white hover:bg-emerald-500 disabled:opacity-40"
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-            Use these {ctx.n} images{reanalyze ? " · analyze" : ""}
+            Use these {ctx.n} images
           </button>
           <button type="button" onClick={onClose} className="rounded-md border border-slate-600 px-3 py-1.5 text-[12px] font-semibold hover:bg-slate-800">
             Cancel
@@ -358,7 +349,8 @@ export function AnalyzeCard({ analyzeRef }: { analyzeRef: React.MutableRefObject
     }
   };
 
-  const state: StepState = running ? "running" : outdated ? "todo" : "done";
+  // stale analysis is no longer a to-do: Test / Final run it first (with a confirmation)
+  const state: StepState = running ? "running" : outdated ? "idle" : "done";
   return (
     <StepCard
       n={2}
@@ -369,9 +361,11 @@ export function AnalyzeCard({ analyzeRef }: { analyzeRef: React.MutableRefObject
       summary={
         running ? (
           job?.message
+        ) : outdated ? (
+          "Runs automatically before the next Test / Final"
         ) : a?.at ? (
           <>
-            {mode === "gemini" ? "Gemini" : "OpenAI"} mode · {timeAgo(a.at)}
+            {timeAgo(a.at)}
             {a.detector ? ` · errors of ${a.detector}` : ""}
           </>
         ) : (
@@ -413,10 +407,10 @@ export function AnalyzeCard({ analyzeRef }: { analyzeRef: React.MutableRefObject
       )}
       {job?.status === "error" && <div className="mt-2 text-[11px] text-rose-600">{job.error || job.message}</div>}
       <div className="mt-3 flex items-center gap-2">
-        <Btn kind={outdated ? "primary" : "secondary"} busy={running} onClick={() => void run()}>
-          <ScanSearch className="h-3.5 w-3.5" /> {a?.at ? "Re-analyze" : "Analyze"}
+        <Btn kind="secondary" busy={running} onClick={() => void run()}>
+          <ScanSearch className="h-3.5 w-3.5" /> Analyze now
         </Btn>
-        <span className="text-[10px] text-slate-400">a few minutes{detectorOn ? " · Gemini describes the misses (cents)" : " · free"}</span>
+        <span className="text-[10px] text-slate-400">optional — Test / Final analyze first when needed</span>
       </div>
       <details className="mt-3 text-[11px]">
         <summary className="cursor-pointer select-none font-semibold text-slate-500">Advanced</summary>
@@ -456,7 +450,9 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   const [quality, setQuality] = useState("medium");
   const [fidelity, setFidelity] = useState("");
   const [per, setPer] = useState(() => Number(localStorage.getItem("studio_per_source")) || 4);
-  const [confirm, setConfirm] = useState<null | "test" | "final" | GenMode>(null);
+  const [confirm, setConfirm] = useState<null | "test" | "final">(null);
+  const [need, setNeed] = useState<AnalyzeNeeded | null>(null);
+  const pending = useRef<StartArgs | null>(null);
   const canSpend = Boolean(st.status?.can_spend);
   const genRunning = st.gen.job?.status === "running";
   const analyzing = st.analyze.job?.status === "running";
@@ -477,25 +473,79 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   const multiTest = Boolean(testTicked && ticked);
   const nTest = multiTest && ticked ? ticked.length : 1;
 
-  const start = async (kind: "test" | "final") => {
+  const refreshNeed = useCallback(() => studio.analyzeNeeded().then(setNeed).catch(() => setNeed(null)), []);
+  useEffect(() => {
+    void refreshNeed();
+  }, [refreshNeed, st.status?.gt_updated_at, h?.analysis?.at, h?.base_model?.key, mode]);
+
+  const argsFor = (kind: "test" | "final"): StartArgs => ({
+    mode: kind,
+    model,
+    per_source: per,
+    source_image: kind === "test" ? source?.source_image || null : null,
+    source_images: kind === "final" ? st.finalSel : multiTest ? ticked : null,
+    quality: isGemini ? null : quality,
+    input_fidelity: isGemini ? null : fidelity,
+  });
+  const startWith = async (args: StartArgs) => {
     try {
-      const job = await studio.start({
-        mode: kind,
-        model,
-        per_source: per,
-        source_image: kind === "test" ? source?.source_image || null : null,
-        source_images: kind === "final" ? st.finalSel : multiTest ? ticked : null,
-        quality: isGemini ? null : quality,
-        input_fidelity: isGemini ? null : fidelity,
-      });
-      st.gen.setJob(job);
+      st.gen.setJob(await studio.start(args));
       st.gen.kick();
-      st.setToast({ kind: "info", text: kind === "test" ? (multiTest ? `Test started on ${nTest} ticked sources.` : `Test started on ${source?.source_image}.`) : "Final run submitted — results arrive within minutes to a few hours." });
+      const what = args.mode === "final" ? "Final run submitted — results arrive within minutes to a few hours." : `Test started on ${args.source_images?.length ? `${args.source_images.length} sources` : args.source_image}.`;
+      st.setToast({ kind: "info", text: what });
     } catch (e) {
       st.setToast({ kind: "error", text: errText(e) });
     }
   };
-  startRef.current = (kind) => setConfirm(kind);
+  /** Confirmed in the dialog: analyse first when needed (generation then starts by itself), else generate now. */
+  const launch = async (kind: "test" | "final") => {
+    setConfirm(null);
+    const args = argsFor(kind);
+    if (!need?.needed) return startWith(args);
+    try {
+      pending.current = args;
+      st.analyze.setJob(await studio.analyze(mode));
+      st.analyze.kick();
+      st.setToast({ kind: "info", text: "Analyzing first — generation starts by itself when it finishes." });
+    } catch (e) {
+      pending.current = null;
+      st.setToast({ kind: "error", text: errText(e) });
+    }
+  };
+  // the analysis started by launch() finished → start the generation that was waiting for it
+  const aStatus = st.analyze.job?.status;
+  useEffect(() => {
+    const args = pending.current;
+    if (!args || (aStatus !== "done" && aStatus !== "error")) return;
+    pending.current = null;
+    if (aStatus === "error") {
+      st.setToast({ kind: "error", text: `Analysis failed — nothing was generated. ${st.analyze.job?.error || ""}` });
+      return;
+    }
+    void (async () => {
+      // the eval set may have changed: keep only sources that are still in the new package
+      const pkg = await studio.pkg().catch(() => null);
+      const have = new Set((pkg?.sources || []).map((x) => x.source_image));
+      const fixed = { ...args };
+      if (fixed.source_images) fixed.source_images = fixed.source_images.filter((x) => have.has(x));
+      if (fixed.mode === "final" && fixed.source_images && !fixed.source_images.length) fixed.source_images = null;
+      if (fixed.mode === "test" && !fixed.source_images?.length) {
+        fixed.source_images = null;
+        if (!fixed.source_image || !have.has(fixed.source_image)) fixed.source_image = pkg?.sources?.[0]?.source_image || null;
+      }
+      await st.loadData();
+      void refreshNeed();
+      await startWith(fixed);
+    })();
+  }, [aStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ask = (kind: "test" | "final") => {
+    void refreshNeed();
+    setConfirm(kind);
+  };
+  startRef.current = ask;
+  const analysisNote = need?.needed ? <AnalyzeFirst need={need} /> : null;
+  const plus = need?.needed ? ` + analysis ≤ $${need.est_max_usd.toFixed(2)}` : "";
 
   const job = st.gen.job;
   const state: StepState = genRunning ? "running" : st.runs.length ? "done" : "idle";
@@ -515,7 +565,15 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
               key={p}
               type="button"
               disabled={analyzing || genRunning}
-              onClick={() => p !== mode && setConfirm(p)}
+              onClick={async () => {
+                if (p === mode) return;
+                try {
+                  await studio.setMode(p);
+                  await st.loadHealth();
+                } catch (e) {
+                  st.setToast({ kind: "error", text: errText(e) });
+                }
+              }}
               className={cn(
                 "flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-[12px] font-bold transition disabled:opacity-50",
                 p === mode ? (p === "gemini" ? "bg-violet-600 text-white shadow" : "bg-sky-600 text-white shadow") : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
@@ -642,7 +700,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         </div>
 
         <div className="grid grid-cols-2 gap-2">
-          <Btn kind="secondary" disabled={!canSpend || genRunning || analyzing || (!source && !multiTest)} onClick={() => setConfirm("test")} className="flex-col gap-0 py-2">
+          <Btn kind="secondary" disabled={!canSpend || genRunning || analyzing || (!source && !multiTest)} onClick={() => ask("test")} className="flex-col gap-0 py-2">
             <span className="flex items-center gap-1">
               <FlaskConical className="h-3.5 w-3.5" /> Test
             </span>
@@ -650,7 +708,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
               {nTest * per} img · ≈ ${(unit * nTest * per).toFixed(2)}
             </span>
           </Btn>
-          <Btn kind="primary" disabled={!canSpend || genRunning || analyzing || nFinal === 0} onClick={() => setConfirm("final")} className="flex-col gap-0 py-2">
+          <Btn kind="primary" disabled={!canSpend || genRunning || analyzing || nFinal === 0} onClick={() => ask("final")} className="flex-col gap-0 py-2">
             <span className="flex items-center gap-1">
               <Rocket className="h-3.5 w-3.5" /> Final
             </span>
@@ -659,6 +717,12 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
             </span>
           </Btn>
         </div>
+        {need?.needed && !analyzing && (
+          <div className="rounded-lg bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+            Analysis runs first when you generate — {need.reasons.join("; ")}.
+          </div>
+        )}
+        {analyzing && pending.current && <div className="text-[11px] text-sky-600 dark:text-sky-300">Analyzing… the {pending.current.mode} run starts by itself afterwards.</div>}
         {!canSpend && <div className="text-[11px] text-amber-600 dark:text-amber-300">Only {st.status?.allowed_users.join(", ")} can start paid runs.</div>}
         {genRunning && job && (
           <div className="space-y-1">
@@ -676,10 +740,11 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
       {confirm === "test" && multiTest && (
         <Confirm
           title={`Test on ${nTest} sources?`}
-          confirmLabel={`Generate ${nTest * per} images · ≈ $${(unit * nTest * per).toFixed(2)}`}
+          confirmLabel={`${need?.needed ? "Analyze + generate" : "Generate"} ${nTest * per} images · ≈ $${(unit * nTest * per).toFixed(2)}${plus}`}
           onCancel={() => setConfirm(null)}
-          onConfirm={async () => (setConfirm(null), await start("test"))}
+          onConfirm={() => launch("test")}
         >
+          {analysisNote}
           <p>
             <b>{model}</b> makes {per} new scenes for each of the {nTest} sources ticked on the Plan tab ({nTest} × {per} = <b>{nTest * per}</b> images).
           </p>
@@ -687,7 +752,13 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         </Confirm>
       )}
       {confirm === "test" && !multiTest && source && (
-        <Confirm title="Test on one source?" confirmLabel={`Generate ${per} images · ≈ $${(unit * per).toFixed(2)}`} onCancel={() => setConfirm(null)} onConfirm={async () => (setConfirm(null), await start("test"))}>
+        <Confirm
+          title="Test on one source?"
+          confirmLabel={`${need?.needed ? "Analyze + generate" : "Generate"} ${per} images · ≈ $${(unit * per).toFixed(2)}${plus}`}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => launch("test")}
+        >
+          {analysisNote}
           <div className="flex items-center gap-3">
             <img src={img.dataset(source.source_image, 320)} alt="" className="h-20 w-20 rounded-lg object-cover" />
             <p>
@@ -697,7 +768,13 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
         </Confirm>
       )}
       {confirm === "final" && (
-        <Confirm title={st.finalSel ? `Generate on ${nFinal} chosen sources?` : "Generate the full set?"} confirmLabel={`Spend ≈ $${(unit * nFinal * per).toFixed(2)}`} onCancel={() => setConfirm(null)} onConfirm={async () => (setConfirm(null), await start("final"))}>
+        <Confirm
+          title={st.finalSel ? `Generate on ${nFinal} chosen sources?` : "Generate the full set?"}
+          confirmLabel={`${need?.needed ? "Analyze + spend" : "Spend"} ≈ $${(unit * nFinal * per).toFixed(2)}${plus}`}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => launch("final")}
+        >
+          {analysisNote}
           <p>
             <b>{model}</b>
             {!isGemini && <> · {quality}</>} makes <b>{nFinal * per}</b> images ({nFinal} {st.finalSel ? `ticked of ${nAll} ` : ""}sources × {per}).
@@ -708,36 +785,19 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
           </p>
         </Confirm>
       )}
-      {(confirm === "openai" || confirm === "gemini") && (
-        <ProviderSwitch to={confirm} onCancel={() => setConfirm(null)} />
-      )}
     </StepCard>
   );
 }
 
-function ProviderSwitch({ to, onCancel }: { to: GenMode; onCancel: () => void }) {
-  const st = useStudio();
+type StartArgs = Parameters<typeof studio.start>[0];
+
+/** The "analysis runs first" note inside the generate confirmations. */
+function AnalyzeFirst({ need }: { need: AnalyzeNeeded }) {
   return (
-    <Confirm
-      title={`Switch to ${to === "gemini" ? "Gemini" : "OpenAI"}?`}
-      confirmLabel="Re-analyze and switch"
-      onCancel={onCancel}
-      onConfirm={async () => {
-        onCancel();
-        try {
-          st.analyze.setJob(await studio.analyze(to));
-          st.analyze.kick();
-        } catch (e) {
-          st.setToast({ kind: "error", text: errText(e) });
-        }
-      }}
-    >
-      <p>The prompts and the error targets depend on the provider, so the eval set is re-analyzed in {to === "gemini" ? "Gemini" : "OpenAI"} mode first.</p>
-      <p>
-        Takes a few minutes. Gemini (gemini-3.6-flash) describes the base model's misses (about $0.01–0.02 per frame with misses) and
-        each new frame's camera look (under $0.01 per frame) — roughly $1–2 for a new eval set of ~100 frames. Answers are cached, so
-        re-analyzing the same frames is free. Earlier runs are kept.
-      </p>
-    </Confirm>
+    <div className="rounded-lg border border-amber-400/60 bg-amber-500/10 p-2.5 text-[12px]">
+      <b>The analysis runs first</b> — {need.reasons.join("; ")}. It measures the {need.frames} eval frames, finds what the base model
+      misses and writes the prompts; Gemini describes {need.new_frames ? `the ${need.new_frames} new frames` : "the frames"} (cached
+      afterwards) for <b>≈ up to ${need.est_max_usd.toFixed(2)}</b>. Generation then starts by itself.
+    </div>
   );
 }

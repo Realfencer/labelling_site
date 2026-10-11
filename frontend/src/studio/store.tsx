@@ -187,15 +187,6 @@ export function nextStep(st: StudioState): NextStep {
     return { key: "running", title: gen.job.mode === "autolabel" ? "Labelling a run" : `Generating · ${gen.job.mode} run`, detail: gen.job.message, tone: "violet" };
   if (send.job?.status === "running") return { key: "running", title: "Sending to Own", detail: send.job.message, tone: "emerald" };
   if (!status.gt_images) return { key: "update", title: "Start with the eval set", detail: "Copy your newest Done Platform images into the Studio.", cta: "Update from labeler", tone: "amber" };
-  const a = health?.analysis;
-  const bm = health?.base_model;
-  if (!a?.at) return { key: "analyze", title: "Analyze the eval set", detail: "Measures every frame and mines what the base model misses.", cta: "Analyze", tone: "amber" };
-  if (status.gt_updated_at && a.at < status.gt_updated_at - 1)
-    return { key: "analyze", title: "The eval set changed", detail: "Re-analyze so the prompts follow the new frames.", cta: "Analyze", tone: "amber" };
-  if (bm?.key && a.detector_key && bm.key !== a.detector_key)
-    return { key: "analyze", title: "The base model changed", detail: `Re-analyze so the prompts target what ${bm.name} misses.`, cta: "Analyze", tone: "amber" };
-  if (bm?.key && !a.detector_key && health?.checkpoint_switches?.[`detector_${health.gen_mode}` as const])
-    return { key: "analyze", title: "Mine the base model's errors", detail: `Analyze with ${bm.name} so every prompt targets drinks it misses.`, cta: "Analyze", tone: "amber" };
   const latest = runs[0];
   if (latest?.pending) return { key: "collect", title: "A batch is generating", detail: `${latest.name} — collect the finished images.`, cta: "Collect", tone: "sky" };
   if (!runs.some((r) => r.mode === "test" && r.provider === health?.gen_mode))
