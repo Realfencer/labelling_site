@@ -99,6 +99,39 @@ sys.setswitchinterval(0.001)
 _log = logging.getLogger("labeler.prewarm")
 
 
+def _media_sweeper(image_dir: Path, cache_root: Path) -> None:
+    """Build the missing thumbnails / previews / display JPEGs of the Own pool in the background, newest images first.
+
+    Without this, the images you are about to label (today's new ones) had no preview yet, so opening one decoded the PNG,
+    resized and encoded on the request while the labeler showed the blurry thumbnail (~0.1-0.3s, much more on a busy disk).
+    One thread at low CPU priority, a short pause after every build, and the same per-image builder (and per-path lock)
+    the request path uses, so a request and the sweeper can never both write the same file. Runs again every 10 minutes
+    to pick up new uploads; when everything exists a pass is just ~4 stat calls per image."""
+    from . import core
+
+    cutoff_ns = 0  # first pass covers every image; later passes only look at images newer than the previous pass
+    while True:
+        built = 0
+        pass_started_ns = time.time_ns()
+        try:
+            scan = core._scan_pool_images(image_dir)
+            scan.sort(key=lambda r: -r[2])  # newest first
+            for abs_path, _rel, mtime_ns, _size, _link in scan:
+                if mtime_ns < cutoff_ns:
+                    break  # sorted newest-first: everything after this was already covered by an earlier pass
+                t0 = time.perf_counter()
+                core.ensure_image_pyramid(Path(abs_path), cache_root)
+                if time.perf_counter() - t0 > 0.005:  # a no-op check takes ~0.2ms; a build is tens of ms
+                    built += 1
+                    time.sleep(0.04)  # leave room for real requests
+            if built:
+                print(f"MEDIA-SWEEP built derived images for {built} Own images", flush=True)
+            cutoff_ns = pass_started_ns - 120 * 10**9  # 2 min of margin for files still being written
+        except Exception:
+            _log.exception("media sweeper pass failed")
+        time.sleep(600)
+
+
 def _prewarm_topics() -> None:
     """Load the active topic(s) into the shared snapshot cache right after startup, so the first user's
     "Opening…" is a clone of memory instead of thousands of small disk reads (92s on a busy disk).
@@ -128,6 +161,14 @@ def _prewarm_topics() -> None:
                         state.reload_own_pool(force=False, dedupe=False)
                     except Exception:
                         _log.exception("own pool prewarm failed")
+                    try:  # one sweeper per project: builds the derived images nobody has asked for yet
+                        threading.Thread(
+                            target=low_priority(lambda d=state.local_image_dir, c=state.score_cache_dir: _media_sweeper(d, c)),
+                            daemon=True,
+                            name="media-sweeper",
+                        ).start()
+                    except Exception:
+                        _log.exception("media sweeper not started")
                     time.sleep(1.0)  # snapshot publish is debounced by 0.35s
                     print(f"PREWARM topic {skill.element_path} ready in {time.time() - t0:.1f}s", flush=True)  # visible in the journal
                 finally:
