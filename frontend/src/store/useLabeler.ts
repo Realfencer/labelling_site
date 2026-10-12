@@ -37,7 +37,10 @@ export const useLabeler = create<LabelerStore>((set) => ({
     set((s) => {
       const theme: Theme = s.theme === "dark" ? "light" : "dark";
       localStorage.setItem(THEME_KEY, theme);
-      document.documentElement.classList.toggle("dark", theme === "dark");
+      const root = document.documentElement;
+      root.classList.add("theme-fade"); // colours cross-fade for a moment instead of flashing
+      root.classList.toggle("dark", theme === "dark");
+      window.setTimeout(() => root.classList.remove("theme-fade"), 350);
       return { theme };
     }),
   appState: null,

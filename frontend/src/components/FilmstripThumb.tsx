@@ -36,12 +36,7 @@ export default function FilmstripThumb({ url, className }: Props) {
 
   if (!src) {
     return (
-      <div
-        className={cn("relative flex items-center justify-center bg-slate-900", className)}
-        aria-hidden
-      >
-        <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-600 border-t-slate-300" />
-      </div>
+      <div className={cn("fx-skeleton relative", className)} aria-hidden />
     );
   }
 

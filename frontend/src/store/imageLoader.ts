@@ -397,9 +397,12 @@ export function preloadChallengeForward(
       challengeThumbnailUrl(i, mode, ch.block, true, cacheToken, ch.item_key, ch.media_rev),
       pri + 10,
     );
-    // Only the immediate next neighbor gets a full-image prefetch.
-    if (d === 0) {
-      preloadImage(challengeImageUrl(i, mode, ch.block, cacheToken, ch.item_key, ch.media_rev), pri);
+    // The small sharp preview (~70 KB) for EVERY neighbour: moving to any of them (forward, back, two ahead) paints sharp
+    // at once from the decoded cache instead of showing the blurry thumbnail until a network round trip finishes.
+    preloadImage(challengePreviewUrl(i, mode, ch.block, cacheToken, ch.item_key, ch.media_rev), pri + 6);
+    // Full image for the three most likely next stops (+1, -1, +2).
+    if (d <= 2) {
+      preloadImage(challengeImageUrl(i, mode, ch.block, cacheToken, ch.item_key, ch.media_rev), Math.max(1, pri - 2));
     }
   });
 }

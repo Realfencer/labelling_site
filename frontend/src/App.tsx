@@ -53,6 +53,7 @@ import {
   challengePreviewUrl,
   challengeThumbnailUrl,
   clearDecodedImages,
+  preloadImage,
 } from "./store/imageLoader";
 import {
   clearThumbnailBlobCache,
@@ -1524,9 +1525,9 @@ export default function App({
         index,
         mode,
         app.challenges,
-        2,
+        3,
         imageCacheToken,
-        filteredNeighbors(index, stripFilterRef.current, 2, ownFilterRef.current),
+        filteredNeighbors(index, stripFilterRef.current, 3, ownFilterRef.current),
       );
 
       // Save previous labels in the background — never block left-pane paint.
@@ -1897,9 +1898,9 @@ export default function App({
           index,
           mode,
           app.challenges,
-          2,
+          3,
           imageCacheToken,
-          filteredNeighbors(index, stripFilterRef.current, 2, ownFilterRef.current),
+          filteredNeighbors(index, stripFilterRef.current, 3, ownFilterRef.current),
         );
         preloadDetails(
           filteredNeighbors(index, stripFilterRef.current, 2, ownFilterRef.current),
@@ -2435,9 +2436,9 @@ export default function App({
       index,
       app.review_mode,
       app.challenges,
-      2,
+      3,
       imageCacheToken,
-      filteredNeighbors(index, stripFilterRef.current, 2, ownFilterRef.current),
+      filteredNeighbors(index, stripFilterRef.current, 3, ownFilterRef.current),
     );
   }, [detail?.index, detail?.challenge?.item_key, appState?.challenges.length, appState?.review_mode, imageCacheToken, stripFilter, genFilter]);
 
@@ -4394,7 +4395,7 @@ export default function App({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-1.5 bg-slate-50 p-1.5 dark:bg-transparent">
+    <div className="rt-in flex h-full min-h-0 flex-col gap-1.5 bg-slate-50 p-1.5 dark:bg-transparent">
       <TeamBar
         total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
         reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
@@ -4616,9 +4617,19 @@ export default function App({
                 if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
               });
             }}
-            onMouseEnter={() => {
-              // Thumb-only prefetch — full getChallenge/image on hover saturated the server.
+            onMouseEnter={(e) => {
+              // Thumb right away (full getChallenge/image on hover saturated the server)...
               preloadChallengeUrgent(i, appState.review_mode, c.block, imageCacheToken, c.item_key, c.media_rev);
+              // ...and the small sharp preview once the pointer rests on the tile: the click that usually follows
+              // then lands on a ready preview instead of a blurry thumbnail.
+              const el = e.currentTarget as HTMLElement & { __previewTimer?: number };
+              window.clearTimeout(el.__previewTimer);
+              el.__previewTimer = window.setTimeout(() => {
+                preloadImage(challengePreviewUrl(i, appState.review_mode, c.block, imageCacheToken, c.item_key, c.media_rev), 70);
+              }, 140);
+            }}
+            onMouseLeave={(e) => {
+              window.clearTimeout((e.currentTarget as HTMLElement & { __previewTimer?: number }).__previewTimer);
             }}
             title={badge.title}
             className={cn(

@@ -314,7 +314,7 @@ export default function TopicsPage() {
   }
 
   return (
-    <div className="topics-shell">
+    <div className="topics-shell rt-in">
       <header className="topics-header">
         <div className="flex w-full items-center justify-between gap-4">
           <div className="flex items-center gap-3">

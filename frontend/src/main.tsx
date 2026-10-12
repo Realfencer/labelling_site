@@ -1,6 +1,6 @@
-import { StrictMode, Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { StrictMode, Suspense, lazy, useCallback, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Navigate, Route, Routes, useParams, useSearchParams } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from "react-router-dom";
 import AuthGate from "./components/AuthGate";
 import BrandLoader from "./components/BrandLoader";
 import KeysModal from "./components/KeysModal";
@@ -14,6 +14,21 @@ const CollectedPage = lazy(() => import("./pages/CollectedPage"));
 const StudioPage = lazy(() => import("./pages/StudioPage"));
 import { api, type AuthStatus } from "./api";
 import "./index.css";
+
+// Images fade in when their pixels arrive (first load of each <img> only: later src swaps stay instant). `load` does not
+// bubble, so listen in the capture phase.
+document.addEventListener(
+  "load",
+  (e) => {
+    const t = e.target;
+    if (t instanceof HTMLImageElement && !t.dataset.fx && !t.hasAttribute("data-nofade")) {
+      t.dataset.fx = "1";
+      t.classList.add("img-fade");
+      t.addEventListener("animationend", () => t.classList.remove("img-fade"), { once: true });
+    }
+  },
+  true,
+);
 
 // Ask for the topic list now, together with the auth check (they used to run one after the other).
 startTopicsPrefetch();
@@ -45,6 +60,78 @@ function LabelerRoute() {
     <Suspense fallback={<BrandLoader label="Opening workspace" hint="Loading the labeling tools" accent="emerald" />}>
       <App topicSlug={slug} initialWorkspace={workspace} initialOwnDay={day} initialOwnField={field} ownDaysPage={daysPage} />
     </Suspense>
+  );
+}
+
+/** A fade for a lazy page that has just arrived (the loader fades out with the Suspense fallback, the page fades in). */
+function PageFade({ children }: { children: ReactNode }) {
+  return (
+    <div className="rt-in">{children}</div>
+  );
+}
+
+/** Which screen family a path belongs to: moving WITHIN a family (e.g. labeler -> Own days -> a day) never animates. */
+function routeGroup(pathname: string): string {
+  const seg = pathname.split("/")[1] || "";
+  if (seg === "") return "home";
+  if (seg === "collected" || seg === "studio") return seg;
+  return "labeler";
+}
+
+const EXIT_MS = 120;
+
+/**
+ * Routes with a smooth hand-over: when the screen family changes, the current page fades out (120 ms) and the next one
+ * fades in over the persistent 3D backdrop. Inside one family the location updates synchronously, so the labeler
+ * keeps its state and never remounts or flickers.
+ */
+function AppRoutes() {
+  const location = useLocation();
+  const shown = useRef(location);
+  const [, bump] = useReducer((x: number) => x + 1, 0);
+  const sameGroup = routeGroup(shown.current.pathname) === routeGroup(location.pathname);
+  if (sameGroup) shown.current = location;
+  const leaving = !sameGroup;
+  const group = routeGroup(shown.current.pathname);
+  useEffect(() => {
+    if (!leaving) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const t = window.setTimeout(() => {
+      shown.current = location;
+      bump();
+    }, reduce ? 0 : EXIT_MS);
+    return () => window.clearTimeout(t);
+  }, [leaving, location]);
+  return (
+    <div
+      key={group}
+      // the labeler is a full-height app (children use h-full); the other screens grow with their content, so their
+      // sticky headers keep working past the first screen
+      className={`${leaving ? "rt-out" : "rt-in"}${group === "labeler" ? " rt-fill" : ""}`}
+    >
+    <Routes location={shown.current}>
+      <Route path="/" element={<TopicsPage />} />
+      <Route
+        path="/collected"
+        element={
+          <Suspense fallback={<BrandLoader label="Collected miners" hint="Scores and latency checks" accent="amber" />}>
+            <PageFade><CollectedPage /></PageFade>
+          </Suspense>
+        }
+      />
+      <Route
+        path="/studio"
+        element={
+          <Suspense fallback={<BrandLoader label="Studio" hint="Image generation workspace" accent="fuchsia" />}>
+            <PageFade><StudioPage /></PageFade>
+          </Suspense>
+        }
+      />
+      <Route path="/:slug" element={<LabelerRoute />} />
+      <Route path="/t/:slug/*" element={<LabelerRoute />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+    </div>
   );
 }
 
@@ -115,28 +202,7 @@ function Root() {
   return (
     <BrowserRouter>
       <SiteBackdrop />
-      <Routes>
-        <Route path="/" element={<TopicsPage />} />
-        <Route
-          path="/collected"
-          element={
-            <Suspense fallback={<BrandLoader label="Collected miners" hint="Scores and latency checks" accent="amber" />}>
-              <CollectedPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/studio"
-          element={
-            <Suspense fallback={<BrandLoader label="Studio" hint="Image generation workspace" accent="fuchsia" />}>
-              <StudioPage />
-            </Suspense>
-          }
-        />
-        <Route path="/:slug" element={<LabelerRoute />} />
-        <Route path="/t/:slug/*" element={<LabelerRoute />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <AppRoutes />
       <KeysModal />
     </BrowserRouter>
   );

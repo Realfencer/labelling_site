@@ -790,3 +790,57 @@ html.bd-hero {
 html.bd-hero body {
   background-color: transparent !important;
 }
+
+/* ───────── Motion: nothing pops in or out ─────────
+   Everything here is opacity / small-transform only (compositor work) and is switched off for prefers-reduced-motion.
+   "backwards" fill (not "both") so an element's own transform / opacity returns to normal when the animation ends. */
+@keyframes rt-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rt-out { to { opacity: 0; } }
+@keyframes fx-overlay-in { from { opacity: 0; } }
+@keyframes fx-panel-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
+@keyframes fx-img-in { from { opacity: 0; } }
+@keyframes fx-row-in { from { opacity: 0; transform: translateY(3px); } }
+@keyframes fx-shimmer { to { background-position: -200% 0; } }
+@keyframes bl-appear { from { opacity: 0; } to { opacity: 1; } }
+
+/* route changes: old page fades out quickly, the new one fades in over the same backdrop (see AppRoutes in main.tsx) */
+.rt-fill { height: 100%; }
+.rt-in { animation: rt-in 0.26s cubic-bezier(0.2, 0.7, 0.2, 1) backwards; }
+.rt-out { animation: rt-out 0.12s ease-in forwards; pointer-events: none; }
+
+/* loaders appear only if loading takes longer than ~0.16s: a fast load never flashes a spinner */
+.bl-screen.bl-live { animation: bl-appear 0.3s ease-out 0.16s backwards; }
+
+/* every modal / overlay (25 of them share this class pattern): backdrop fades, the panel rises */
+[class~="fixed"][class~="inset-0"]:not([class~="pointer-events-none"]) { animation: fx-overlay-in 0.18s ease-out backwards; }
+[class~="fixed"][class~="inset-0"]:not([class~="pointer-events-none"]) > :first-child { animation: fx-panel-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+
+/* images fade in when their pixels arrive (class added on the first load event, see main.tsx) */
+.img-fade { animation: fx-img-in 0.3s ease-out backwards; }
+
+/* table rows (keyed, so this only plays when a row is new: first load, filter change) */
+tbody > tr { animation: fx-row-in 0.22s ease-out backwards; }
+
+/* quiet placeholder instead of a spinner on every tile */
+.fx-skeleton {
+  background: linear-gradient(100deg, rgb(30 41 59) 30%, rgb(51 65 85) 50%, rgb(30 41 59) 70%);
+  background-size: 200% 100%;
+  animation: fx-shimmer 1.4s linear infinite;
+}
+
+/* soft hover / focus / active states everywhere (zero specificity: any utility or component rule still wins) */
+:where(button, a, summary, input, select, textarea, [role="button"]) {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+/* light <-> dark: colours cross-fade instead of flashing (class is added for 350ms by the theme toggle) */
+html.theme-fade, html.theme-fade *, html.theme-fade *::before, html.theme-fade *::after {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, fill 0.3s ease, stroke 0.3s ease !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rt-in, .rt-out, .img-fade, tbody > tr, .bl-screen.bl-live,
+  [class~="fixed"][class~="inset-0"], [class~="fixed"][class~="inset-0"] > :first-child { animation: none !important; }
+  .rt-out { opacity: 0; }
+  html.theme-fade, html.theme-fade * { transition: none !important; }
+}
