@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import BrandLoader from "./components/BrandLoader";
+import { useSiteBackdrop } from "./store/useBackdrop";
+import BrandMark from "./components/BrandMark";
 import WorkspaceChooser from "./components/WorkspaceChooser";
 import { Search } from "lucide-react";
 import { api, type TopicInfo } from "./api";
+import { prefetchLabeler, takePrefetchedTopics } from "./prefetch";
 import {
   formatTopicTitle,
   groupTopics,
@@ -235,6 +239,7 @@ function TopicSection({
 type FilterTab = "all" | "active" | "completed" | "upcoming";
 
 export default function TopicsPage() {
+  useSiteBackdrop("hero"); // always-dark screen on the shared 3D backdrop
   const [topics, setTopics] = useState<TopicInfo[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -244,8 +249,9 @@ export default function TopicsPage() {
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    api
-      .listTopics()
+    prefetchLabeler();
+    (takePrefetchedTopics() ?? api.listTopics())
+      .catch(() => api.listTopics()) // prefetch failed (e.g. not signed in yet): one normal attempt
       .then((res) => {
         if (!alive) return;
         const list = res.topics || [];
@@ -294,7 +300,8 @@ export default function TopicsPage() {
       .then((a) => setMeName(a.username ?? null))
       .catch(() => undefined);
   }, []);
-  if (!loading && !error && topics.length === 1) {
+  if (loading) return <BrandLoader label="Loading topics" hint="Fetching your workspaces" accent="violet" />;
+  if (!error && topics.length === 1) {
     const only = topics[0];
     return (
       <WorkspaceChooser
@@ -311,9 +318,7 @@ export default function TopicsPage() {
       <header className="topics-header">
         <div className="flex w-full items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-md border border-manako-border bg-manako-card font-mono text-xs font-bold text-white">
-              S
-            </div>
+            <BrandMark size={36} />
             <div>
               <div className="text-sm font-semibold text-white">Score Labeler</div>
               <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-manako-muted">
@@ -363,13 +368,7 @@ export default function TopicsPage() {
           </div>
         )}
 
-        {loading ? (
-          <div className="topics-card-grid">
-            {[0, 1, 2, 3, 4, 5].map((i) => (
-              <div key={i} className="h-80 animate-pulse rounded-2xl border border-manako-border bg-manako-card" />
-            ))}
-          </div>
-        ) : filtered.length === 0 ? (
+        {filtered.length === 0 ? (
           <div className="rounded-2xl border border-manako-border bg-manako-card px-6 py-12 text-center">
             <p className="text-sm text-manako-muted">No topics match your search.</p>
           </div>

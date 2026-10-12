@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Loader2, Lock, ShieldCheck } from "lucide-react";
+import BrandMark from "./BrandMark";
+import { useSiteBackdrop } from "../store/useBackdrop";
 import { api, type AuthStatus } from "../api";
 import { cn } from "../lib/utils";
 
@@ -9,6 +11,7 @@ export default function AuthGate({
   status?: AuthStatus;
   onAuthenticated: (next: AuthStatus) => void;
 }) {
+  useSiteBackdrop("hero");
   const [username, setUsername] = useState(() => {
     try {
       return localStorage.getItem("labeler_username") || "";
@@ -41,7 +44,15 @@ export default function AuthGate({
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#0b1220] px-4 py-10">
+    <div className="flex min-h-screen flex-col items-center justify-center px-4 py-10">
+      <div className="mb-6 flex flex-col items-center text-center">
+        <div className="relative">
+          <div className="absolute inset-2 rounded-[28px] bg-sky-500/30 blur-2xl" aria-hidden />
+          <BrandMark size={88} className="relative drop-shadow-2xl" />
+        </div>
+        <div className="mt-4 text-xl font-extrabold text-white">Score Labeler</div>
+        <div className="mt-0.5 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Beverage labeling · SN44</div>
+      </div>
       <div className="w-full max-w-md rounded-2xl border border-slate-700/80 bg-[#12161e] p-6 shadow-2xl">
         <div className="mb-5 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-sky-500 text-white">

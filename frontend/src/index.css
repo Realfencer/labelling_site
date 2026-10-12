@@ -132,12 +132,8 @@
 /* Score Studio–style topics dashboard */
 .topics-shell {
   min-height: 100dvh;
-  background-color: #080809;
+  background-color: transparent; /* the site-wide 3D backdrop paints the scene */
   color: #ffffff;
-  background-image:
-    radial-gradient(circle 5px at top left, rgb(16, 16, 18) 0%, rgb(16, 16, 18) 50%, rgba(201, 201, 201, 0) 50%),
-    linear-gradient(90deg, rgb(8, 8, 9), rgb(8, 8, 9));
-  background-size: 11px 11px;
 }
 
 .topics-header {
@@ -149,7 +145,8 @@
   height: 4rem;
   padding: 0 1.5rem;
   border-bottom: 1px solid #313137;
-  background-color: #080809;
+  background-color: rgb(8 8 9 / 0.72);
+  backdrop-filter: blur(12px);
 }
 
 @media (min-width: 768px) {
@@ -628,4 +625,168 @@
 @keyframes studio-shimmer {
   from { background-position: 200% 0; }
   to { background-position: -200% 0; }
+}
+
+/* ───────── Brand loading screen ─────────
+   Two looks, one design: the splash in index.html (before any JS: CSS-only grid floor) and <BrandLoader/> (.bl-live:
+   transparent, so the site-wide 3D backdrop canvas shows through). --bl-a / --bl-b are the page accent (rgb triples). */
+.bl-screen {
+  --bl-a: 56 189 248;
+  --bl-b: 167 139 250;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(60% 50% at 50% 38%, rgb(var(--bl-a) / 0.12), transparent 70%),
+    radial-gradient(40% 40% at 70% 70%, rgb(var(--bl-b) / 0.1), transparent 70%),
+    #070b16;
+  color: #e2e8f0;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+.bl-screen.bl-live {
+  /* the canvas (z-index:-1) paints the scene; only a soft accent glow is added here */
+  background:
+    radial-gradient(46% 40% at 50% 40%, rgb(var(--bl-a) / 0.16), transparent 72%),
+    radial-gradient(120% 70% at 50% 120%, rgb(7 11 22 / 0.55) 25%, transparent 75%);
+}
+/* splash only: a CSS perspective grid floor, so the first paint already looks like the 3D scene that follows */
+.bl-screen:not(.bl-live)::before {
+  content: "";
+  position: absolute;
+  left: -20%;
+  right: -20%;
+  bottom: 0;
+  height: 48%;
+  background-image:
+    linear-gradient(rgb(129 140 248 / 0.3) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(129 140 248 / 0.3) 1px, transparent 1px);
+  background-size: 72px 46px;
+  transform: perspective(380px) rotateX(62deg);
+  transform-origin: 50% 0;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 75%);
+  mask-image: linear-gradient(to bottom, transparent, #000 75%);
+  animation: bl-grid 2.6s linear infinite;
+}
+.bl-stack {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 132px;
+  height: 132px;
+}
+.bl-icon {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  border-radius: 20px;
+  animation: bl-breathe 2.4s ease-in-out infinite;
+  filter: drop-shadow(0 12px 28px rgb(var(--bl-a) / 0.4));
+}
+.bl-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: conic-gradient(from 0deg, rgb(var(--bl-a) / 0) 0deg, rgb(var(--bl-a) / 0.95) 220deg, rgb(var(--bl-b) / 0.95) 320deg, rgb(var(--bl-a) / 0) 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  animation: bl-spin 1.4s linear infinite;
+}
+.bl-glow {
+  position: absolute;
+  inset: 14px;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgb(var(--bl-a) / 0.32), transparent 70%);
+  filter: blur(14px);
+  animation: bl-breathe 2.4s ease-in-out infinite;
+}
+.bl-title {
+  margin-top: 22px;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: #fff;
+}
+.bl-label {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #8a9bb4;
+}
+.bl-hint {
+  margin-top: 6px;
+  max-width: 260px;
+  text-align: center;
+  font-size: 12px;
+  color: #64748b;
+}
+.bl-bar {
+  position: relative;
+  margin-top: 18px;
+  width: 168px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgb(148 163 184 / 0.16);
+}
+.bl-bar > i {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40%;
+  height: 100%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, rgb(var(--bl-a)), rgb(var(--bl-b)));
+  animation: bl-bar 1.3s cubic-bezier(0.5, 0, 0.3, 1) infinite;
+}
+/* the three classes "being detected" while the page loads */
+.bl-chips {
+  display: flex;
+  gap: 6px;
+  margin-top: 16px;
+}
+.bl-chips > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 9999px;
+  border: 1px solid rgb(148 163 184 / 0.18);
+  background: rgb(15 23 42 / 0.55);
+  padding: 3px 9px 3px 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+  animation: bl-chip 1.8s ease-in-out infinite;
+  animation-delay: var(--d, 0s);
+}
+.bl-chips > span > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--c);
+  box-shadow: 0 0 8px 1px var(--c);
+}
+@keyframes bl-spin { to { transform: rotate(360deg); } }
+@keyframes bl-breathe { 0%, 100% { transform: scale(1); opacity: 0.92; } 50% { transform: scale(1.06); opacity: 1; } }
+@keyframes bl-bar { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
+@keyframes bl-grid { to { background-position: 0 46px, 0 0; } }
+@keyframes bl-chip { 0%, 100% { opacity: 0.45; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); color: #e2e8f0; } }
+@media (prefers-reduced-motion: reduce) {
+  .bl-ring, .bl-icon, .bl-glow, .bl-bar > i, .bl-chips > span, .bl-screen::before { animation-duration: 6s; }
+}
+
+/* Screens that sit on the hero backdrop are always dark, whatever the light/dark theme says. */
+html.bd-hero {
+  background-color: #070b16 !important;
+}
+/* the body must NOT paint its own opaque background here: it would cover the z-index:-1 backdrop canvas */
+html.bd-hero body {
+  background-color: transparent !important;
 }

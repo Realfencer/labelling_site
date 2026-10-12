@@ -612,8 +612,13 @@ export default function AnnotationCanvas({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = canvasBg;
-    ctx.fillRect(0, 0, cw, ch);
+    if (canvasBg === "#0b1220" && document.documentElement.classList.contains("dark")) {
+      // dark theme: leave the letterbox transparent so the translucent stage (and the site backdrop behind it) shows
+      ctx.clearRect(0, 0, cw, ch);
+    } else {
+      ctx.fillStyle = canvasBg;
+      ctx.fillRect(0, 0, cw, ch);
+    }
     ctx.save();
     ctx.translate(offset.x, offset.y);
     ctx.scale(scale, scale);
@@ -1796,7 +1801,7 @@ export default function AnnotationCanvas({
   return (
     <div
       ref={containerRef}
-      className="relative min-h-[280px] w-full flex-1 overflow-hidden rounded-xl bg-slate-100 dark:bg-ink-950"
+      className="relative min-h-[280px] w-full flex-1 overflow-hidden rounded-xl bg-slate-100 dark:bg-ink-950/30"
       style={{ touchAction: "none", overscrollBehavior: "none" }}
     >
       {!hasImage && thumbBlob && (

@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Score Labeler</title>
+    <script>
+      /* Theme before first paint (dark unless the user chose light): the labeler module that used to set this is a lazy chunk now. */
+      try { if (localStorage.getItem("sn44-labeler-theme") !== "light") document.documentElement.classList.add("dark"); } catch (e) { document.documentElement.classList.add("dark"); }
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#0b1220" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Non-blocking: first paint must not wait on Google Fonts (system fonts show until loaded). -->
@@ -21,7 +29,23 @@
     </noscript>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="bl-screen" role="status" aria-live="polite">
+        <div class="bl-stack">
+          <div class="bl-glow"></div>
+          <div class="bl-ring"></div>
+          <img class="bl-icon" src="/favicon.svg" width="76" height="76" alt="" />
+        </div>
+        <div class="bl-title">Score Labeler</div>
+        <div class="bl-label">Loading</div>
+        <div class="bl-chips">
+          <span style="--c:#fbbf24;--d:0s"><i></i>cup</span>
+          <span style="--c:#a78bfa;--d:0.3s"><i></i>can</span>
+          <span style="--c:#38bdf8;--d:0.6s"><i></i>bottle</span>
+        </div>
+        <div class="bl-bar"><i></i></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

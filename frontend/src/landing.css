@@ -1,0 +1,223 @@
+/* Landing page: 3D tilt cards, hero orbit, animated borders. Everything is transform/opacity only. */
+
+.lp-root {
+  position: relative;
+  height: 100vh;
+  height: 100dvh; /* fits the browser window; it only scrolls when the window is really tiny */
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* transparent: the site-wide SiteBackdrop (hero) paints the scene behind it */
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+.lp-vignette {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(70% 55% at 50% 22%, rgb(56 189 248 / 0.12), transparent 70%),
+    radial-gradient(45% 40% at 85% 80%, rgb(139 92 246 / 0.12), transparent 70%),
+    radial-gradient(120% 80% at 50% 120%, #070b16 30%, transparent 75%);
+}
+
+/* staggered entrance */
+@keyframes lp-rise { from { opacity: 0; transform: translateY(18px) scale(0.985); } to { opacity: 1; transform: none; } }
+.lp-rise { opacity: 0; animation: lp-rise 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; animation-delay: var(--d, 0ms); }
+
+/* ───── hero mark with 3D orbit ───── */
+.hero-stage { --hs: clamp(84px, 14vh, 140px); perspective: 900px; width: var(--hs); height: var(--hs); }
+.hero-tilt {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transform: rotateX(var(--hx, 0deg)) rotateY(var(--hy, 0deg));
+  transition: transform 0.25s ease-out;
+}
+.hero-glow {
+  position: absolute;
+  inset: 8px;
+  border-radius: 40px;
+  background: radial-gradient(circle, rgb(56 189 248 / 0.55), rgb(139 92 246 / 0.25) 55%, transparent 75%);
+  filter: blur(26px);
+  transform: translateZ(-30px);
+  animation: hero-pulse 4s ease-in-out infinite;
+}
+.hero-icon {
+  position: absolute;
+  inset: calc(var(--hs) * 0.093);
+  width: calc(var(--hs) * 0.813);
+  height: calc(var(--hs) * 0.813);
+  border-radius: calc(var(--hs) * 0.2);
+  transform: translateZ(40px);
+  animation: hero-float 5s ease-in-out infinite;
+  filter: drop-shadow(0 22px 30px rgb(2 6 23 / 0.7));
+}
+.hero-orbit, .hero-orbit2 {
+  position: absolute;
+  inset: calc(var(--hs) * -0.17);
+  border-radius: 9999px;
+  border: 1px solid rgb(148 163 184 / 0.22);
+  transform-style: preserve-3d;
+}
+.hero-orbit { transform: rotateX(74deg); animation: hero-orbit 9s linear infinite; }
+.hero-orbit2 { inset: calc(var(--hs) * -0.35); border-color: rgb(148 163 184 / 0.1); transform: rotateX(74deg) rotateY(-14deg); animation: hero-orbit 16s linear infinite reverse; }
+.hero-dot { position: absolute; width: 11px; height: 11px; border-radius: 9999px; }
+.hero-dot.d1 { top: -6px; left: calc(50% - 5px); background: #fbbf24; box-shadow: 0 0 14px 3px rgb(251 191 36 / 0.8); }
+.hero-dot.d2 { bottom: 14%; right: 1%; background: #a78bfa; box-shadow: 0 0 14px 3px rgb(167 139 250 / 0.8); }
+.hero-dot.d3 { bottom: 14%; left: 1%; background: #38bdf8; box-shadow: 0 0 14px 3px rgb(56 189 248 / 0.8); }
+@keyframes hero-orbit { to { transform: rotateX(74deg) rotateZ(360deg); } }
+@keyframes hero-float { 0%, 100% { transform: translateZ(40px) translateY(0); } 50% { transform: translateZ(40px) translateY(-8px); } }
+@keyframes hero-pulse { 0%, 100% { opacity: 0.8; } 50% { opacity: 1; } }
+
+/* headline shimmer */
+.lp-title {
+  background: linear-gradient(100deg, #fff 10%, #7dd3fc 38%, #c4b5fd 62%, #fff 90%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: lp-shimmer 7s ease-in-out infinite;
+}
+@keyframes lp-shimmer { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+
+.lp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 9999px;
+  border: 1px solid rgb(148 163 184 / 0.18);
+  background: rgb(15 23 42 / 0.55);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+  backdrop-filter: blur(10px);
+}
+.lp-chip b {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, #38bdf8, #8b5cf6);
+  font-size: 10px;
+  font-weight: 800;
+  color: #fff;
+}
+
+/* ───── 3D tilt cards ───── */
+.tilt-persp { perspective: 1100px; }
+.tilt-card {
+  position: relative;
+  display: block;
+  isolation: isolate;
+  border-radius: 24px;
+  border: 1px solid rgb(148 163 184 / 0.16);
+  box-shadow: 0 24px 50px -28px rgb(0 0 0 / 0.8), inset 0 1px 0 rgb(255 255 255 / 0.06);
+  transform-style: preserve-3d;
+  transform: rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.35s, border-color 0.35s;
+  will-change: transform;
+  outline: none;
+}
+/* The glass lives on its own layer: backdrop-filter on the card itself would flatten its 3D children. */
+.tilt-glass {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: linear-gradient(160deg, rgb(30 41 59 / 0.9), rgb(15 23 42 / 0.93));
+  backdrop-filter: blur(18px);
+}
+.tilt-card[data-hot] { transition: transform 0.09s linear, box-shadow 0.35s, border-color 0.35s; }
+.tilt-card:hover, .tilt-card:focus-visible {
+  border-color: rgb(var(--glow) / 0.6);
+  box-shadow: 0 40px 70px -26px rgb(var(--glow) / 0.5), 0 0 0 1px rgb(var(--glow) / 0.25), inset 0 1px 0 rgb(255 255 255 / 0.1);
+}
+.tilt-glare {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  opacity: 0;
+  background: radial-gradient(420px circle at var(--gx, 50%) var(--gy, 0%), rgb(255 255 255 / 0.16), transparent 55%);
+  transition: opacity 0.3s;
+}
+.tilt-card[data-hot] .tilt-glare { opacity: 1; }
+.tz-1 { transform: translateZ(22px); }
+.tz-2 { transform: translateZ(46px); }
+
+/* animated gradient border + sweep shine (feature tiles) */
+.fx-border { overflow: hidden; border-color: transparent; }
+.fx-border::before {
+  content: "";
+  position: absolute;
+  inset: -80%;
+  z-index: -2;
+  background: conic-gradient(from 0deg, transparent 0 62%, rgb(var(--glow) / 0.95) 82%, transparent 100%);
+  animation: lp-spin 7s linear infinite;
+  opacity: 0.55;
+  transition: opacity 0.3s;
+}
+.fx-border:hover::before, .fx-border:focus-visible::before { opacity: 1; animation-duration: 3s; }
+.fx-fill {
+  position: absolute;
+  inset: 1.5px;
+  z-index: -1;
+  border-radius: 22px;
+  background: linear-gradient(160deg, #111a2e, #0b1220);
+}
+.fx-shine {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: linear-gradient(110deg, transparent 35%, rgb(255 255 255 / 0.09) 50%, transparent 65%);
+  transform: translateX(-120%);
+}
+.fx-border:hover .fx-shine, .fx-border:focus-visible .fx-shine { animation: lp-shine 0.9s ease-out; }
+@keyframes lp-spin { to { transform: rotate(360deg); } }
+@keyframes lp-shine { to { transform: translateX(120%); } }
+
+.fx-arrow { transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.tilt-card:hover .fx-arrow, .tilt-card:focus-visible .fx-arrow { transform: translateX(6px); }
+.fx-icon { transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.tilt-card:hover .fx-icon { transform: translateZ(46px) scale(1.08) rotate(-4deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-rise { opacity: 1; animation: none; }
+  .hero-orbit, .hero-orbit2, .hero-icon, .hero-glow, .lp-title, .fx-border::before { animation: none; }
+  .tilt-card, .tilt-card[data-hot] { transform: none; transition: box-shadow 0.2s, border-color 0.2s; }
+}
+
+
+/* ───── fit-to-viewport layout (everything scales with the window height) ───── */
+.lp-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  gap: clamp(10px, 2.1vh, 24px);
+  padding-block: clamp(10px, 2.6vh, 40px);
+}
+.lp-hero-col { display: flex; flex-direction: column; align-items: center; text-align: center; gap: clamp(6px, 1.3vh, 14px); }
+.lp-hero-col .lp-chip-top { margin-top: clamp(16px, 3.8vh, 40px); }
+.lp-h1 { font-size: clamp(1.9rem, 6.2vh, 3.75rem); line-height: 1.05; font-weight: 800; letter-spacing: -0.02em; }
+.lp-p { max-width: 36rem; font-size: clamp(13px, 1.7vh, 15px); line-height: 1.5; color: rgb(203 213 225 / 0.9); }
+.lp-steps { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; }
+.lp-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(10px, 1.8vh, 20px); width: 100%; }
+@media (max-width: 639px) { .lp-grid2 { grid-template-columns: 1fr; } }
+.lp-card-pad { padding: clamp(14px, 2.6vh, 28px); }
+.lp-tile-pad { padding: clamp(10px, 1.8vh, 20px); }
+.lp-ico { width: clamp(40px, 6vh, 56px); height: clamp(40px, 6vh, 56px); }
+.lp-ico > svg { width: 50%; height: 50%; }
+.lp-card-title { font-size: clamp(1.1rem, 2.9vh, 1.5rem); font-weight: 800; color: #fff; }
+.lp-card-gap { margin-top: clamp(8px, 1.8vh, 20px); }
+.lp-card-foot { margin-top: clamp(10px, 2.2vh, 24px); }
+.lp-card-desc { margin-top: 0.4rem; font-size: clamp(12px, 1.6vh, 13.5px); line-height: 1.5; color: rgb(203 213 225 / 0.85); }
+.lp-tip { text-align: center; font-size: 11px; color: #94a3b8; }
+@media (max-height: 790px) { .lp-steps { display: none; } }
+@media (max-height: 860px) { .lp-tip { display: none; } }
+@media (max-height: 640px) { .lp-card-desc { display: none; } }

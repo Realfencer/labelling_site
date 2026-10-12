@@ -1,4 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect width="64" height="64" rx="14" fill="#0ea5e9"/>
-  <path d="M18 40V24h8.5c5 0 8 2.6 8 6.7 0 4.2-3 6.8-8.1 6.8H24v2.5H18zm6-7.2h2.2c2.2 0 3.5-1.1 3.5-3s-1.3-2.9-3.5-2.9H24v5.9zM37.2 40l6.4-16h6.2L56 40h-5.6l-1-2.8H43.7L42.7 40h-5.5zm8.2-7.1h4.1l-2-5.7-2.1 5.7z" fill="#fff"/>
+  <defs>
+    <linearGradient id="t" x1="6" y1="2" x2="58" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#172554"/>
+      <stop offset="0.55" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <radialGradient id="g" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(32 34) scale(26)">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="br" x1="9" y1="9" x2="55" y2="55" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="b" x1="32" y1="13" x2="32" y2="53" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#7dd3fc"/>
+    </linearGradient>
+    <linearGradient id="s" x1="12" y1="0" x2="52" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#t)"/>
+  <rect width="64" height="64" rx="15" fill="url(#g)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="14.25" stroke="#ffffff" stroke-opacity="0.09" stroke-width="1.5"/>
+  <g stroke="url(#br)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.5 19.5v-10h10"/>
+    <path d="M44.5 9.5h10v10"/>
+    <path d="M54.5 44.5v10h-10"/>
+    <path d="M19.5 54.5h-10v-10"/>
+  </g>
+  <path d="M28.6 13.5h6.8v6.4c0 1.9 6.1 3.6 6.1 9.4v19.4a3.8 3.8 0 0 1-3.8 3.8H26.3a3.8 3.8 0 0 1-3.8-3.8V29.3c0-5.8 6.1-7.5 6.1-9.4z" fill="url(#b)"/>
+  <path d="M27.4 33.2v13.6" stroke="#0f172a" stroke-opacity="0.18" stroke-width="2.4" stroke-linecap="round"/>
+  <rect x="12" y="35.6" width="40" height="2.4" rx="1.2" fill="url(#s)"/>
+  <rect x="12" y="34.6" width="40" height="4.4" rx="2.2" fill="url(#s)" opacity="0.35"/>
 </svg>

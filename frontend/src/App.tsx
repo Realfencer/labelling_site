@@ -1,3 +1,5 @@
+import BrandLoader from "./components/BrandLoader";
+import { useSiteBackdrop } from "./store/useBackdrop";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -1007,6 +1009,10 @@ export default function App({
   const theme = useLabeler((s) => s.theme);
   const toggleTheme = useLabeler((s) => s.toggleTheme);
   const appState = useLabeler((s) => s.appState);
+  // Ambient 3D scene (dark theme only). The Own day list is a light static page → lively; the labeling stage → calm:
+  // low fps, and frozen while you are working (pointer / keys), so it costs nothing while you draw boxes.
+  const onDayList = ownDaysPage || (appState?.review_mode === "local" && !appState?.own_day);
+  useSiteBackdrop(onDayList ? "vivid" : "calm");
   const detail = useLabeler((s) => s.detail);
   const boxes = useLabeler((s) => s.boxes);
   const refBoxes = useLabeler((s) => s.refBoxes);
@@ -4192,12 +4198,7 @@ export default function App({
       : 0;
   const activeRefVariant = referenceVariants[activeRefVariantIdx] || null;
   if (!appState) {
-    return (
-      <div className="flex h-full items-center justify-center bg-slate-50 text-slate-500 dark:bg-ink-950 dark:text-slate-400">
-        <span className="mr-3 inline-block h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-sky-500" />
-        Opening {topicSlug}…
-      </div>
-    );
+    return <BrandLoader label="Opening workspace" hint={`Loading ${topicSlug}`} accent="emerald" />;
   }
 
   const idx = viewIndex ?? detail?.index ?? appState.current_index;
@@ -4393,7 +4394,7 @@ export default function App({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-1.5 bg-slate-50 p-1.5 dark:bg-ink-950">
+    <div className="flex h-full min-h-0 flex-col gap-1.5 bg-slate-50 p-1.5 dark:bg-transparent">
       <TeamBar
         total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
         reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
@@ -6206,7 +6207,7 @@ function Pane({
   children: ReactNode;
 }) {
   return (
-    <section className="flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white p-2 shadow-soft dark:border-slate-800 dark:bg-ink-900">
+    <section className="flex min-h-[320px] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white p-2 shadow-soft dark:border-slate-800 dark:bg-ink-900/60 dark:backdrop-blur-[2px]">
       <div className="mb-1 flex shrink-0 items-center gap-2 px-1">
         <h2 className="shrink-0 text-xs font-bold text-slate-800 dark:text-slate-100">{title}</h2>
         {headerExtra}

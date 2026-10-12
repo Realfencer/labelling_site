@@ -91,7 +91,7 @@ export default function OwnDayList({ field, onFieldChange, onEnterDay, busy = fa
   const confirming = confirm ? confirm.filter((d) => byDate.has(d)) : [];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-ink-900">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-ink-900/55 dark:backdrop-blur-[3px]">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500 text-white">

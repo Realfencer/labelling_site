@@ -17,6 +17,8 @@ export function formatTopicTitle(raw: string): string {
     deduped.push(word);
   }
   while (deduped.length > 1 && /^\d+$/.test(deduped[deduped.length - 1])) deduped.pop();
+  // "Detect Beverage Detect" (element path + catalog name glued together) reads better as "Beverage Detect"
+  if (deduped.length > 2 && deduped[0].toLowerCase() === deduped[deduped.length - 1].toLowerCase()) deduped.shift();
   return deduped
     .map((w) => {
       const lower = w.toLowerCase();

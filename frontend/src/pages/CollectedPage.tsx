@@ -1,3 +1,4 @@
+import { useSiteBackdrop } from "../store/useBackdrop";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -622,6 +623,7 @@ function Drawer({
 }
 
 export default function CollectedPage() {
+  useSiteBackdrop("vivid");
   const [overview, setOverview] = useState<CollectorOverview | null>(null);
   const [rows, setRows] = useState<CollectorSubmission[]>([]);
   const [filter, setFilter] = useState("passed");
@@ -812,7 +814,7 @@ export default function CollectedPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-ink-950 dark:text-slate-100">
+    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-transparent dark:text-slate-100">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 px-4 py-2.5 backdrop-blur dark:border-slate-800 dark:bg-ink-900/95">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3">
           <Link to="/" className="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2 py-1 text-[12px] font-semibold hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">
