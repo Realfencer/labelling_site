@@ -17,13 +17,29 @@ router = APIRouter(prefix="/api/collector", tags=["collector"])
 
 _GT_CACHE: dict[str, Any] = {"at": 0.0, "data": None}
 _GT_LOCK = threading.Lock()
+_GT_COMPUTE_LOCK = threading.Lock()  # single-flight: one recompute while the others wait for its answer
+
+
+def _gt_fresh() -> dict | None:
+    with _GT_LOCK:
+        if _GT_CACHE["data"] is not None and time.time() - _GT_CACHE["at"] < 120:
+            return _GT_CACHE["data"]
+    return None
 
 
 def _gt_info() -> dict:
     """Passed-image summary (cached: scanning ~1.5k check files takes a few seconds)."""
-    with _GT_LOCK:
-        if _GT_CACHE["data"] is not None and time.time() - _GT_CACHE["at"] < 120:
-            return _GT_CACHE["data"]
+    hit = _gt_fresh()
+    if hit is not None:
+        return hit
+    with _GT_COMPUTE_LOCK:
+        hit = _gt_fresh()  # another request may have finished the scan while we waited
+        if hit is not None:
+            return hit
+        return _gt_compute()
+
+
+def _gt_compute() -> dict:
     project = gtset.find_project()
     blocks = gtset.passed_blocks(project) if project else []
     data = {

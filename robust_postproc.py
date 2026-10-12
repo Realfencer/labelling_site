@@ -146,6 +146,11 @@ def _boxes_to_arrays(boxes) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     )
 
 
+def _same_dets(a, b) -> bool:
+    (ab, asc, ac), (bb, bsc, bc) = a, b
+    return len(ab) == len(bb) and np.array_equal(ac, bc) and np.allclose(ab, bb) and np.allclose(asc, bsc, atol=1e-6)
+
+
 def _prune_floor(miner) -> float:
     """Lowest raw score any post-process setting in the search can still keep (0 = do not prune)."""
     if getattr(miner, "gate_y", None) is not None:
@@ -204,13 +209,20 @@ class StreamReplay:
         real_session = miner.session
         this = self
 
-        def pre(image):
+        def _strip_tensor(res):
+            """Keep what _preprocess returned (any arity: (x, meta), (x, r, pad, size), ...) minus the big input
+            tensor, which replay never needs: the recorded network output stands in for it."""
+            big = lambda v: isinstance(v, np.ndarray) and v.size >= 4096
+            if isinstance(res, tuple):
+                return tuple(None if big(v) else v for v in res)
+            return None if big(res) else res
+
+        def pre(*a, **kw):
             if this._mode == "record":
-                inp, meta = real_pre(image)
-                this._cur["calls"].append([meta, None])
-                return inp, meta
-            meta, _ = this._cur["calls"][this._k]
-            return None, meta
+                res = real_pre(*a, **kw)
+                this._cur["calls"].append([_strip_tensor(res), None])
+                return res
+            return this._cur["calls"][this._k][0]
 
         class _Session:
             @staticmethod
@@ -226,9 +238,18 @@ class StreamReplay:
             def __getattr__(self, name):  # get_providers(), get_inputs() ...
                 return getattr(real_session, name)
 
+        pairs = gt_pairs(gt_dir)
+        # Reference detections of the UNHOOKED miner on a few images: the hooks must not change what it reports
+        # (a miner whose hooked run silently fails would otherwise record "no boxes" everywhere and pass).
+        reference: dict[str, tuple] = {}
+        for ip, _lp in pairs[:3]:
+            im = cv2.imread(str(ip))
+            if im is not None:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    res = miner.predict_batch([im], offset=0, n_keypoints=0)
+                reference[ip.stem] = _boxes_to_arrays(getattr(res[0], "boxes", None) if res else None)
         miner._preprocess = pre
         miner.session = _Session()
-        pairs = gt_pairs(gt_dir)
         t0 = time.time()
         for i, (ip, lp) in enumerate(pairs):
             if cancel and cancel():
@@ -249,13 +270,19 @@ class StreamReplay:
         self.record_s = time.time() - t0
         if not self.rows:
             raise ReplayUnsupported("no GT images could be read")
+        for r in self.rows:
+            ref = reference.get(r["name"])
+            if ref is not None and not _same_dets(r["live"], ref):
+                raise ReplayUnsupported(
+                    f"recording changed the miner's output on {r['name']} ({len(ref[0])} boxes unhooked, "
+                    f"{len(r['live'][0])} recorded) — miner cannot be recorded"
+                )
         self._check_exact()
 
     def _check_exact(self) -> None:
         """Replay with the untouched settings must reproduce the recorded live detections box for box."""
         for i, (box, sc, cl) in enumerate(self.dets()):
-            lb, ls, lc = self.rows[i]["live"]
-            if len(box) != len(lb) or not (np.array_equal(cl, lc) and np.allclose(box, lb) and np.allclose(sc, ls, atol=1e-6)):
+            if not _same_dets((box, sc, cl), self.rows[i]["live"]):
                 raise ReplayUnsupported(
                     f"replay differs from the live miner on {self.rows[i]['name']} — miner post-process is not replayable"
                 )

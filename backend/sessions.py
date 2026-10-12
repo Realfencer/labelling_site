@@ -131,6 +131,16 @@ class SessionManager:
             self._sessions[new_sid] = SessionEntry(sid=new_sid, state=state, ip=ip)
             return new_sid, state, True
 
+    def discard(self, sid: str) -> None:
+        """Drop a session right away (used for throwaway warm-up sessions: they must not sit in memory for the 2h TTL)."""
+        with self._lock:
+            entry = self._sessions.pop(sid, None)
+        if entry is not None:
+            try:
+                entry.state.stop_collect()
+            except Exception:
+                pass
+
     def touch(self, sid: str) -> None:
         with self._lock:
             entry = self._sessions.get(sid)

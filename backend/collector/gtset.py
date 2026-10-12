@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,27 +52,49 @@ def _read_json(path: Path):
         return None
 
 
+# Parsed check files, keyed by path and invalidated by (mtime_ns, size): the passed list is rebuilt every 20s by the
+# Collected page and for every measurement, and used to re-read ~1.6k JSON files each time.
+_CHECK_MEMO: dict[str, tuple[int, int, int, int]] = {}  # path -> (mtime_ns, size, checks_total, checks_passed)
+_CHECK_LOCK = threading.Lock()
+
+
 def passed_blocks(project: Path) -> list[int]:
     """Blocks that are labeled AND 3/3 plausible, newest first."""
     checks_dir = project / "challenge" / "label_checks"
     labels_dir = project / "challenge" / "labels"
+    try:
+        with os.scandir(labels_dir) as it:
+            label_names = {e.name for e in it}
+    except OSError:
+        label_names = set()
     out: list[int] = []
     for entry in os.scandir(checks_dir):
-        if not entry.name.startswith("block_") or not entry.name.endswith(".json"):
+        name = entry.name
+        if not name.startswith("block_") or not name.endswith(".json"):
             continue
         try:
-            block = int(entry.name[6:-5])
+            block = int(name[6:-5])
         except ValueError:
             continue
-        data = _read_json(Path(entry.path))
-        if not isinstance(data, dict):
+        try:
+            st = entry.stat()
+        except OSError:
             continue
-        total = int(data.get("checks_total") or 0)
-        passed = int(data.get("checks_passed") or 0)
+        memo = _CHECK_MEMO.get(entry.path)
+        if memo is not None and memo[0] == st.st_mtime_ns and memo[1] == st.st_size:
+            total, passed = memo[2], memo[3]
+        else:
+            data = _read_json(Path(entry.path))
+            if isinstance(data, dict):
+                total = int(data.get("checks_total") or 0)
+                passed = int(data.get("checks_passed") or 0)
+            else:
+                total = passed = 0  # unreadable / not an object: never "passed"
+            with _CHECK_LOCK:
+                _CHECK_MEMO[entry.path] = (st.st_mtime_ns, st.st_size, total, passed)
         if total < 3 or passed < total:
             continue
-        label = labels_dir / f"block_{block}.txt"
-        if not label.is_file():
+        if f"block_{block}.txt" not in label_names:
             continue
         out.append(block)
     out.sort(reverse=True)

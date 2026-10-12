@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import hashlib
 import importlib.util
 import json
@@ -1263,7 +1264,9 @@ def full_url(path_or_url: str) -> str:
     return f"{BASE_URL}/{path_or_url.lstrip('/')}"
 
 
+@functools.lru_cache(maxsize=65536)
 def safe_filename(value: str) -> str:
+    # Called for every item of a topic enter with a handful of distinct values (skill paths, record keys).
     return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in value)
 
 
@@ -2357,6 +2360,22 @@ def own_pool_fingerprint(image_dir: Path, label_dir: Path) -> tuple[int, int, in
     return n_images, newest, n_labels
 
 
+_LAST_OWN_SCAN: tuple[str, float, int, int] | None = None  # (resolved image dir, monotonic time, n images, newest mtime_ns)
+
+
+def last_own_scan(image_dir: Path, since: float) -> tuple[int, int] | None:
+    """(image count, newest mtime_ns) of the image scan done by discover_own_pool_images() at or after ``since``."""
+    scan = _LAST_OWN_SCAN
+    if scan is None or scan[1] < since:
+        return None
+    try:
+        if scan[0] != str(image_dir.expanduser().resolve()):
+            return None
+    except OSError:
+        return None
+    return scan[2], scan[3]
+
+
 def discover_own_pool_images(image_dir: Path, label_dir: Path) -> list[dict]:
     """Scan the per-topic Own pool (project local/images). Labels optional."""
     image_dir = image_dir.expanduser().resolve()
@@ -2370,7 +2389,12 @@ def discover_own_pool_images(image_dir: Path, label_dir: Path) -> list[dict]:
     label_root = str(label_dir)
     out: list[dict] = []
     seen_stems: set[str] = set()
-    for abs_path, rel, mtime_ns, size, is_link in _scan_pool_images(image_dir):
+    scan = _scan_pool_images(image_dir)
+    # Remembered so the caller can build its change-detection fingerprint from THIS scan instead of stat()ing
+    # every image a second time right afterwards (see ReviewAppState._reload_own_pool_locked).
+    global _LAST_OWN_SCAN
+    _LAST_OWN_SCAN = (str(image_dir), time.monotonic(), len(scan), max((r[2] for r in scan), default=0))
+    for abs_path, rel, mtime_ns, size, is_link in scan:
         rel_path = Path(rel)
         stem = safe_filename(rel_path.with_suffix("").as_posix().replace("/", "_").replace("\\", "_"))
         if not stem:
@@ -2671,6 +2695,20 @@ def build_block_image_index(cache_root: Path, skill: Skill) -> dict[int, Path]:
     return index
 
 
+@functools.lru_cache(maxsize=262144)
+def _realpath_str(path: str) -> str:
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
+def _resolved(path: Path) -> Path:
+    """``path.expanduser().resolve()`` memoized: a topic enter resolves thousands of the same image / cache paths
+    (each ``resolve()`` is several lstat calls); symlinks do not change while the server runs."""
+    return Path(_realpath_str(str(path.expanduser())))
+
+
 def _derived_cache_root(image_path: Path, cache_root: Path) -> Path:
     """Prefer skill-scoped derived caches: score_cache/<skill>/{display_jpeg,...}.
 
@@ -2683,8 +2721,8 @@ def _derived_cache_root(image_path: Path, cache_root: Path) -> Path:
     with this image's winner boxes.
     """
     try:
-        resolved = image_path.expanduser().resolve()
-        root = cache_root.expanduser().resolve()
+        resolved = _resolved(image_path)
+        root = _resolved(cache_root)
     except OSError:
         return cache_root
     parts = resolved.parts
@@ -2707,7 +2745,7 @@ def _derived_cache_root(image_path: Path, cache_root: Path) -> Path:
 
 def _is_own_pool_image(image_path: Path) -> bool:
     try:
-        parts = image_path.expanduser().resolve().parts
+        parts = _resolved(image_path).parts
     except OSError:
         parts = image_path.parts
     if "local" not in parts or "images" not in parts:

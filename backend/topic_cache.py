@@ -191,7 +191,11 @@ def try_hydrate(state: ReviewAppState) -> bool:
         if snap.project_id != state.project_id:
             return False
         stamp = topic_disk_stamp(state.project_root, skill.element_path)
-        if stamp != snap.stamp:
+        # Compare winners / images only. The last field (labels/ folder mtime) moves on EVERY label save, which used
+        # to throw the snapshot away and send the next enter down the cold path (scrub + full reload, 5-90s under
+        # load). The hydrate branch of configure_project re-syncs reviewed flags and label checks from disk, seeds
+        # the first 48 rows' boxes from disk and refreshes the rest in background enrichment.
+        if stamp[:3] != snap.stamp[:3]:
             return False
         expected = top_by_block_count(state.project_root, skill.element_path)
         if expected is not None:

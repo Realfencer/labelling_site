@@ -43,26 +43,47 @@ def main() -> int:
         if ship.exists():
             shutil.rmtree(ship)
         shutil.copytree(args.pack, ship)
+        import robust_postproc
+
         gt = Path(args.gt)
-        items = load_items(gt)
-        if not items:
+        # Array / gated miners: the robust search streams the GT from disk and returns exact before/after scores,
+        # so the images never all sit in the 3 GB container. Other miner styles keep the in-memory flow.
+        robust_style = fbm.detect_miner_style(ship / "miner.py") in {"array", "unknown"}
+        items = None
+        if not robust_style:
+            items = load_items(gt)
+            if not items:
+                raise RuntimeError("no GT items")
+            progress({"phase": "baseline", "message": "Scoring baseline…"})
+            summary["baseline_score"] = fbm.score_pack(ship, items, n_classes, quiet=True).get("score")
+        elif not robust_postproc.gt_pairs(gt):
             raise RuntimeError("no GT items")
-        progress({"phase": "baseline", "message": "Scoring baseline…"})
-        baseline = fbm.score_pack(ship, items, n_classes, quiet=True)
-        summary["baseline_score"] = baseline.get("score")
         t0 = time.time()
         result = fbm.deep_postproc(
             ship / "weights.onnx", gt, n_classes, class_names,
             passes=args.passes, random_n=args.random_n, pack_dir=ship, items=items,
             progress_cb=progress, cancel_cb=None,
         )
-        if result.get("postproc_applied") and isinstance(result.get("params"), dict):
+        robust = result.get("style") == "robust"
+        if not robust and result.get("postproc_applied") and isinstance(result.get("params"), dict):
             fbm.apply_postproc_to_miner(ship / "miner.py", result["params"])
+        if summary.get("baseline_score") is None:
+            base = result.get("baseline") if isinstance(result.get("baseline"), dict) else {}
+            summary["baseline_score"] = base.get("score", result.get("baseline_score"))
         progress({"phase": "latency", "message": "Checking latency gate…"})
-        gate = fbm.ensure_pack_passes_latency(ship, items, n_sample=min(16, len(items)))
-        final = fbm.score_pack(ship, items, n_classes, quiet=True)
+        timing = items if items else robust_postproc.load_items_sample(gt, 16)
+        gate = fbm.ensure_pack_passes_latency(ship, timing, n_sample=min(16, len(timing)))
+        if robust and isinstance(result.get("final"), dict) and not (gate.get("harden") or {}).get("changed") \
+                and not result.get("latency_reverted"):
+            final = result["final"]  # exact: the replay was checked against the live miner and the written file
+        else:
+            if items is None:
+                items = load_items(gt)
+            final = fbm.score_pack(ship, items, n_classes, quiet=True)
         summary.update(
             ok=True,
+            holdout=result.get("holdout"),
+            warning=result.get("warning"),
             final_score=final.get("score"),
             postproc_applied=bool(result.get("postproc_applied")),
             params=result.get("params"),

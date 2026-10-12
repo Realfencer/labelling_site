@@ -14,10 +14,12 @@ OpenAI images (blur / saturation / palette), which can erase the checkerboard, s
 
 from __future__ import annotations
 
+import functools
 import json
 import queue
 import re
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1] / "review_datasets"
@@ -84,12 +86,20 @@ def save_rules(new: dict) -> dict:
     return data
 
 
+_registry_checked_at = 0.0
+
+
 def own_registry() -> dict[str, str]:
-    global _registry
+    global _registry, _registry_checked_at
+    # Called once per Own item (12k+ per day-list / pool listing): re-stat the file at most once a second.
+    now = time.monotonic()
+    if _registry is not None and now - _registry_checked_at < 1.0:
+        return _registry[1]
     try:
         mt = OWN_REGISTRY.stat().st_mtime
     except OSError:
         return {}
+    _registry_checked_at = now
     if _registry is None or _registry[0] != mt:
         try:
             _registry = (mt, json.loads(OWN_REGISTRY.read_text(encoding="utf-8")))
@@ -218,6 +228,13 @@ def of(item) -> str | None:
         return None
 
 
+@functools.lru_cache(maxsize=131072)
+def _day_of_second(sec: int) -> str:
+    from datetime import datetime
+
+    return datetime.fromtimestamp(sec).strftime("%Y-%m-%d")
+
+
 def _own_day(item) -> str | None:
     """The Own page's day of an image: file mtime, server local time (same as ReviewAppState._item_day_key)."""
     from datetime import datetime
@@ -225,7 +242,7 @@ def _own_day(item) -> str | None:
     ns = item.record.get("_mtime_ns") if isinstance(item.record, dict) else None
     try:
         if ns:
-            return datetime.fromtimestamp(int(ns) / 1e9).strftime("%Y-%m-%d")
+            return _day_of_second(int(ns) // 1_000_000_000)
         if item.image_path is not None:
             return datetime.fromtimestamp(item.image_path.stat().st_mtime).strftime("%Y-%m-%d")
     except (OSError, OverflowError, ValueError):

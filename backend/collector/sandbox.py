@@ -74,7 +74,13 @@ def run_eval(pack_dir: Path, images_dir: Path, out_dir: Path) -> dict:
     return {"ok": False, "error": f"container exit {proc.returncode}: {tail}"}
 
 
-_LIB_FILES = ("find_best_model.py", "combine_models.py", "eval_leaderboard_gt300.py", "tune_exp_onnx.py", "latency_rule.py")
+_LIB_FILES = (
+    "find_best_model.py", "combine_models.py", "eval_leaderboard_gt300.py", "tune_exp_onnx.py", "latency_rule.py",
+    "robust_postproc.py",
+    # find_best_model.validator_score scores with backend.core (the exact validator metric); core.py only needs
+    # cv2/numpy/requests at import time, so the package is mounted with just these two files.
+    "backend/__init__.py", "backend/core.py",
+)
 
 
 def run_dpp(pack_dir: Path, gt_dir: Path, out_dir: Path, classes: list[str], *, passes: int = 4, random_n: int = 300,

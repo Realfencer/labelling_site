@@ -450,6 +450,8 @@ class OwnHfImportManager:
         replaced = 0
         skipped = 0
         labels_written = 0
+        # One listing up front (was: a full directory listing of the whole Own pool for EVERY imported image).
+        existing_lc = {p.name.lower() for p in image_dir.iterdir() if p.is_file()}
 
         for row in job.pairs:
             dest_name = str(row["dest_name"])
@@ -459,9 +461,7 @@ class OwnHfImportManager:
                 skipped += 1
                 continue
             dest = image_dir / dest_name
-            exists = dest.exists() or any(
-                p.name.lower() == dest_lc for p in image_dir.iterdir() if p.is_file()
-            )
+            exists = dest.exists() or dest_lc in existing_lc
             if exists and dest_lc not in replace_lc:
                 skipped += 1
                 continue
@@ -472,6 +472,7 @@ class OwnHfImportManager:
                     if callable(clear):
                         clear(dest if dest.exists() else image_dir / dest_name, dest_name)
                 shutil.copy2(src_image, dest)
+                existing_lc.add(dest_lc)
                 if exists:
                     replaced += 1
                 else:

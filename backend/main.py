@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
+import os
+import secrets
 import shutil
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +20,8 @@ from typing import Annotated
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware as StarletteGZipMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -85,9 +90,65 @@ collab.bind_session_manager(sessions)
 background_collector = BackgroundCollector(REVIEW_DIR, sessions.refresh_shared_skills)
 
 
+# CPython's GIL hands over every 5 ms by default. Background jobs here (topic hydrate / enrichment / flag refresh)
+# are long pure-Python loops, and every request thread that wakes from a file read has to wait for the next hand-over:
+# a handler doing a few hundred small file operations then takes seconds. Measured on this server with one busy
+# background thread: warm topic enter 4.9s at 5 ms, 2.5s at 1 ms.
+sys.setswitchinterval(0.001)
+
+_log = logging.getLogger("labeler.prewarm")
+
+
+def _prewarm_topics() -> None:
+    """Load the active topic(s) into the shared snapshot cache right after startup, so the first user's
+    "Opening…" is a clone of memory instead of thousands of small disk reads (92s on a busy disk).
+
+    Uses a throwaway session that never writes the shared state.json (your saved cursor / mode) and is discarded
+    afterwards. Runs at low CPU priority so it never competes with real requests."""
+    from .lowprio import low_priority
+
+    def run() -> None:
+        time.sleep(3.0)  # let the server start answering first
+        try:
+            active = [s for s in list(sessions.shared_skills) if s.status == "active"][:2]
+            for skill in active:
+                sid, state, _ = sessions.get_or_create("prewarm" + secrets.token_hex(12))
+                try:
+                    state.save_state = lambda: None  # never touch the shared project state.json
+                    for name in (
+                        "_schedule_own_pool_prewarm",
+                        "_schedule_post_configure_enrichment",
+                        "_schedule_warm_image_pyramid",
+                        "_schedule_full_label_checks",
+                    ):
+                        setattr(state, name, lambda *a, **k: None)
+                    t0 = time.time()
+                    state.bind_skill_fast(skill)
+                    try:  # fills the shared parsed-label cache, so the first real Own session is not the one paying for it
+                        state.reload_own_pool(force=False, dedupe=False)
+                    except Exception:
+                        _log.exception("own pool prewarm failed")
+                    time.sleep(1.0)  # snapshot publish is debounced by 0.35s
+                    print(f"PREWARM topic {skill.element_path} ready in {time.time() - t0:.1f}s", flush=True)  # visible in the journal
+                finally:
+                    sessions.discard(sid)
+            try:  # the Collected page's first poll scans ~1.6k check files (5s on a cold, busy disk)
+                from .collector import api as collector_api
+
+                collector_api._gt_info()
+            except Exception:
+                _log.exception("collector summary prewarm failed")
+        except Exception:
+            _log.exception("topic prewarm failed (harmless: the first enter is just slower)")
+
+    threading.Thread(target=low_priority(run), daemon=True, name="topic-prewarm").start()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _load_dotenv()
+    if (os.environ.get("PREWARM_TOPICS", "1").strip().lower() not in {"0", "false", "no", "off"}):
+        _prewarm_topics()
     vault.migrate_legacy()  # one-time: Chutes key from the old plain-text file into the vault
     vault.start_rescan_loop()  # keeps the list of your Hugging Face models fresh
     background_collector.start()
@@ -170,6 +231,19 @@ async def auth_gate_middleware(request: Request, call_next):
         # so a stored 404 (the server was still reloading a session) would hide the real image for good.
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+
+def _fast_json(payload: dict) -> Response:
+    """JSON answer without FastAPI's jsonable_encoder.
+
+    The state payload is ~1.1 MB of plain dicts / lists / numbers (1.7k filmstrip rows). FastAPI walks it in pure
+    Python before serialising (~100 ms per answer, all of it holding the GIL, on every Done / pick / poll), while
+    plain ``json.dumps`` of the same data takes ~15 ms. Anything that is not JSON-native falls back to the old path."""
+    try:
+        return JSONResponse(payload)
+    except (TypeError, ValueError):
+        return JSONResponse(jsonable_encoder(payload))
 
 
 CACHE_HEADERS = {"Cache-Control": "private, max-age=60, must-revalidate"}
@@ -656,11 +730,13 @@ def enter_topic(
         # Do NOT refresh shared skills on the hot enter path — turbo/Studio network
         # made "Opening {topic}…" feel stuck. Refresh in the background instead.
         _refresh_skills_in_background()
-        return state.enter_topic(
-            slug,
-            start_collect=False,
-            workspace=workspace,
-            prefer_item_key=prefer_item_key,
+        return _fast_json(
+            state.enter_topic(
+                slug,
+                start_collect=False,
+                workspace=workspace,
+                prefer_item_key=prefer_item_key,
+            )
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -673,7 +749,7 @@ def get_state(state: AppStateDep, lite: bool = True) -> dict:
     # Lite polls (SSE fallback) must stay cheap — disk exists() over every row is wasteful.
     if not lite:
         state.refresh_reviewed_flags(sticky_memory=True)
-    return state.to_public_state(lite=lite)
+    return _fast_json(state.to_public_state(lite=lite))
 
 
 @app.get("/api/events")
@@ -821,7 +897,7 @@ def set_review_mode(body: ReviewModeRequest, state: AppStateDep) -> dict:
         state.status_message = f"Switched to {label} labeling"
         # Own: always window boxes — full left-box dump stalls the browser on 3k+ pools.
         win = 8 if body.mode == "local" else 28
-        return state.to_public_state(lite=True, boxes_window=win)
+        return _fast_json(state.to_public_state(lite=True, boxes_window=win))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -908,7 +984,7 @@ def list_own_days(state: AppStateDep) -> dict:
 def set_own_day(body: OwnDayRequest, state: AppStateDep) -> dict:
     try:
         state.set_own_day(body.date, prefer_item_key=body.prefer_item_key, field=body.field)
-        return state.to_public_state(lite=True, boxes_window=8)
+        return _fast_json(state.to_public_state(lite=True, boxes_window=8))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1482,7 +1558,7 @@ def mark_reviewed(index: int, state: AppStateDep) -> dict:
     _team_guard(state, key)
     state.mark_reviewed(index)
     _team_after_save(state, key, reviewed=True, boxes=_boxes_of(state, idx))
-    return state.to_public_state(lite=True, boxes_window=28)
+    return _fast_json(state.to_public_state(lite=True, boxes_window=28))
 
 
 @app.post("/api/challenges/{index}/accept-reference")
@@ -1495,7 +1571,7 @@ def accept_reference(index: int, body: AcceptReferenceRequest, state: AppStateDe
     try:
         state.accept_reference_labels(index, variant_idx=body.variant_idx, item_key=body.item_key)
         _team_after_save(state, key, reviewed=True, boxes=_boxes_of(state, idx))
-        return state.to_public_state(lite=True, boxes_window=28)
+        return _fast_json(state.to_public_state(lite=True, boxes_window=28))
     except HTTPException:
         raise
     except Exception as exc:

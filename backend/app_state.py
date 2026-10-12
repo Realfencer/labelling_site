@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import functools
 import os
 import re
 import secrets
@@ -31,6 +32,20 @@ log = logging.getLogger(__name__)
 _SANITIZE_LOCK = threading.Lock()
 # (labels dir, n_classes) -> {file name: (mtime_ns, size) of the version that passed the check}
 _SANITIZE_SEEN: dict[tuple[str, int], dict[str, tuple[int, int]]] = {}
+# The class-id sweep of a project's label folders runs from every _apply_topic_class_names() (4-5x per topic enter,
+# each one a stat() of ~14k files). It is a safety net for old bugs, so once per window per project is plenty.
+@functools.lru_cache(maxsize=131072)
+def _day_of_second(sec: int) -> str:
+    """Calendar day (server local time) of an mtime second — called per Own item by every day-list / day filter."""
+    return datetime.fromtimestamp(sec).strftime("%Y-%m-%d")
+
+
+# Parsed Own label files, shared by every session: (dir, name, mtime_ns, size, w, h) -> box dicts. A new browser session used
+# to re-read and re-parse ~11k label files to rebuild the pool (3-5s); with this it only re-reads files that changed.
+_OWN_BOXES_CACHE: dict[tuple, list[dict]] = {}
+_OWN_BOXES_CACHE_MAX = 60000
+_SANITIZE_PROJECT_TTL_S = 30.0
+_SANITIZE_PROJECT_DONE: dict[tuple[str, int], float] = {}
 
 
 def _safe_repo(repo_id: str) -> str:
@@ -199,7 +214,7 @@ class ReviewAppState:
         ns = item.record.get("_mtime_ns") if isinstance(item.record, dict) else None
         if ns:
             try:
-                return datetime.fromtimestamp(int(ns) / 1e9).strftime("%Y-%m-%d")
+                return _day_of_second(int(ns) // 1_000_000_000)
             except (OSError, OverflowError, ValueError):
                 pass
         return ReviewAppState._mtime_day_key(item.image_path)
@@ -657,6 +672,13 @@ class ReviewAppState:
         if n_classes <= 0:
             return 0
         project_set = {str(n).strip().lower() for n in names}
+        sweep_key = (str(self.project_root), n_classes)
+        now = time.monotonic()
+        with _SANITIZE_LOCK:
+            last = _SANITIZE_PROJECT_DONE.get(sweep_key)
+            if last is not None and now - last < _SANITIZE_PROJECT_TTL_S:
+                return 0
+            _SANITIZE_PROJECT_DONE[sweep_key] = now  # claimed before the sweep: concurrent callers skip it too
         changed = 0
         for root in (
             self.project_root / "challenge",
@@ -991,6 +1013,7 @@ class ReviewAppState:
             loaded = [idx for idx, item in enumerate(self.challenge_items) if item.loaded]
             if loaded and self.current_index < 0:
                 self.current_index = loaded[0]
+            self._topic_loaded_at = time.monotonic()
             self._schedule_post_configure_enrichment()
             self._schedule_warm_image_pyramid(
                 prefer_index=self.current_index if self.current_index >= 0 else 0
@@ -1023,6 +1046,7 @@ class ReviewAppState:
             if warm_n >= 4:
                 break
         topic_cache.publish_from_state(self)
+        self._topic_loaded_at = time.monotonic()
         # Heavy enrichment (rest of top boxes / repairs / pyramids) stays off-thread.
         self._schedule_post_configure_enrichment()
         self._schedule_full_label_checks()
@@ -1658,10 +1682,12 @@ class ReviewAppState:
             # Unreviewed + no prediction_cache yet: run winner ONNX and store.
             self._maybe_cache_prediction(item)
 
-    def _challenge_item_for_block(self, block: int) -> core.ChallengeRecord | None:
+    def _challenge_item_for_block(self, block: int, *, scan_fallback: bool = True) -> core.ChallengeRecord | None:
         item = self._challenge_by_block.get(int(block))
         if item is not None and item.source_type == "challenge":
             return item
+        if not scan_fallback:
+            return None
         for cand in self.challenge_items:
             if cand.source_type == "challenge" and cand.block == block:
                 return cand
@@ -1721,6 +1747,9 @@ class ReviewAppState:
         top_paths = self._top_by_block_paths_for_active()
         if not top_paths:
             return
+        # The per-record lookup below used to fall back to a linear scan of challenge_items on every miss
+        # (O(N^2): 1.6M block() calls per enter at N~1.7k). Rebuild the map once and keep it current instead.
+        self._rebuild_block_maps()
         # Active tops first so live winners win on any future block collision.
         for top_path in top_paths:
             try:
@@ -1735,7 +1764,7 @@ class ReviewAppState:
                 if not completed_topics.record_belongs_to_topic(self.active_skill, record):
                     continue
                 block = int(record["block"])
-                existing = self._challenge_item_for_block(block)
+                existing = self._challenge_item_for_block(block, scan_fallback=False)
                 if existing is not None:
                     if not existing.loaded:
                         self._bind_cached_challenge_item(existing, record)
@@ -1745,6 +1774,7 @@ class ReviewAppState:
                 item = core.ChallengeRecord(record=record, source_type="challenge")
                 self._bind_cached_challenge_item(item, record)
                 self.challenge_items.append(item)
+                self._challenge_by_block[block] = item
                 self._known_blocks.add(block)
         self.challenge_items = sorted(self.challenge_items, key=lambda c: c.block, reverse=True)
         self._rebuild_known_blocks()
@@ -2462,6 +2492,45 @@ class ReviewAppState:
             except Exception:
                 pass
 
+    @staticmethod
+    def _label_dir_stats(folder: Path) -> dict[str, tuple[int, int]]:
+        """name -> (size, mtime_ns) for ``*.txt`` and (0, 0) for every other entry, from ONE scandir."""
+        out: dict[str, tuple[int, int]] = {}
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name.endswith(".txt"):
+                        try:
+                            st = entry.stat()
+                            out[name] = (st.st_size, st.st_mtime_ns)
+                        except OSError:
+                            continue
+                    else:
+                        out[name] = (0, 0)
+        except OSError:
+            pass
+        return out
+
+    @staticmethod
+    def _label_dir_sizes(folder: Path) -> dict[str, int]:
+        """name -> size for the entries of a label folder in ONE scandir (sizes only for ``*.txt``)."""
+        out: dict[str, int] = {}
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name.endswith(".txt"):
+                        try:
+                            out[name] = entry.stat().st_size
+                        except OSError:
+                            continue
+                    else:
+                        out[name] = 0
+        except OSError:
+            pass
+        return out
+
     def refresh_reviewed_flags(self, *, sticky_memory: bool = True) -> None:
         """Sync ``reviewed`` with on-disk GT labels.
 
@@ -2473,15 +2542,22 @@ class ReviewAppState:
         already marked Done while ``saveBoxes`` is still writing. Use
         ``sticky_memory=False`` when counting/exporting GT that must exist on disk.
         """
+        # One scandir per label folder instead of 2-3 pathlib stat() calls per item (~14k items, 38k stats,
+        # ~1.2s per call, 3 calls per topic enter). Same questions asked of the same files.
+        snaps: dict[Path, dict[str, int]] = {}
         for item in (*self.challenge_items, *self.local_items):
             _, label_dir, _ = self.output_dirs_for_item(item)
-            label_path = core.label_path_for_item(item, label_dir)
+            names = snaps.get(label_dir)
+            if names is None:
+                names = snaps[label_dir] = self._label_dir_sizes(label_dir)
             if item.source_type == "local":
-                has_label = core.own_has_label_file(label_path)
+                stem = str(item.record.get("stem", item.image_path.stem if item.image_path else "item"))
+                label_name = f"{stem}.txt"
+                has_label = names.get(label_name, 0) > 0  # core.own_has_label_file: a file with size > 0
                 item.has_label = has_label
                 # Done only via .done marker. Label without marker = SAM3 draft —
                 # never sticky-promote to Done (that made refresh flip SAM3→Done).
-                on_disk_done = core.own_is_done(label_path)
+                on_disk_done = f"{label_name}.done" in names  # core.own_is_done
                 if on_disk_done:
                     item.reviewed = True
                 elif has_label:
@@ -2499,7 +2575,7 @@ class ReviewAppState:
                     item.checks_f = None
                     item.checks_kind = ""
             else:
-                on_disk = label_path.exists()
+                on_disk = f"block_{item.block}.txt" in names  # core.label_path_for_block(...).exists()
                 item.has_label = on_disk
                 if on_disk:
                     item.reviewed = True
@@ -2861,9 +2937,21 @@ class ReviewAppState:
         except Exception:
             pass
 
-    def _own_pool_signature(self) -> tuple[int, int, int]:
-        """Cheap fingerprint: image count, newest image mtime, label count with size>0."""
-        return core.own_pool_fingerprint(self.local_image_dir, self.local_label_dir)
+    def _own_pool_signature(self, *, fresh: bool = False) -> tuple[int, int, int]:
+        """Cheap fingerprint: image count, newest image mtime, label count with size>0.
+
+        Still ~23k stat() calls for a 12k-image pool (0.3s warm, tens of seconds on a busy disk), and one navigation
+        asks several times (enter, days, day, refresh). Answers younger than 1.5s are reused; ``fresh=True`` (taken
+        right after a reload) always re-reads the disk.
+        """
+        paths = (str(self.local_image_dir), str(self.local_label_dir))
+        memo = getattr(self, "_own_sig_memo", None)
+        now = time.monotonic()
+        if not fresh and memo is not None and memo[2] == paths and now - memo[0] < 1.5:
+            return memo[1]
+        sig = core.own_pool_fingerprint(self.local_image_dir, self.local_label_dir)
+        self._own_sig_memo = (time.monotonic(), sig, paths)
+        return sig
 
     def _own_pool_needs_reload(self) -> bool:
         if not self.local_items:
@@ -2979,6 +3067,7 @@ class ReviewAppState:
             return self._reload_own_pool_locked(dedupe=dedupe)
 
     def _reload_own_pool_locked(self, *, dedupe: bool = False) -> int:
+        reload_started = time.monotonic()
         # Full-file hashing of ~2k images blocks Own hard-refresh — skip by default.
         removed_dupes = self._dedupe_own_pool_identical_images() if dedupe else 0
         pairs = core.discover_own_pool_images(self.local_image_dir, self.local_label_dir)
@@ -2986,6 +3075,8 @@ class ReviewAppState:
         dims_cache = self._load_own_dims_cache()
         dims_dirty = False
         rebuilt: list[core.ChallengeRecord] = []
+        label_snap: dict[str, tuple[int, int]] | None = None
+        label_snap_dir: Path | None = None
         for pair in pairs:
             stem = str(pair.get("stem", ""))
             if not stem:
@@ -3037,12 +3128,15 @@ class ReviewAppState:
             item.record["_mtime_ns"] = mtime_ns
 
             _, label_dir, _ = self.output_dirs_for_item(item)
-            label_path = core.label_path_for_item(item, label_dir)
+            if label_snap is None or label_snap_dir != label_dir:
+                label_snap, label_snap_dir = self._label_dir_stats(label_dir), label_dir
+            label_name = f"{item.record.get('stem', item.image_path.stem if item.image_path else 'item')}.txt"
+            label_ent = label_snap.get(label_name)
             prev_reviewed = bool(item.reviewed)
             prev_cached = list(item.cached_left_boxes) if item.cached_left_boxes else None
-            has_label = core.own_has_label_file(label_path)
+            has_label = bool(label_ent and label_ent[0] > 0)  # core.own_has_label_file: a file with size > 0
             # Done only via .done marker — label without marker stays SAM3 draft.
-            done_disk = core.own_is_done(label_path)
+            done_disk = f"{label_name}.done" in label_snap  # core.own_is_done
             # Sticky Done only while a Done label is still flushing (no file yet).
             # Never sticky-promote a SAM3 draft (has_label, no .done).
             if done_disk:
@@ -3058,19 +3152,29 @@ class ReviewAppState:
             item.has_label = has_label or reviewed
             # Seed left: SAM3/Done labels when present; else winner preds for New.
             _, _, prediction_dir = self.output_dirs_for_item(item)
-            pred_path = core.prediction_path_for_item(item, prediction_dir)
             item.cached_left_boxes = []
-            if has_label and label_path.is_file() and width > 0 and height > 0:
-                try:
-                    labels = core.load_yolo_labels(label_path, width, height)
-                    # Empty SAM3 ("# no detections") still counts as SAM3 left seed.
-                    item.cached_left_boxes = core.detection_boxes_to_dicts(labels) if labels else []
-                except Exception:
-                    pass
+            if has_label and width > 0 and height > 0:
+                cache_key = (str(label_dir), label_name, label_ent[1], label_ent[0], width, height)
+                hit = _OWN_BOXES_CACHE.get(cache_key)
+                if hit is not None:
+                    item.cached_left_boxes = [dict(d) for d in hit]
+                else:
+                    try:
+                        labels = core.load_yolo_labels(label_dir / label_name, width, height)
+                        # Empty SAM3 ("# no detections") still counts as SAM3 left seed.
+                        item.cached_left_boxes = core.detection_boxes_to_dicts(labels) if labels else []
+                        if len(_OWN_BOXES_CACHE) >= _OWN_BOXES_CACHE_MAX:
+                            _OWN_BOXES_CACHE.clear()
+                        _OWN_BOXES_CACHE[cache_key] = [dict(d) for d in item.cached_left_boxes]
+                    except Exception:
+                        pass
+            pred_path = None
+            if not item.cached_left_boxes and not (reviewed and prev_cached is not None):
+                pred_path = core.prediction_path_for_item(item, prediction_dir)
             if not item.cached_left_boxes and reviewed and prev_cached is not None:
                 # Keep in-memory GT while the label file is still flushing.
                 item.cached_left_boxes = prev_cached
-            elif not item.cached_left_boxes and not has_label and not reviewed and width > 0 and height > 0 and pred_path.is_file():
+            elif not item.cached_left_boxes and not has_label and not reviewed and width > 0 and height > 0 and pred_path is not None and pred_path.is_file():
                 try:
                     preds = core.load_yolo_labels(pred_path, width, height)
                     if preds:
@@ -3086,7 +3190,14 @@ class ReviewAppState:
             item.record["block"] = i
         self.local_items = rebuilt
         self._rebuild_block_maps()
-        self._own_pool_sig = self._own_pool_signature()
+        # Fingerprint of exactly what was just loaded, from the scans the rebuild already did (no second pass of ~23k stats).
+        scan = core.last_own_scan(self.local_image_dir, reload_started)
+        if scan is not None and label_snap is not None:
+            n_labels = sum(1 for name, ent in label_snap.items() if name.endswith(".txt") and ent[0] > 0)
+            self._own_pool_sig = (scan[0], scan[1], n_labels)
+            self._own_sig_memo = (time.monotonic(), self._own_pool_sig, (str(self.local_image_dir), str(self.local_label_dir)))
+        else:
+            self._own_pool_sig = self._own_pool_signature(fresh=True)
         self._seed_cached_left_from_disk(limit=128)
         if dims_dirty:
             # Drop stale stems no longer in the pool.
@@ -3129,8 +3240,11 @@ class ReviewAppState:
             )
         return out
 
-    def _clear_own_derived_for_image(self, image_path: Path, dest_name: str) -> None:
-        """Drop stale thumbs / winner preds after replacing an Own file in place."""
+    def _clear_own_derived_for_image(self, image_path: Path, dest_name: str, *, dims: dict | None = None) -> None:
+        """Drop stale thumbs / winner preds after replacing an Own file in place.
+
+        ``dims``: a dims cache the caller already holds and will save ONCE. Without it this loads and re-saves the
+        whole cache (~13k entries) per image, so deleting 500 images did 500 full JSON read+write cycles (~10s)."""
         cache_root = self.score_cache_dir
         for path in (
             core.thumbnail_cache_path(image_path, cache_root, strip=True),
@@ -3157,6 +3271,9 @@ class ReviewAppState:
                 pred_path.unlink()
         except OSError:
             pass
+        if dims is not None:
+            dims.pop(stem, None)
+            return
         dims = self._load_own_dims_cache()
         if stem in dims:
             dims.pop(stem, None)
@@ -3239,13 +3356,13 @@ class ReviewAppState:
     def _remove_own_items(self, targets: list) -> int:
         """Delete these Own images (file, label, prediction, derived caches). Returns how many were removed."""
         dims = self._load_own_dims_cache()
-        dims_dirty = False
+        dims_before = len(dims)
         removed = 0
         for item in targets:
             image_path = item.image_path
             if image_path is None:
                 continue
-            self._clear_own_derived_for_image(image_path, image_path.name)
+            self._clear_own_derived_for_image(image_path, image_path.name, dims=dims)
             _, label_dir, prediction_dir = self.output_dirs_for_item(item)
             label_path = core.label_path_for_item(item, label_dir)
             pred_path = core.prediction_path_for_item(item, prediction_dir)
@@ -3256,12 +3373,9 @@ class ReviewAppState:
                         path.unlink()
                 except OSError:
                     pass
-            stem = str(item.item_key)
-            if stem in dims:
-                dims.pop(stem, None)
-                dims_dirty = True
+            dims.pop(str(item.item_key), None)
             removed += 1
-        if dims_dirty:
+        if len(dims) != dims_before:
             self._save_own_dims_cache(dims)
         return removed
 
@@ -3328,13 +3442,13 @@ class ReviewAppState:
                 continue
             targets.append(item)
         dims = self._load_own_dims_cache()
-        dims_dirty = False
+        dims_before = len(dims)
         removed = 0
         for item in targets:
             image_path = item.image_path
             if image_path is None:
                 continue
-            self._clear_own_derived_for_image(image_path, image_path.name)
+            self._clear_own_derived_for_image(image_path, image_path.name, dims=dims)
             _, label_dir, prediction_dir = self.output_dirs_for_item(item)
             label_path = core.label_path_for_item(item, label_dir)
             pred_path = core.prediction_path_for_item(item, prediction_dir)
@@ -3345,12 +3459,9 @@ class ReviewAppState:
                         path.unlink()
                 except OSError:
                     pass
-            stem = str(item.item_key)
-            if stem in dims:
-                dims.pop(stem, None)
-                dims_dirty = True
+            dims.pop(str(item.item_key), None)
             removed += 1
-        if dims_dirty:
+        if len(dims) != dims_before:
             self._save_own_dims_cache(dims)
         total = self.reload_own_pool(force=True)
         remaining = self._local_items_for_day(day)
@@ -3889,8 +4000,10 @@ class ReviewAppState:
         self.review_mode = "challenge"
         self.own_day = None
         self.save_state()
-        # Merge any images the hourly background job wrote since last visit.
-        self.refresh_topic_from_disk()
+        # Merge any images the hourly background job wrote since last visit. configure_project() (bind_skill_fast)
+        # has just loaded the cache, flags and label checks from disk, so repeating all of it here is pure waste.
+        if time.monotonic() - getattr(self, "_topic_loaded_at", 0.0) > 5.0:
+            self.refresh_topic_from_disk()
         key = prefer_item_key or getattr(self, "platform_cursor_item_key", None) or self._saved_cursor_item_key("challenge")
         if not self._apply_cursor_item_key(key):
             loaded = [idx for idx, item in enumerate(self.challenge_items) if item.loaded]

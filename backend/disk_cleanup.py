@@ -12,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -59,14 +60,64 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+TRASH_ROOT = REVIEW / ".trash"
+_reaper_lock = threading.Lock()
+_reaper_running = False
+
+
+def _reap_trash() -> None:
+    """Delete everything parked in the trash folder, at low priority, off the request path."""
+    global _reaper_running
+    try:
+        try:
+            os.nice(10)  # this thread only: keep the labeler responsive while GBs are unlinked
+        except Exception:
+            pass
+        while True:
+            batch = [p for p in TRASH_ROOT.iterdir()] if TRASH_ROOT.is_dir() else []
+            if not batch:
+                break
+            for p in batch:
+                try:
+                    if p.is_dir() and not p.is_symlink():
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        p.unlink(missing_ok=True)
+                except Exception as exc:
+                    log.warning("trash cleanup failed for %s: %s", p, exc)
+            invalidate_usage_cache()
+    finally:
+        with _reaper_lock:
+            _reaper_running = False
+
+
+def _start_reaper() -> None:
+    global _reaper_running
+    with _reaper_lock:
+        if _reaper_running:
+            return
+        _reaper_running = True
+    threading.Thread(target=_reap_trash, daemon=True, name="trash-reaper").start()
+
+
 def _rm_tree(path: Path) -> int:
-    """Remove file/dir; return bytes freed (best-effort)."""
+    """Remove file/dir; return bytes freed.
+
+    A directory is MOVED into ``review_datasets/.trash`` (one atomic rename, same filesystem) and unlinked by a
+    background thread, so "Clear history" answers at once instead of unlinking tens of GB inside the request
+    (one call took 90 s and held the global cleanup lock). Falls back to deleting in place if the rename fails."""
     if not path.exists():
         return 0
     size = _dir_size(path)
     try:
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
+        if path.is_dir() and not path.is_symlink():
+            try:
+                TRASH_ROOT.mkdir(parents=True, exist_ok=True)
+                os.rename(path, TRASH_ROOT / f"{path.name}.{uuid.uuid4().hex[:8]}")
+                _start_reaper()
+                return size
+            except OSError:
+                shutil.rmtree(path, ignore_errors=True)
         else:
             path.unlink(missing_ok=True)
     except Exception as exc:
@@ -356,3 +407,11 @@ def clear_part(part: str, *, keep_ids: Iterable[str] | None = None, keep_run_dir
     if key in {"base_model", "base_model_candidates", "base"}:
         return clear_base_model_candidates()
     raise ValueError(f"Unknown cleanup part: {part!r}")
+
+
+# A restart can interrupt the background delete: pick up whatever is still parked in the trash.
+try:
+    if TRASH_ROOT.is_dir() and any(TRASH_ROOT.iterdir()):
+        _start_reaper()
+except OSError:
+    pass
