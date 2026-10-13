@@ -62,8 +62,8 @@ export function useTeamSync(enabled: boolean, topicSlug: string): void {
         });
         if (stopped) return;
         failures = 0;
-        if (intent && useTeam.getState().watchIntent === intent) useTeam.getState().setWatchIntent(null);
         useTeam.getState().applySync(resp);
+        if (intent && useTeam.getState().watchIntent === intent) useTeam.getState().setWatchIntent(null);
       } catch {
         failures = Math.min(failures + 1, 5);
         // One slow/failed beat (busy server, brief network blip) is normal — only flag a real outage.

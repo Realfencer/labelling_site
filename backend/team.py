@@ -37,6 +37,7 @@ CLAIM_IDLE_SECONDS = 300.0  # an editor idle this long (no input) no longer hold
 DRAFT_TTL_SECONDS = 600.0
 RECENT_EVENTS_MAX = 4000
 RATE_WINDOW_SECONDS = 1800.0
+HELP_TTL_SECONDS = 6.0  # a help request lapses by itself when its sender stops refreshing it (tab closed, key released offline)
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{1,23}$")
 USER_COLORS = [
@@ -208,6 +209,7 @@ class TeamStore:
         self._presence: dict[str, Presence] = {}
         self._topics: dict[str, _Topic] = {}
         self._drafts: dict[tuple[str, str], _Draft] = {}  # (topic, user) -> draft
+        self._helps: dict[tuple[str, str], dict[str, Any]] = {}  # (topic, user) -> {"item_key", "view", "seq", "ts"}
         self._draft_seq = 0
         self._log_handles: dict[str, Any] = {}
 
@@ -368,6 +370,8 @@ class TeamStore:
             self._presence.pop(sid, None)
         for key in [k for k, d in self._drafts.items() if now - d.ts > DRAFT_TTL_SECONDS]:
             self._drafts.pop(key, None)
+        for key in [k for k, h in self._helps.items() if now - h["ts"] > HELP_TTL_SECONDS]:
+            self._helps.pop(key, None)
 
     def _holds_claim(self, p: Presence, now: float) -> bool:
         return (
@@ -422,6 +426,32 @@ class TeamStore:
             self._draft_seq += 1
             self._drafts[(topic, user)] = _Draft(item_key, boxes, self._draft_seq, time.time(), user)
             return self._draft_seq
+
+    def set_help(self, topic: str, user: str, item_key: str, view: dict[str, Any] | None, on: bool) -> None:
+        """"I don't understand this one": the asker holds G on a zoomed spot; others press G and see exactly that spot.
+
+        ``view`` is the zoom window in image terms (centre x/y in pixels, zoom relative to fit), so it looks the same on
+        every screen. It lapses by itself after HELP_TTL_SECONDS without a refresh.
+        """
+        with self._lock:
+            if not on:
+                self._helps.pop((topic, user), None)
+                return
+            self._draft_seq += 1
+            clean: dict[str, float] = {}
+            for k in ("cx", "cy", "z"):
+                try:
+                    clean[k] = float((view or {}).get(k))
+                except (TypeError, ValueError):
+                    clean = {}
+                    break
+            self._helps[(topic, user)] = {"item_key": item_key, "view": clean or None, "seq": self._draft_seq, "ts": time.time()}
+
+    def _help_of(self, topic: str, user: str, now: float) -> dict[str, Any] | None:
+        h = self._helps.get((topic, user))
+        if h is None or now - h["ts"] > HELP_TTL_SECONDS:
+            return None
+        return h
 
     # ---- sync (heartbeat + state) ----------------------------------------------------
 
@@ -533,6 +563,9 @@ class TeamStore:
                         else None
                     ),
                 }
+                hp = self._help_of(topic, feed_user, now)
+                if hp is not None and hp["item_key"] == target_item:
+                    feed["help"] = {"seq": hp["seq"], "view": hp["view"]}
                 out["feed"] = feed
                 if p.watching:
                     out["watch"] = {"target": p.watching, **{k: feed[k] for k in ("item_key", "label", "draft")}}
@@ -555,10 +588,15 @@ class TeamStore:
             q.user for q in self._presence.values() if q.topic == topic and q.user != me and self._fresh(q, now) and not q.watching
         }
         best: Presence | None = None
+        best_rank: tuple[bool, float] = (False, 0.0)
         for name in sorted(candidates):
             cand = self._best_presence_of(topic, name, now)
-            if cand is not None and cand.item_key and (best is None or cand.last_seen > best.last_seen):
-                best = cand
+            if cand is None or not cand.item_key:
+                continue
+            # Someone asking for help comes first, then whoever worked most recently.
+            rank = (self._help_of(topic, name, now) is not None, cand.last_seen)
+            if best is None or rank > best_rank:
+                best, best_rank = cand, rank
         return best
 
     def _labels_delta(self, t: _Topic, since: int | None) -> dict[str, Any]:
@@ -612,6 +650,7 @@ class TeamStore:
             watchers = sorted(
                 {q.user for q in self._presence.values() if q.topic == topic and q.watching == name and self._fresh(q, now)}
             )
+            hp = self._help_of(topic, name, now)
             out.append(
                 {
                     "name": name,
@@ -623,6 +662,9 @@ class TeamStore:
                     "idle": bool(p and p.idle_s > 60.0),
                     "watching": next((q.watching for q in self._presence.values() if q.topic == topic and q.user == name and q.watching and self._fresh(q, now)), None),
                     "watchers": watchers,
+                    "help": hp is not None,
+                    # The spot they are zoomed on, right in the people list: a watcher can glide there at once.
+                    "help_view": hp["view"] if hp is not None and p is not None and hp["item_key"] == p.item_key else None,
                     "labeled": labeled.get(name, 0),
                     "today": today_n.get(name, 0),
                     "per_hour": round(recent_n.get(name, 0) * 3600.0 / RATE_WINDOW_SECONDS, 1),

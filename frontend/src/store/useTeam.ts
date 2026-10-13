@@ -10,6 +10,9 @@ export type TeamUser = {
   idle: boolean;
   watching: string | null;
   watchers: string[];
+  /** Asking the team for help on the spot they are zoomed on (holding G). */
+  help?: boolean;
+  help_view?: { cx: number; cy: number; z: number } | null;
   labeled: number;
   today: number;
   per_hour: number;
@@ -46,6 +49,8 @@ export type TeamSyncResponse = {
     item_key: string | null;
     label: string;
     draft: { seq: number; boxes: Array<Record<string, number | null>> } | null;
+    /** The watched person is holding G: this is the spot they are zoomed on. */
+    help?: { seq: number; view: { cx: number; cy: number; z: number } | null };
   };
 };
 

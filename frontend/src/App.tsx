@@ -1,6 +1,6 @@
 import BrandLoader from "./components/BrandLoader";
 import { useSiteBackdrop } from "./store/useBackdrop";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   CloudDownload,
@@ -21,7 +21,7 @@ import {
   Loader2,
   Send,
 } from "lucide-react";
-import { api, workspaceFromState, HttpError, type OwnField, type WorkspaceMode } from "./api";
+import { api, workspaceFromState, HttpError, type OwnField, type PeekInfo, type WorkspaceMode } from "./api";
 import TeamBar from "./components/TeamBar";
 import ImageStatusBar from "./components/ImageStatusBar";
 import StripStatusBar, { STRIP_CODE, type StripCodes } from "./components/StripStatusBar";
@@ -29,7 +29,7 @@ import { useTeam } from "./store/useTeam";
 import { useKeys } from "./store/useKeys";
 import { useTeamSync } from "./hooks/useTeamSync";
 import { dropPendingSave, flushOnUnload, hasPendingSaves, retrySave, setSaveConflictHandler } from "./store/saveRetry";
-import AnnotationCanvas from "./components/AnnotationCanvas";
+import AnnotationCanvas, { type ViewShare } from "./components/AnnotationCanvas";
 const FindBestModal = lazy(() => import("./components/FindBestModal"));
 const ManualMergeModal = lazy(() => import("./components/ManualMergeModal"));
 import SubmitModeModal from "./components/SubmitModeModal";
@@ -347,6 +347,8 @@ function filmstripIndices(
 }
 
 const LABEL_CHECK_DELTA = 0.06;
+/** Holding G this long turns "watch" into "ask the team for help on this spot". */
+const G_HOLD_MS = 350;
 const CURRENT_CHECKS_KIND = "r123-v9";
 const STRIP_CHECKS_STORE = "labeler_strip_checks_v1";
 
@@ -1038,7 +1040,7 @@ export default function App({
   /** Right-pane solo: wrong (W) / extra (E) / missed (R). null = all. */
   const [minerAlertFilter, setMinerAlertFilter] = useState<"wrong" | "extra" | "missed" | null>(null);
   /** Own: dual labeled + base-detection panes (default on; toggle with E). */
-  const [ownDualView, setOwnDualView] = useState(true);
+  const [ownDualView, setOwnDualView] = useState(false);
   /** Own: smart dotted row/column guides while labeling (toggle with R). */
   const [ownGuides, setOwnGuides] = useState(() => {
     try {
@@ -3658,38 +3660,17 @@ export default function App({
     };
   }, []);
 
-  // ---- Team: watch a partner (G), follow their image, show their live boxes -------------
-  const watchReturnKeyRef = useRef<string | null>(null);
-  const openByItemKey = useCallback(
-    (itemKey: string | null | undefined, reason: string) => {
-      if (!itemKey) return;
-      const app = useLabeler.getState().appState;
-      if (!app) return;
-      const idx = app.challenges.findIndex((c) => c.loaded && c.item_key === itemKey);
-      if (idx < 0 || openItemKeyRef.current === itemKey) return;
-      void selectChallenge(idx, reason).catch((err) => {
-        if (!isAbortish(err) && !isStaleChallengeError(err)) setError(String(err));
-      });
-    },
-    [selectChallenge, setError],
-  );
-
-  /** Stop watching and go back to the image we were labeling before the first peek. */
+  // ---- Team: watch a partner (G / click their chip): their image + live boxes in the main frame -------------
+  /** Stop watching: the main frame shows our own image again (we never left it). */
   const stopWatch = useCallback(() => {
     const team = useTeam.getState();
     if (!team.watching && team.watchIntent !== "start") return;
     team.setWatchIntent("stop");
-    const back = watchReturnKeyRef.current;
-    watchReturnKeyRef.current = null;
-    if (back) openByItemKey(back, "watch-return");
-  }, [openByItemKey]);
+  }, []);
 
-  /** Peek at a live labeler's current image (read-only). `name` null = whoever labeled most recently. Our own image is remembered once, on the first peek. */
+  /** Peek at a live labeler's current image (read-only). `name` null = whoever labeled most recently. */
   const startWatch = useCallback((name: string | null) => {
     const team = useTeam.getState();
-    if (!team.watching && team.watchIntent !== "start") {
-      watchReturnKeyRef.current = useLabeler.getState().detail?.challenge?.item_key ?? null;
-    }
     team.setNotice("");
     team.setWatchIntent("start", name);
   }, []);
@@ -3702,7 +3683,9 @@ export default function App({
       .map((u) => u.name)
       .sort();
     if (!team.watching && team.watchIntent !== "start") {
-      startWatch(null);
+      // Somebody holding G (asking for help) comes first.
+      const askers = team.users.filter((u) => u.help && u.online && u.item_key && u.name !== team.me?.user);
+      startWatch((askers[0] ?? team.users.find((u) => u.online && !u.idle && u.item_key && u.name !== team.me?.user))?.name ?? null);
     } else if (live.length >= 2) {
       const at = team.watching ? live.indexOf(team.watching) : -1;
       startWatch(live[(at + 1) % live.length]);
@@ -3711,11 +3694,171 @@ export default function App({
     }
   }, [startWatch, stopWatch]);
 
-  // Follow the watched person: whenever they open another image, so do we.
-  const feedItemKey = useTeam((s) => (s.watching ? s.feed?.item_key ?? null : null));
+  // ---- "I don't understand this one": hold G on a zoomed spot ----------------------------------
+  const [helpOn, setHelpOn] = useState(false);
+  const helpOnRef = useRef(false);
+  const myViewRef = useRef<ViewShare | null>(null);
+  const helpPostTimerRef = useRef<number | null>(null);
+  const helpKeepRef = useRef<number | null>(null);
+  const gHoldTimerRef = useRef<number | null>(null);
+  const gDownAtRef = useRef(0);
+  const postHelp = useCallback((on: boolean) => {
+    const key = useLabeler.getState().detail?.challenge?.item_key;
+    if (!key) return;
+    void api.teamHelp({ item_key: key, on, view: on ? myViewRef.current : null }).catch(() => {});
+  }, []);
+  const onMainView = useCallback(
+    (v: ViewShare) => {
+      myViewRef.current = v;
+      if (!helpOnRef.current || helpPostTimerRef.current != null) return;
+      // The zoom/pan the asker is doing is sent a few times a second so the others follow it live.
+      helpPostTimerRef.current = window.setTimeout(() => {
+        helpPostTimerRef.current = null;
+        if (helpOnRef.current) postHelp(true);
+      }, 120);
+    },
+    [postHelp],
+  );
+  const startHelp = useCallback(() => {
+    const team = useTeam.getState();
+    if (helpOnRef.current || team.watching || team.watchIntent === "start") return; // can't ask while looking at someone else's image
+    if (!useLabeler.getState().detail?.challenge?.item_key) return;
+    helpOnRef.current = true;
+    setHelpOn(true);
+    postHelp(true);
+    helpKeepRef.current = window.setInterval(() => postHelp(true), 2000);
+  }, [postHelp]);
+  const stopHelp = useCallback(() => {
+    if (!helpOnRef.current) return;
+    helpOnRef.current = false;
+    setHelpOn(false);
+    if (helpKeepRef.current != null) window.clearInterval(helpKeepRef.current);
+    if (helpPostTimerRef.current != null) window.clearTimeout(helpPostTimerRef.current);
+    helpKeepRef.current = null;
+    helpPostTimerRef.current = null;
+    postHelp(false);
+  }, [postHelp]);
+  useEffect(() => stopHelp, [stopHelp]);
+  // Tell me when somebody asks for help.
+  const askersKey = useTeam((s) => s.users.filter((u) => u.help && u.name !== s.me?.user).map((u) => u.name).join(","));
+  const prevAskersRef = useRef("");
   useEffect(() => {
-    if (feedItemKey) openByItemKey(feedItemKey, "watch-follow");
-  }, [feedItemKey, openByItemKey]);
+    const prev = new Set(prevAskersRef.current.split(",").filter(Boolean));
+    const fresh = askersKey.split(",").filter((n) => n && !prev.has(n));
+    prevAskersRef.current = askersKey;
+    if (fresh.length) useTeam.getState().setNotice(`${fresh.join(", ")} needs help — press G to look`);
+  }, [askersKey]);
+
+  // Peek: the main frame (only) shows the image the watched labeler is on, wherever it lives (another day, the other
+  // workspace). Our own image, filmstrip, day and workspace stay exactly as they are; Esc / G just change the frame back.
+  // Optimistic: the chip / G names the person, so the frame starts moving before the server has confirmed the watch.
+  const watchedName = useTeam((s) => s.watching ?? (s.watchIntent === "start" ? s.watchTarget : null));
+  const peekUser = useTeam((s) => (watchedName ? s.users.find((u) => u.name === watchedName) : undefined));
+  const feedItemKey = useTeam((s) => (s.watching ? s.feed?.item_key ?? null : null));
+  const peekKey = feedItemKey ?? peekUser?.item_key ?? null;
+  const peekWorkspace = peekUser?.workspace ?? "";
+  const peekRev = useTeam((s) => (peekKey ? s.labels[peekKey]?.rev ?? 0 : 0));
+  const feedLive = useTeam((s) => s.feed);
+  const [peek, setPeek] = useState<PeekInfo | null>(null);
+  // Recent peeks, newest last: pressing G on someone whose image we already know is instant.
+  const peekCacheRef = useRef(new Map<string, PeekInfo>());
+  const fetchPeek = useCallback(async (key: string, workspace: string, rev: number): Promise<PeekInfo> => {
+    const ck = `${key}:${rev}`;
+    const cache = peekCacheRef.current;
+    const hit = cache.get(ck);
+    if (hit) return hit;
+    const info = await api.teamPeek(key, workspace);
+    cache.set(ck, info);
+    while (cache.size > 24) cache.delete(cache.keys().next().value as string);
+    return info;
+  }, []);
+  useEffect(() => {
+    if (!watchedName || !peekKey) {
+      setPeek(null);
+      return;
+    }
+    const hit = peekCacheRef.current.get(`${peekKey}:${peekRev}`);
+    if (hit) {
+      setPeek(hit);
+      return;
+    }
+    let dead = false;
+    // The previous peek stays on screen until the new one is ready: the frame changes in one smooth step.
+    fetchPeek(peekKey, peekWorkspace, peekRev)
+      .then((r) => {
+        if (!dead) setPeek(r);
+      })
+      .catch(() => {
+        if (!dead) {
+          setPeek(null);
+          useTeam.getState().setNotice("Can't show that image right now.");
+        }
+      });
+    return () => {
+      dead = true;
+    };
+  }, [watchedName, peekKey, peekWorkspace, peekRev, fetchPeek]);
+  // Get ready before G is pressed: what each online teammate is on (their labels + the image itself) is fetched quietly.
+  const labelersKey = useTeam((s) =>
+    s.users
+      .filter((u) => u.online && !u.idle && u.item_key && u.name !== s.me?.user)
+      .slice(0, 4)
+      .map((u) => `${u.name}|${u.item_key}|${u.workspace}`)
+      .join(";"),
+  );
+  useEffect(() => {
+    if (!labelersKey) return;
+    for (const entry of labelersKey.split(";")) {
+      const [, key, workspace] = entry.split("|");
+      if (!key) continue;
+      const rev = useTeam.getState().labels[key]?.rev ?? 0;
+      void fetchPeek(key, workspace, rev)
+        .then((r) => {
+          const ch = r.challenge;
+          const token = imageCacheToken;
+          preloadImage(challengePreviewUrl(0, r.mode, ch.block, token, ch.item_key, ch.media_rev), 6);
+          preloadImage(challengeThumbnailUrl(0, r.mode, ch.block, true, token, ch.item_key, ch.media_rev), 6);
+        })
+        .catch(() => {});
+    }
+  }, [labelersKey, fetchPeek, imageCacheToken]);
+  const peekView = useMemo(() => {
+    if (!watchedName || !peekKey || !peek) return null;
+    const ch = peek.challenge;
+    const live = feedLive?.draft && feedLive.item_key === ch.item_key ? feedLive.draft.boxes : peek.boxes;
+    // They are holding G on a zoomed spot: show exactly that spot (the people list carries it, so it is there at once).
+    const focus = feedLive?.item_key === ch.item_key && feedLive?.help?.view ? feedLive.help.view : peekUser?.help_view ?? null;
+    const props: Partial<ComponentProps<typeof AnnotationCanvas>> = {
+      sceneId: `peek:${ch.item_key}`,
+      fullUrl: challengeImageUrl(0, peek.mode, ch.block, imageCacheToken, ch.item_key, ch.media_rev),
+      previewUrl: challengePreviewUrl(0, peek.mode, ch.block, imageCacheToken, ch.item_key, ch.media_rev),
+      thumbUrl: challengeThumbnailUrl(0, peek.mode, ch.block, true, imageCacheToken, ch.item_key, ch.media_rev),
+      width: peek.width,
+      height: peek.height,
+      boxes: normalizeBoxes(live as unknown as Array<Record<string, unknown>>),
+      editable: false,
+      selectedIndex: null,
+      inspectBox: null,
+      inspectSeq: 0,
+      // Their image is not ours: its zoom/pan must not drag our reference pane along.
+      syncTransform: null,
+      onTransformChange: undefined,
+      onViewChange: undefined,
+      focusView: focus,
+      linkedFocusIdxs: null,
+    };
+    return { title: `${watchedName} is labeling · ${peek.mode === "local" ? "Own" : "Platform"} · ${ch.display_name || ch.item_key}`, props };
+  }, [watchedName, peekKey, peek, peekUser, feedLive, imageCacheToken]);
+  const peekProps = peekView?.props ?? {};
+
+  // Navigating to another image of our own (filmstrip, N/B, arrows) ends the peek: we are back to work.
+  const ownOpenKey = detail?.challenge?.item_key ?? null;
+  const prevOwnKeyRef = useRef<string | null>(ownOpenKey);
+  useEffect(() => {
+    const prev = prevOwnKeyRef.current;
+    prevOwnKeyRef.current = ownOpenKey;
+    if (prev && ownOpenKey && prev !== ownOpenKey) stopWatch();
+  }, [ownOpenKey, stopWatch]);
 
   // Read-only live view: paint the owner's current boxes (drag-level while they edit).
   const feedSeq = useTeam((s) => s.feed?.draft?.seq ?? 0);
@@ -3761,18 +3904,29 @@ export default function App({
         return;
       }
       if (mod) return;
-      if (e.key === "Escape") {
-        const team = useTeam.getState();
-        if (team.watching || team.watchIntent === "start") {
-          e.preventDefault();
-          stopWatch();
-          return;
-        }
+      const peeking = Boolean(useTeam.getState().watching || useTeam.getState().watchIntent === "start");
+      if (e.key === "Escape" && peeking) {
+        e.preventDefault();
+        stopWatch();
+        return;
       }
+      // Our own image is not on screen while peeking: don't label / reset / delete it blind.
+      if (peeking && /^h$/i.test(e.key)) {
+        e.preventDefault();
+        if (!e.repeat) stopWatch();
+        return;
+      }
+      if (peeking && (/^[ma1-9]$/i.test(e.key) || e.key === "Delete" || e.key === "Backspace")) return;
       if (e.key === "g" || e.key === "G") {
         e.preventDefault();
         if (e.repeat) return;
-        toggleWatch();
+        // Tap (on release) = watch a labeler / next one. Hold = "I don't understand this": ask the team to look at the spot I'm zoomed on.
+        gDownAtRef.current = Date.now();
+        if (gHoldTimerRef.current != null) window.clearTimeout(gHoldTimerRef.current);
+        gHoldTimerRef.current = window.setTimeout(() => {
+          gHoldTimerRef.current = null;
+          startHelp();
+        }, G_HOLD_MS);
         return;
       }
       if (e.key === "n" || e.key === "N" || e.key === "Tab") {
@@ -3872,10 +4026,37 @@ export default function App({
     requestNeedsWorkNav,
     requestRelativeNav,
     resetToWinnerOrigin,
+    startHelp,
     stopWatch,
     toggleWatch,
     undoBoxes,
   ]);
+
+  // G released: a short press is the watch toggle; after a hold it just ends the help request.
+  useEffect(() => {
+    const onUp = (e: KeyboardEvent) => {
+      if (e.key !== "g" && e.key !== "G") return;
+      if (gHoldTimerRef.current != null) {
+        window.clearTimeout(gHoldTimerRef.current);
+        gHoldTimerRef.current = null;
+        if (gDownAtRef.current) toggleWatch();
+      }
+      gDownAtRef.current = 0;
+      stopHelp();
+    };
+    const onLeave = () => {
+      if (gHoldTimerRef.current != null) window.clearTimeout(gHoldTimerRef.current);
+      gHoldTimerRef.current = null;
+      gDownAtRef.current = 0;
+      stopHelp();
+    };
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", onLeave);
+    return () => {
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", onLeave);
+    };
+  }, [stopHelp, toggleWatch]);
 
   const navIdx = detail?.index ?? appState?.current_index ?? -1;
   const navChallenge = navIdx >= 0 ? appState?.challenges[navIdx] : detail?.challenge;
@@ -4431,6 +4612,12 @@ export default function App({
 
   return (
     <div className="rt-in flex h-full min-h-0 flex-col gap-1.5 bg-slate-50 p-1.5 dark:bg-transparent">
+      {helpOn && (
+        <div className="pointer-events-none fixed bottom-16 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-full bg-rose-600 px-4 py-1.5 text-[12px] font-extrabold text-white shadow-xl ring-2 ring-white/30">
+          <span className="h-2 w-2 animate-ping rounded-full bg-white" />
+          Asking the team for help on this spot · release G to stop
+        </div>
+      )}
       <TeamBar
         total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
         reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
@@ -4766,7 +4953,7 @@ export default function App({
       {activeDetail ? (
         isPlatform ? (
         <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row lg:items-stretch">
-          <Pane title={`Your GT · ${boxes.length} boxes`} headerExtra={guidesToggle} hint={`Left pane is ground truth · draw · Space/right/middle-drag to pan · right-click a box = delete · scroll / Z·X zoom · C/V inspect · T ${showBoxLabels ? "hides" : "shows"} labels`}>
+          <Pane title={peekView?.title ?? `Your GT · ${boxes.length} boxes`} headerExtra={guidesToggle} hint={`Left pane is ground truth · draw · Space/right/middle-drag to pan · right-click a box = delete · scroll / Z·X zoom · C/V inspect · T ${showBoxLabels ? "hides" : "shows"} labels`}>
             <AnnotationCanvas
               sceneId={`gt:${activeDetail.challenge.item_key}`}
               fullUrl={challengeImageUrl(idx, appState!.review_mode, activeDetail.challenge.block, imageCacheToken, activeDetail.challenge.item_key, activeDetail.challenge.media_rev)}
@@ -4790,6 +4977,8 @@ export default function App({
               onHoverFocus={onGtHoverFocus}
               inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
               inspectSeq={boxInspect?.seq ?? 0}
+              onViewChange={onMainView}
+              {...peekProps}
             />
           </Pane>
           <MiddleRail
@@ -4897,7 +5086,7 @@ export default function App({
                 : `Own labeled · ${boxes.length} boxes`;
               return (
                 <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row lg:items-stretch">
-                  <Pane title={leftTitle} hint={ownHint} headerExtra={<>{statusTagFor("inline")}{guidesToggle}</>}>
+                  <Pane title={peekView?.title ?? leftTitle} hint={ownHint} headerExtra={<>{statusTagFor("inline")}{guidesToggle}</>}>
                     <AnnotationCanvas
                       sceneId={`own:${activeDetail.challenge.item_key}`}
                       {...ownUrls}
@@ -4917,6 +5106,8 @@ export default function App({
                       inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
                       inspectSeq={boxInspect?.seq ?? 0}
                       showGuides={ownGuides}
+                      onViewChange={onMainView}
+                      {...peekProps}
                     />
                   </Pane>
                   <Pane
@@ -4944,11 +5135,12 @@ export default function App({
             return (
               <Pane
                 title={
-                  ownReviewed
+                  peekView?.title ??
+                  (ownReviewed
                     ? `Own · ${boxes.length} boxes`
                     : ownSam3
                       ? `SAM3 · ${boxes.length} boxes`
-                      : `Own · base detection · ${boxes.length} boxes`
+                      : `Own · base detection · ${boxes.length} boxes`)
                 }
                 hint={ownHint}
                 headerExtra={<>{statusTagFor("inline")}{guidesToggle}</>}
@@ -4972,6 +5164,8 @@ export default function App({
                   inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
                   inspectSeq={boxInspect?.seq ?? 0}
                   showGuides={ownGuides}
+                  onViewChange={onMainView}
+                  {...peekProps}
                 />
               </Pane>
             );

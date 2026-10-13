@@ -1677,6 +1677,31 @@ def team_sync(body: TeamSyncBody, state: AppStateDep) -> dict:
     )
 
 
+class TeamHelpBody(BaseModel):
+    item_key: str
+    on: bool = True
+    view: dict | None = None  # {"cx", "cy", "z"}: zoom window in image terms
+
+
+@app.post("/api/team/help")
+def team_help(body: TeamHelpBody, state: AppStateDep) -> dict:
+    """Ask the team to look at the spot I'm zoomed on (hold G). Refreshed while held, ends on release."""
+    topic = _team_topic(state)
+    if topic is None:
+        return {"ok": False}
+    team_store.set_help(topic, state.username, body.item_key, body.view, body.on)
+    return {"ok": True}
+
+
+@app.get("/api/team/peek")
+def team_peek(item_key: str, state: AppStateDep, workspace: str = "") -> dict:
+    """The image a watched labeler is on, wherever it lives (another day, the other workspace). Read-only."""
+    info = state.peek_item(item_key, workspace)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return info
+
+
 @app.post("/api/team/draft")
 def team_draft(body: TeamDraftBody, state: AppStateDep) -> dict:
     """Live (uncommitted) boxes while the editor drags — shown read-only to a watcher."""

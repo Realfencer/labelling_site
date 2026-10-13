@@ -56,6 +56,7 @@ function UserCard({
   scopeLabel,
   onPeek,
   peeked,
+  dimmed,
 }: {
   u: TeamUser;
   isMe: boolean;
@@ -68,6 +69,8 @@ function UserCard({
   onPeek?: () => void;
   /** We are watching this person right now. */
   peeked?: boolean;
+  /** Somebody else is being watched: every other chip steps back so the watched one stands out. */
+  dimmed?: boolean;
 }) {
   // "hot" for a few seconds after this person saves an image (their "today" count goes up).
   const [hotUntil, setHotUntil] = useState(0);
@@ -89,7 +92,9 @@ function UserCard({
       className={cn(
         "team-card flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 transition-colors",
         onPeek && "cursor-pointer hover:border-violet-400 dark:hover:border-violet-400",
-        peeked && "border-violet-500 ring-1 ring-violet-500/60 dark:border-violet-400",
+        peeked && "border-violet-500 opacity-100 ring-1 ring-violet-500/60 dark:border-violet-400",
+        dimmed && !peeked && "opacity-40 hover:opacity-80",
+        u.help && !peeked && "border-rose-400 ring-1 ring-rose-400/60",
         isMe ? "border-slate-300 bg-slate-50 dark:border-slate-600 dark:bg-slate-800/60" : "border-slate-200 dark:border-slate-700",
         !u.online && "opacity-55",
         hot ? "team-card--hot" : working ? "team-card--working" : "",
@@ -114,7 +119,13 @@ function UserCard({
       </span>
       <span className="max-w-[90px] truncate text-[11px] font-bold leading-none text-slate-800 dark:text-slate-100">{u.name}</span>
       {isMe && <span className="text-[9px] font-semibold leading-none text-slate-400">you</span>}
-      <StatusPill u={u} />
+      {u.help ? (
+        <span className="shrink-0 animate-pulse rounded bg-rose-500 px-1 py-px text-[9px] font-extrabold uppercase leading-none text-white" title="Holding G on a zoomed spot: press G to look at it">
+          needs help · G
+        </span>
+      ) : (
+        <StatusPill u={u} />
+      )}
       <span className="ml-0.5 flex items-baseline gap-px tabular-nums leading-none" title={`${labeled} by ${u.name} / ${teamTotal} by everyone`}>
         <span className="text-[13px] font-extrabold text-slate-900 dark:text-white">{labeled}</span>
         <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">/{teamTotal}</span>
@@ -147,7 +158,8 @@ function TeamBar({
   onLogout: () => void;
 }) {
   const me = useTeam((s) => s.me);
-  const watching = useTeam((s) => s.watching);
+  // Optimistic: the chip lights up the moment it is clicked (or G is pressed), before the server confirms.
+  const watching = useTeam((s) => s.watching ?? (s.watchIntent === "start" ? s.watchTarget : null));
   const users = useTeam((s) => s.users);
   const connected = useTeam((s) => s.connected);
 
@@ -196,6 +208,7 @@ function TeamBar({
             scopeLabel={scopeLabel}
             onPeek={onPeek && u.name !== me?.user && u.online && u.item_key ? () => onPeek(u.name) : undefined}
             peeked={watching === u.name}
+            dimmed={Boolean(watching)}
           />
         ))}
       </div>

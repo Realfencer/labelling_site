@@ -16,6 +16,8 @@ import { getThumbnailBlobUrl, snapshotThumbnailImage, subscribeThumbnail } from 
 
 type ResizeMode = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | null;
 type Transform = { scale: number; offsetX: number; offsetY: number };
+/** A zoom window in image terms (centre in image pixels, zoom relative to "fit"): looks the same on any screen size. */
+export type ViewShare = { cx: number; cy: number; z: number };
 
 interface Props {
   fullUrl: string;
@@ -33,6 +35,10 @@ interface Props {
   onSelect?: (index: number | null) => void;
   syncTransform?: Transform | null;
   onTransformChange?: (t: Transform) => void;
+  /** Called with the current zoom window whenever it changes (used to show a teammate exactly this spot). */
+  onViewChange?: (v: ViewShare) => void;
+  /** Smoothly move to this zoom window (a teammate is asking about this spot). */
+  focusView?: ViewShare | null;
   canvasBg?: string;
   sceneId?: string;
   /** Per-box match vs left-pane GT (right panel compare mode). */
@@ -355,6 +361,8 @@ export default function AnnotationCanvas({
   onSelect,
   syncTransform,
   onTransformChange,
+  onViewChange,
+  focusView,
   canvasBg = "#0b1220",
   sceneId,
   boxCompare,
@@ -507,6 +515,8 @@ export default function AnnotationCanvas({
     [],
   );
 
+  const viewCbRef = useRef(onViewChange);
+  viewCbRef.current = onViewChange;
   const applyView = useCallback(
     (s: number, ox: number, oy: number, emit = true) => {
       scaleRef.current = s;
@@ -514,8 +524,16 @@ export default function AnnotationCanvas({
       setScale(s);
       setOffset({ x: ox, y: oy });
       if (emit) onTransformChange?.({ scale: s, offsetX: ox, offsetY: oy });
+      const cb = viewCbRef.current;
+      const container = containerRef.current;
+      if (emit && cb && container && width > 0 && height > 0 && container.clientWidth > 0 && container.clientHeight > 0) {
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        const fit = Math.min(cw / width, ch / height);
+        cb({ cx: (cw / 2 - ox) / s, cy: (ch / 2 - oy) / s, z: s / fit });
+      }
     },
-    [onTransformChange],
+    [onTransformChange, width, height],
   );
 
   const toImage = useCallback((clientX: number, clientY: number) => {
@@ -1370,6 +1388,24 @@ export default function AnnotationCanvas({
     // Keep user zoom/pan while labeling — only auto-fit on new scene or before first zoom.
     if (!userZoomedRef.current) fitView();
   }, [width, height, fitView]);
+
+  // A teammate's zoom window: glide there (same spot of the image, whatever our screen size is).
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!focusView || !container || !width || !height) return;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (cw <= 0 || ch <= 0) return;
+    const fit = Math.min(cw / width, ch / height);
+    const sc = Math.min(16, Math.max(0.05, focusView.z * fit));
+    targetScaleRef.current = sc;
+    targetOffsetRef.current = { x: cw / 2 - focusView.cx * sc, y: ch / 2 - focusView.cy * sc };
+    cancelAnimationFrame(zoomRafRef.current);
+    zoomRafRef.current = 0;
+    userZoomedRef.current = true;
+    localZoomingRef.current = true;
+    if (!frameAnimRef.current) frameAnimRef.current = requestAnimationFrame(animateFrameToTarget);
+  }, [focusView?.cx, focusView?.cy, focusView?.z, sceneId, width, height, animateFrameToTarget]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!syncTransform) return;

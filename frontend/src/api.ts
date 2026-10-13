@@ -13,6 +13,15 @@ export function reviewModeForWorkspace(w: WorkspaceMode): "challenge" | "local" 
   return w === "own" ? "local" : "challenge";
 }
 
+export type PeekInfo = {
+  mode: string;
+  challenge: { item_key: string; block: number; media_rev?: number; display_name: string };
+  width: number;
+  height: number;
+  boxes: Array<Record<string, unknown>>;
+  class_names: string[];
+};
+
 const API = "/api";
 const REQUEST_TIMEOUT_MS = 30000;
 const DOWNLOAD_GT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -119,6 +128,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ password, username }),
     }),
+  /** Read-only look at any image of the topic (another day / the other workspace): what a watched labeler is on. */
+  teamPeek: (itemKey: string, workspace: string) =>
+    request<PeekInfo>(`/team/peek?item_key=${encodeURIComponent(itemKey)}&workspace=${encodeURIComponent(workspace)}`, { timeoutMs: 15000 }),
+  /** Hold G on a zoomed spot: ask the team to look at it (refresh while held, on:false on release). */
+  teamHelp: (body: { item_key: string; on: boolean; view?: { cx: number; cy: number; z: number } | null }) =>
+    request<{ ok: boolean }>("/team/help", { method: "POST", body: JSON.stringify(body), timeoutMs: 6000 }),
   teamSync: (
     body: {
       item_key: string | null;

@@ -4745,6 +4745,48 @@ class ReviewAppState:
                 except Exception:
                     pass
 
+    def peek_item(self, item_key: str, workspace: str = "") -> dict | None:
+        """Read-only view of ANY image of this topic (another day / the other workspace) for a watcher.
+
+        Never touches the cursor, the current boxes or the labels: it only finds the item in the full Own pool or
+        the topic's Platform list and returns what the labeler would see (their saved boxes, else the winner's).
+        """
+        key = (item_key or "").strip()
+        if not key:
+            return None
+        if workspace != "platform" and not self.local_items:
+            try:
+                self.reload_own_pool(force=False, dedupe=False)
+            except Exception:
+                pass
+        pools = [self.local_items, self.challenge_items] if workspace != "platform" else [self.challenge_items, self.local_items]
+        item = None
+        for pool in pools:
+            for cand in pool:
+                if core.item_keys_match(cand.item_key, key):
+                    item = cand
+                    break
+            if item is not None:
+                break
+        if item is None:
+            return None
+        display_path = self.display_image_path_for_item(item)
+        if display_path is None or not display_path.exists():
+            return None
+        width, height = self._image_dimensions(item, display_path)
+        _, label_dir, prediction_dir = self.output_dirs_for_item(item)
+        label_path = core.label_path_for_item(item, label_dir)
+        pred_path = core.prediction_path_for_item(item, prediction_dir)
+        boxes, _note = self.resolve_left_pane_boxes(item, display_path, label_path, pred_path, width, height, allow_inference=False)
+        return {
+            "mode": "local" if item.source_type == "local" else "challenge",
+            "challenge": item.to_dict(),
+            "width": width,
+            "height": height,
+            "boxes": core.detection_boxes_to_dicts(boxes),
+            "class_names": self._class_names_for_challenge(item),
+        }
+
     def load_challenge_detail(
         self,
         index: int,
