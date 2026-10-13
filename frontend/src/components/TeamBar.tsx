@@ -159,7 +159,7 @@ function TeamBar({
 }) {
   const me = useTeam((s) => s.me);
   // Optimistic: the chip lights up the moment it is clicked (or G is pressed), before the server confirms.
-  const watching = useTeam((s) => s.watching ?? (s.watchIntent === "start" ? s.watchTarget : null));
+  const watching = useTeam((s) => (s.watchIntent === "start" && s.watchTarget ? s.watchTarget : s.watching));
   const users = useTeam((s) => s.users);
   const connected = useTeam((s) => s.connected);
 

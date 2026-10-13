@@ -348,7 +348,7 @@ function filmstripIndices(
 
 const LABEL_CHECK_DELTA = 0.06;
 /** Holding G this long turns "watch" into "ask the team for help on this spot". */
-const G_HOLD_MS = 350;
+const G_HOLD_MS = 300;
 const CURRENT_CHECKS_KIND = "r123-v9";
 const STRIP_CHECKS_STORE = "labeler_strip_checks_v1";
 
@@ -3752,10 +3752,12 @@ export default function App({
   // Peek: the main frame (only) shows the image the watched labeler is on, wherever it lives (another day, the other
   // workspace). Our own image, filmstrip, day and workspace stay exactly as they are; Esc / G just change the frame back.
   // Optimistic: the chip / G names the person, so the frame starts moving before the server has confirmed the watch.
-  const watchedName = useTeam((s) => s.watching ?? (s.watchIntent === "start" ? s.watchTarget : null));
+  const pendingTarget = useTeam((s) => (s.watchIntent === "start" ? s.watchTarget : null));
+  const watchedName = useTeam((s) => (s.watchIntent === "start" && s.watchTarget ? s.watchTarget : s.watching));
   const peekUser = useTeam((s) => (watchedName ? s.users.find((u) => u.name === watchedName) : undefined));
   const feedItemKey = useTeam((s) => (s.watching ? s.feed?.item_key ?? null : null));
-  const peekKey = feedItemKey ?? peekUser?.item_key ?? null;
+  // While a switch to someone else is on its way, the old feed (the previous person) must not win.
+  const peekKey = pendingTarget ? peekUser?.item_key ?? null : feedItemKey ?? peekUser?.item_key ?? null;
   const peekWorkspace = peekUser?.workspace ?? "";
   const peekRev = useTeam((s) => (peekKey ? s.labels[peekKey]?.rev ?? 0 : 0));
   const feedLive = useTeam((s) => s.feed);
@@ -3921,6 +3923,13 @@ export default function App({
         e.preventDefault();
         if (e.repeat) return;
         // Tap (on release) = watch a labeler / next one. Hold = "I don't understand this": ask the team to look at the spot I'm zoomed on.
+        // Already peeking: G acts at once (next labeler / back) — nothing to hold for.
+        const tm = useTeam.getState();
+        if (tm.watching || tm.watchIntent === "start") {
+          gDownAtRef.current = 0;
+          toggleWatch();
+          return;
+        }
         gDownAtRef.current = Date.now();
         if (gHoldTimerRef.current != null) window.clearTimeout(gHoldTimerRef.current);
         gHoldTimerRef.current = window.setTimeout(() => {

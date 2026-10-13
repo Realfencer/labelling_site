@@ -132,13 +132,17 @@ export const useTeam = create<TeamStore>((set, get) => ({
       if (!sameJson(cur.colors, colors)) patch.colors = colors;
     }
     if (!sameJson(cur.claims, r.claims)) patch.claims = r.claims ?? {};
+    // A reply that was already on its way when we pressed Esc / H must not put the peek back.
+    const stopping = cur.watchIntent === "stop";
     const ro = r.me.read_only;
-    if (cur.readOnly !== ro) patch.readOnly = ro;
-    if (cur.reason !== r.me.reason) patch.reason = r.me.reason;
-    if (cur.owner !== r.me.owner) patch.owner = r.me.owner;
-    if (cur.watching !== r.me.watching) patch.watching = r.me.watching;
+    if (!stopping) {
+      if (cur.readOnly !== ro) patch.readOnly = ro;
+      if (cur.reason !== r.me.reason) patch.reason = r.me.reason;
+      if (cur.owner !== r.me.owner) patch.owner = r.me.owner;
+      if (cur.watching !== r.me.watching) patch.watching = r.me.watching;
+    }
     if (!sameJson(cur.watchers, r.me.watchers)) patch.watchers = r.me.watchers;
-    if (!sameJson(cur.feed, r.feed ?? null)) patch.feed = r.feed ?? null;
+    if (!stopping && !sameJson(cur.feed, r.feed ?? null)) patch.feed = r.feed ?? null;
     if (!cur.me || cur.me.user !== r.me.user || cur.me.color !== r.me.color) {
       patch.me = { user: r.me.user, color: r.me.color };
     }
@@ -188,7 +192,19 @@ export const useTeam = create<TeamStore>((set, get) => ({
     set({ labels: { ...labels, [itemKey]: { u: user, t: Date.now() / 1000, rev: Math.max(rev ?? 0, cur?.rev ?? 0), e: user } } });
   },
 
-  setWatchIntent: (watchIntent, target = null) => set({ watchIntent, watchTarget: watchIntent === "start" ? target : null }),
+  setWatchIntent: (watchIntent, target = null) =>
+    set((s) =>
+      watchIntent === "stop"
+        ? {
+            // Optimistic: leave the peek on the spot (Esc / H / G), don't wait for the server to confirm.
+            watchIntent,
+            watchTarget: null,
+            watching: null,
+            feed: null,
+            ...(s.reason === "watching" ? { readOnly: false, reason: "" as const, owner: null } : {}),
+          }
+        : { watchIntent, watchTarget: watchIntent === "start" ? target : null },
+    ),
   setSave: (status, message = "") =>
     set({ save: { status, message, at: status === "saved" ? Date.now() : get().save.at } }),
   setNotice: (notice) => set({ notice }),

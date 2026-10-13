@@ -174,8 +174,10 @@ class _Topic:
     recent: deque = field(default_factory=lambda: deque(maxlen=RECENT_EVENTS_MAX))
     # Incremental counters: sync() runs every ~1.5s per open tab, so it must not rescan history.
     labeled_count: dict[str, int] = field(default_factory=dict)  # user -> images currently credited
-    day_counts: dict[tuple[str, str], int] = field(default_factory=dict)  # (YYYY-MM-DD, user) -> label events
-    recent_labels: deque = field(default_factory=deque)  # (ts, user) within RATE_WINDOW_SECONDS
+    # Distinct images, not save events: re-saving / re-marking the same image must not count again.
+    day_items: dict[tuple[str, str], set] = field(default_factory=dict)  # (YYYY-MM-DD, user) -> image keys labeled that day
+    day_counts: dict[tuple[str, str], int] = field(default_factory=dict)  # (YYYY-MM-DD, user) -> len(day_items)
+    recent_labels: deque = field(default_factory=deque)  # (ts, user, key) within RATE_WINDOW_SECONDS
 
 
 class TeamLockedError(Exception):
@@ -259,9 +261,18 @@ class TeamStore:
             meta.labeled_by = user
             meta.labeled_at = ts
             day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-            t.day_counts[(day, user)] = t.day_counts.get((day, user), 0) + 1
-            t.recent_labels.append((ts, user))
+            bucket = t.day_items.setdefault((day, user), set())
+            bucket.add(key)
+            t.day_counts[(day, user)] = len(bucket)
+            t.recent_labels.append((ts, user, key))
         elif action == "reset":
+            if prev_owner and meta.labeled_at:
+                # An un-labeled image no longer counts for the day it had been credited on.
+                rday = datetime.fromtimestamp(meta.labeled_at).strftime("%Y-%m-%d")
+                bucket = t.day_items.get((rday, prev_owner))
+                if bucket is not None:
+                    bucket.discard(key)
+                    t.day_counts[(rday, prev_owner)] = len(bucket)
             meta.labeled_by = None
             meta.labeled_at = 0.0
         if prev_owner != meta.labeled_by:
@@ -632,9 +643,10 @@ class TeamStore:
         today_n = {u: n for (d, u), n in t.day_counts.items() if d == today}
         while t.recent_labels and now - t.recent_labels[0][0] > RATE_WINDOW_SECONDS:
             t.recent_labels.popleft()
-        recent_n: dict[str, int] = {}
-        for _ts, u in t.recent_labels:
-            recent_n[u] = recent_n.get(u, 0) + 1
+        recent_keys: dict[str, set] = {}
+        for _ts, u, k in t.recent_labels:
+            recent_keys.setdefault(u, set()).add(k)
+        recent_n = {u: len(ks) for u, ks in recent_keys.items()}
         names: dict[str, str] = {}
         for u in labeled:
             names[_name_key(u)] = u
