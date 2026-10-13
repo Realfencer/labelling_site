@@ -97,7 +97,7 @@ function ImageStatusBar({
           <Eye className="h-3.5 w-3.5 shrink-0" />
           <span className={rail ? "" : "truncate"}>Watching {watching} · read-only</span>
         </span>
-        {bannerBtn("Stop (G)")}
+        {bannerBtn("Back (Esc)")}
       </div>
     );
   } else if (readOnly && reason === "claimed") {

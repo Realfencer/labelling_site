@@ -405,7 +405,7 @@ class TeamStore:
         if ok:
             return
         if reason == "watching":
-            raise TeamLockedError(f"You are watching {owner} (read-only). Press G to stop.", owner=owner, reason=reason)
+            raise TeamLockedError(f"You are watching {owner} (read-only). Press Esc to go back to your image.", owner=owner, reason=reason)
         raise TeamLockedError(f"{owner} is labeling this image right now (read-only for you).", owner=owner, reason=reason)
 
     def release(self, sid: str) -> None:

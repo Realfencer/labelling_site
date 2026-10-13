@@ -3674,20 +3674,42 @@ export default function App({
     [selectChallenge, setError],
   );
 
+  /** Stop watching and go back to the image we were labeling before the first peek. */
+  const stopWatch = useCallback(() => {
+    const team = useTeam.getState();
+    if (!team.watching && team.watchIntent !== "start") return;
+    team.setWatchIntent("stop");
+    const back = watchReturnKeyRef.current;
+    watchReturnKeyRef.current = null;
+    if (back) openByItemKey(back, "watch-return");
+  }, [openByItemKey]);
+
+  /** Peek at a live labeler's current image (read-only). `name` null = whoever labeled most recently. Our own image is remembered once, on the first peek. */
+  const startWatch = useCallback((name: string | null) => {
+    const team = useTeam.getState();
+    if (!team.watching && team.watchIntent !== "start") {
+      watchReturnKeyRef.current = useLabeler.getState().detail?.challenge?.item_key ?? null;
+    }
+    team.setNotice("");
+    team.setWatchIntent("start", name);
+  }, []);
+
+  /** G: peek at the first live labeler; G again moves to the next one (when only one is live it ends the peek). */
   const toggleWatch = useCallback(() => {
     const team = useTeam.getState();
-    if (team.watching || team.watchIntent === "start") {
-      team.setWatchIntent("stop");
-      // Back to the image we were on before we jumped to the partner's.
-      const back = watchReturnKeyRef.current;
-      watchReturnKeyRef.current = null;
-      if (back) openByItemKey(back, "watch-return");
+    const live = team.users
+      .filter((u) => u.online && !u.idle && !u.watching && u.item_key && u.name !== team.me?.user)
+      .map((u) => u.name)
+      .sort();
+    if (!team.watching && team.watchIntent !== "start") {
+      startWatch(null);
+    } else if (live.length >= 2) {
+      const at = team.watching ? live.indexOf(team.watching) : -1;
+      startWatch(live[(at + 1) % live.length]);
     } else {
-      watchReturnKeyRef.current = useLabeler.getState().detail?.challenge?.item_key ?? null;
-      team.setNotice("");
-      team.setWatchIntent("start");
+      stopWatch();
     }
-  }, [openByItemKey]);
+  }, [startWatch, stopWatch]);
 
   // Follow the watched person: whenever they open another image, so do we.
   const feedItemKey = useTeam((s) => (s.watching ? s.feed?.item_key ?? null : null));
@@ -3739,6 +3761,14 @@ export default function App({
         return;
       }
       if (mod) return;
+      if (e.key === "Escape") {
+        const team = useTeam.getState();
+        if (team.watching || team.watchIntent === "start") {
+          e.preventDefault();
+          stopWatch();
+          return;
+        }
+      }
       if (e.key === "g" || e.key === "G") {
         e.preventDefault();
         if (e.repeat) return;
@@ -3842,6 +3872,7 @@ export default function App({
     requestNeedsWorkNav,
     requestRelativeNav,
     resetToWinnerOrigin,
+    stopWatch,
     toggleWatch,
     undoBoxes,
   ]);
@@ -4256,21 +4287,25 @@ export default function App({
   }
   const platformMetrics = appState.platform_metrics ?? defaultWorkspaceMetrics();
   const ownMetrics = appState.own_metrics ?? defaultWorkspaceMetrics();
-  // Own: progress of the open day cluster (not the whole pool); per-person counts for that day.
+  // Progress of what is on screen (the open Own day, or the Platform pool) with per-person counts. The SHARED team log
+  // decides who labeled what and whether an image counts as labeled, so every browser derives the same numbers, live
+  // (your own save lands at once, a partner's within one 1.5 s beat). The local `reviewed` flag is only the fallback for
+  // images labeled before the log existed: a partner's new Done marks reach this browser's flags much later, which made
+  // each person see the other's count as 0 while their own showed the real number.
   const dayScope = (() => {
-    if (isPlatform || !appState.own_day) return null;
+    if (!isPlatform && !appState.own_day) return null;
     let total = 0;
     let done = 0;
     const perUser: Record<string, number> = {};
     for (const c of appState.challenges) {
       if (!c.loaded) continue;
       total += 1;
-      if (!c.reviewed) continue;
+      const t = teamLabels[c.item_key];
+      if (!(t ? t.u != null : Boolean(c.reviewed))) continue;
       done += 1;
-      const who = teamLabels[c.item_key]?.u;
-      if (who) perUser[who] = (perUser[who] ?? 0) + 1;
+      if (t?.u) perUser[t.u] = (perUser[t.u] ?? 0) + 1;
     }
-    return { day: appState.own_day, total, done, perUser };
+    return { day: isPlatform ? null : appState.own_day, total, done, perUser };
   })();
   const loadedChallenges = appState.challenges.filter((c) => c.loaded);
   const ownCounts = {
@@ -4400,7 +4435,7 @@ export default function App({
         total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
         reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
         scopeLabel={
-          dayScope
+          dayScope?.day
             ? `Day ${dayScope.day}${appState.own_field ? ` · ${appState.own_field === "openai" ? "OpenAI" : "Gemini"}` : ""}`
             : !isPlatform
               ? ownField
@@ -4409,6 +4444,7 @@ export default function App({
               : undefined
         }
         perUser={dayScope?.perUser}
+        onPeek={startWatch}
         onLogout={() => {
           void api.logout().finally(() => window.location.reload());
         }}

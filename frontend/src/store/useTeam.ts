@@ -69,6 +69,8 @@ interface TeamStore {
   revs: Record<string, number>;
   /** One-shot instruction for the next heartbeat. */
   watchIntent: "start" | "stop" | null;
+  /** Who the next "start" should watch (a name), or null for "whoever labeled most recently". */
+  watchTarget: string | null;
   connected: boolean;
   save: { status: SaveStatus; message: string; at: number | null };
   setMe: (me: { user: string; color: string } | null) => void;
@@ -76,7 +78,7 @@ interface TeamStore {
   noteRev: (itemKey: string, rev: number | undefined) => void;
   /** Our own save came back with the item's labeler: show the tag now instead of waiting for the next poll. */
   noteLabel: (itemKey: string, user: string | null | undefined, rev: number | undefined) => void;
-  setWatchIntent: (i: "start" | "stop" | null) => void;
+  setWatchIntent: (i: "start" | "stop" | null, target?: string | null) => void;
   setSave: (status: SaveStatus, message?: string) => void;
   setNotice: (m: string) => void;
   setConnected: (v: boolean) => void;
@@ -108,6 +110,7 @@ export const useTeam = create<TeamStore>((set, get) => ({
   notice: "",
   revs: {},
   watchIntent: null,
+  watchTarget: null,
   connected: true,
   save: { status: "idle", message: "", at: null },
 
@@ -180,7 +183,7 @@ export const useTeam = create<TeamStore>((set, get) => ({
     set({ labels: { ...labels, [itemKey]: { u: user, t: Date.now() / 1000, rev: Math.max(rev ?? 0, cur?.rev ?? 0), e: user } } });
   },
 
-  setWatchIntent: (watchIntent) => set({ watchIntent }),
+  setWatchIntent: (watchIntent, target = null) => set({ watchIntent, watchTarget: watchIntent === "start" ? target : null }),
   setSave: (status, message = "") =>
     set({ save: { status, message, at: status === "saved" ? Date.now() : get().save.at } }),
   setNotice: (notice) => set({ notice }),
@@ -202,6 +205,7 @@ export const useTeam = create<TeamStore>((set, get) => ({
       notice: "",
       revs: {},
       watchIntent: null,
+      watchTarget: null,
       save: { status: "idle", message: "", at: null },
     }),
 }));

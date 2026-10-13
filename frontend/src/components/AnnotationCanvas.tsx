@@ -240,12 +240,26 @@ function resizedBox(origin: DetectionBox, mode: string, x: number, y: number, im
   if (mode.includes("e")) x2 = x;
   let [left, right] = [x1, x2].sort((a, b) => a - b);
   let [top, bottom] = [y1, y2].sort((a, b) => a - b);
-  left = Math.min(Math.max(left, 0), imgW - 1);
-  right = Math.min(Math.max(right, 0), imgW - 1);
-  top = Math.min(Math.max(top, 0), imgH - 1);
-  bottom = Math.min(Math.max(bottom, 0), imgH - 1);
-  if (right - left < MIN_DRAW) right = left + MIN_DRAW;
-  if (bottom - top < MIN_DRAW) bottom = top + MIN_DRAW;
+  // Every edge stays on the image, exactly (0 .. W, 0 .. H): a box can never be dragged outside, and it can reach the
+  // true right / bottom edge (it used to stop one pixel short).
+  left = Math.min(Math.max(left, 0), imgW);
+  right = Math.min(Math.max(right, 0), imgW);
+  top = Math.min(Math.max(top, 0), imgH);
+  bottom = Math.min(Math.max(bottom, 0), imgH);
+  if (right - left < MIN_DRAW) {
+    if (left + MIN_DRAW <= imgW) right = left + MIN_DRAW;
+    else {
+      right = imgW;
+      left = Math.max(0, imgW - MIN_DRAW);
+    }
+  }
+  if (bottom - top < MIN_DRAW) {
+    if (top + MIN_DRAW <= imgH) bottom = top + MIN_DRAW;
+    else {
+      bottom = imgH;
+      top = Math.max(0, imgH - MIN_DRAW);
+    }
+  }
   return { ...origin, x1: left, y1: top, x2: right, y2: bottom };
 }
 
@@ -514,6 +528,15 @@ export default function AnnotationCanvas({
     return { x: (cx - o.x) / s, y: (cy - o.y) / s };
   }, []);
 
+  /** The pointer position as an image point that can never leave the image (drawing from or to the outside snaps to the edge). */
+  const toImageClamped = useCallback(
+    (clientX: number, clientY: number) => {
+      const p = toImage(clientX, clientY);
+      return { x: Math.min(Math.max(p.x, 0), width), y: Math.min(Math.max(p.y, 0), height) };
+    },
+    [toImage, width, height],
+  );
+
   const fitView = useCallback(() => {
     const container = containerRef.current;
     if (!container || !width || !height) return;
@@ -625,8 +648,11 @@ export default function AnnotationCanvas({
 
     // Clip everything (image + boxes) to the logical image rectangle so boxes
     // never paint into letterbox / neighboring panes.
+    // A margin of 12 screen px: boxes are kept on the image now, so this only lets the edge handles and the full line
+    // width show instead of being cut in half exactly at the image border.
+    const clipPad = 12 / scale;
     ctx.beginPath();
-    ctx.rect(0, 0, width, height);
+    ctx.rect(-clipPad, -clipPad, width + clipPad * 2, height + clipPad * 2);
     ctx.clip();
 
     ctx.imageSmoothingEnabled = true;
@@ -1540,10 +1566,11 @@ export default function AnnotationCanvas({
         hoverIdxRef.current = null;
         onSelect?.(null);
       }
+      const start = toImageClamped(e.clientX, e.clientY);
       dragRef.current = {
         kind: "draw",
-        startX: pt.x,
-        startY: pt.y,
+        startX: start.x,
+        startY: start.y,
         baseBoxes: boxes.map((b) => ({ ...b })),
       };
       kickAnim();
@@ -1659,12 +1686,13 @@ export default function AnnotationCanvas({
         drag.idx,
       );
     } else if (drag.kind === "draw") {
+      const cp = toImageClamped(e.clientX, e.clientY);
       const box: DetectionBox = {
         cls: currentClass,
-        x1: Math.min(drag.startX, pt.x),
-        y1: Math.min(drag.startY, pt.y),
-        x2: Math.max(drag.startX, pt.x),
-        y2: Math.max(drag.startY, pt.y),
+        x1: Math.min(drag.startX, cp.x),
+        y1: Math.min(drag.startY, cp.y),
+        x2: Math.max(drag.startX, cp.x),
+        y2: Math.max(drag.startY, cp.y),
       };
       setDraftBox(box);
       const w = Math.abs(box.x2 - box.x1);
@@ -1709,16 +1737,17 @@ export default function AnnotationCanvas({
     if (!drag || !editable) return;
     if (drag.kind === "draw") {
       const pt = toImage(e.clientX, e.clientY);
-      const w = Math.abs(pt.x - drag.startX);
-      const h = Math.abs(pt.y - drag.startY);
+      const cp = toImageClamped(e.clientX, e.clientY);
+      const w = Math.abs(cp.x - drag.startX);
+      const h = Math.abs(cp.y - drag.startY);
       const base = drag.baseBoxes ?? boxes;
       if (w >= MIN_DRAW && h >= MIN_DRAW) {
         const box: DetectionBox = {
           cls: currentClass,
-          x1: Math.min(drag.startX, pt.x),
-          y1: Math.min(drag.startY, pt.y),
-          x2: Math.max(drag.startX, pt.x),
-          y2: Math.max(drag.startY, pt.y),
+          x1: Math.min(drag.startX, cp.x),
+          y1: Math.min(drag.startY, cp.y),
+          x2: Math.max(drag.startX, cp.x),
+          y2: Math.max(drag.startY, cp.y),
         };
         const next = [...base, box];
         onBoxesChange?.(next, next.length - 1, true);

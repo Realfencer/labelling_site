@@ -54,7 +54,7 @@ export function useTeamSync(enabled: boolean, topicSlug: string): void {
           label: challenge?.display_name ?? "",
           workspace: live.appState ? workspaceFromState(live.appState) : "",
           idle_s: Math.round((Date.now() - lastInput) / 1000),
-          ...(intent === "start" ? { watch: "auto" } : {}),
+          ...(intent === "start" ? { watch: team.watchTarget ?? "auto" } : {}),
           ...(intent === "stop" ? { stop_watch: true } : {}),
           // Keep an active watch alive on every beat (server drops it if the target left).
           ...(!intent && team.watching ? { watch: team.watching } : {}),
@@ -93,9 +93,9 @@ export function useTeamSync(enabled: boolean, topicSlug: string): void {
         syncNow();
       }
     });
-    // …and when G is pressed.
+    // …and when watching starts / switches person / stops (G, a teammate chip, Esc).
     const unsubIntent = useTeam.subscribe((s, prev) => {
-      if (s.watchIntent && s.watchIntent !== prev.watchIntent) syncNow();
+      if (s.watchIntent && (s.watchIntent !== prev.watchIntent || s.watchTarget !== prev.watchTarget)) syncNow();
     });
     const onVisible = () => {
       if (!document.hidden) syncNow();

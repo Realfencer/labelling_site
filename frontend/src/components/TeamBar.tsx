@@ -48,7 +48,27 @@ function StatusPill({ u }: { u: TeamUser }) {
   );
 }
 
-function UserCard({ u, isMe, labeled, scopeLabel }: { u: TeamUser; isMe: boolean; labeled: number; scopeLabel?: string }) {
+function UserCard({
+  u,
+  isMe,
+  labeled,
+  teamTotal,
+  scopeLabel,
+  onPeek,
+  peeked,
+}: {
+  u: TeamUser;
+  isMe: boolean;
+  /** Images this person labeled in the scope on screen. */
+  labeled: number;
+  /** Images labeled by everyone in the same scope: the same number on every chip and on every browser. */
+  teamTotal: number;
+  scopeLabel?: string;
+  /** Click: temporarily show this person's current image (read-only). Esc comes back. Only for others who have an image open. */
+  onPeek?: () => void;
+  /** We are watching this person right now. */
+  peeked?: boolean;
+}) {
   // "hot" for a few seconds after this person saves an image (their "today" count goes up).
   const [hotUntil, setHotUntil] = useState(0);
   const prevToday = useRef(u.today);
@@ -68,15 +88,19 @@ function UserCard({ u, isMe, labeled, scopeLabel }: { u: TeamUser; isMe: boolean
     <div
       className={cn(
         "team-card flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 transition-colors",
+        onPeek && "cursor-pointer hover:border-violet-400 dark:hover:border-violet-400",
+        peeked && "border-violet-500 ring-1 ring-violet-500/60 dark:border-violet-400",
         isMe ? "border-slate-300 bg-slate-50 dark:border-slate-600 dark:bg-slate-800/60" : "border-slate-200 dark:border-slate-700",
         !u.online && "opacity-55",
         hot ? "team-card--hot" : working ? "team-card--working" : "",
       )}
       style={{ ["--tc" as string]: u.color }}
+      onClick={onPeek}
       title={[
+        onPeek ? (peeked ? "Watching live · Esc to go back" : "Click to watch their image live (read-only) · Esc to go back") : "",
         `${u.name}${isMe ? " (you)" : ""}`,
         u.label ? `on ${u.label}` : "",
-        `${labeled} labeled${scopeLabel ? ` in ${scopeLabel.toLowerCase()}` : " total"}`,
+        `${labeled} labeled by ${u.name} · ${teamTotal} labeled by everyone${scopeLabel ? ` in ${scopeLabel.toLowerCase()}` : ""}`,
         `${u.today} today · ${u.per_hour}/h`,
       ]
         .filter(Boolean)
@@ -91,7 +115,10 @@ function UserCard({ u, isMe, labeled, scopeLabel }: { u: TeamUser; isMe: boolean
       <span className="max-w-[90px] truncate text-[11px] font-bold leading-none text-slate-800 dark:text-slate-100">{u.name}</span>
       {isMe && <span className="text-[9px] font-semibold leading-none text-slate-400">you</span>}
       <StatusPill u={u} />
-      <span className="ml-0.5 text-[13px] font-extrabold leading-none tabular-nums text-slate-900 dark:text-white">{labeled}</span>
+      <span className="ml-0.5 flex items-baseline gap-px tabular-nums leading-none" title={`${labeled} by ${u.name} / ${teamTotal} by everyone`}>
+        <span className="text-[13px] font-extrabold text-slate-900 dark:text-white">{labeled}</span>
+        <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">/{teamTotal}</span>
+      </span>
       <span className="text-[9px] leading-none tabular-nums text-slate-500 dark:text-slate-400">
         {u.today}
         <span className="opacity-70"> today</span> · {u.per_hour}/h
@@ -106,6 +133,7 @@ function TeamBar({
   reviewed,
   scopeLabel,
   perUser,
+  onPeek,
   onLogout,
 }: {
   total: number;
@@ -114,9 +142,12 @@ function TeamBar({
   scopeLabel?: string;
   /** Done images per person inside the scope (when scoped). */
   perUser?: Record<string, number>;
+  /** Peek at this person's current image (read-only, temporary). */
+  onPeek?: (name: string) => void;
   onLogout: () => void;
 }) {
   const me = useTeam((s) => s.me);
+  const watching = useTeam((s) => s.watching);
   const users = useTeam((s) => s.users);
   const connected = useTeam((s) => s.connected);
 
@@ -161,7 +192,10 @@ function TeamBar({
             u={u}
             isMe={u.name === me?.user}
             labeled={perUser ? perUser[u.name] ?? 0 : u.labeled}
+            teamTotal={reviewed}
             scopeLabel={scopeLabel}
+            onPeek={onPeek && u.name !== me?.user && u.online && u.item_key ? () => onPeek(u.name) : undefined}
+            peeked={watching === u.name}
           />
         ))}
       </div>
