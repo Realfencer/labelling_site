@@ -3353,9 +3353,12 @@ class ReviewAppState:
         self.save_state()
         return {"added": added, "skipped": skipped, "deduped": deduped, "replaced": replaced, "total": total}
 
-    def _remove_own_items(self, targets: list) -> int:
-        """Delete these Own images (file, label, prediction, derived caches). Returns how many were removed."""
-        dims = self._load_own_dims_cache()
+    def _remove_own_items(self, targets: list, *, save_dims: bool = True) -> int:
+        """Delete these Own images (file, label, prediction, derived caches). Returns how many were removed.
+
+        ``save_dims=False``: leave the dims cache file alone (rewriting ~13k entries costs ~0.3s). Entries of deleted images
+        are harmless — they are looked up by stem + mtime + size and pruned at the next full reload."""
+        dims = self._load_own_dims_cache() if save_dims else {}
         dims_before = len(dims)
         removed = 0
         for item in targets:
@@ -3375,13 +3378,20 @@ class ReviewAppState:
                     pass
             dims.pop(str(item.item_key), None)
             removed += 1
-        if len(dims) != dims_before:
+        if save_dims and len(dims) != dims_before:
             self._save_own_dims_cache(dims)
         return removed
 
     def delete_own_range(
         self, block_min: int | None, block_max: int | None, item_keys: list[str] | None = None
     ) -> dict:
+        if item_keys and len(item_keys) <= 200 and self.local_items:
+            # Deleting a few hand-picked images (Shift+Delete) from a pool that is already loaded: no need to re-check the
+            # whole pool on disk first, nor to rebuild all ~13k items afterwards (that took ~1s per image).
+            picked = {str(k) for k in item_keys}
+            fast_targets = [item for item in self.local_items if item.loaded and str(item.item_key) in picked]
+            if fast_targets:
+                return self._delete_own_few(fast_targets)
         self.reload_own_pool(force=False)
         blocks = [int(item.block) for item in self.local_items if item.loaded and int(item.block or 0) > 0]
         if not blocks:
@@ -3402,6 +3412,45 @@ class ReviewAppState:
             self.current_index = -1
         self.save_state()
         return {"removed": removed, "total": total}
+
+    def _delete_own_few(self, targets: list) -> dict:
+        """Remove a handful of Own images from disk AND from the loaded pool in place.
+
+        The pool's synthetic block numbers (1..N by file name) are re-numbered, the block maps and the pool fingerprint are
+        updated by arithmetic, so the next navigation does not see a "changed pool" and rebuild everything.
+        """
+        with self._own_reload_lock:
+            sig = getattr(self, "_own_pool_sig", None)
+            had_label = 0
+            for item in targets:
+                _, label_dir, _ = self.output_dirs_for_item(item)
+                try:
+                    if core.label_path_for_item(item, label_dir).stat().st_size > 0:
+                        had_label += 1
+                except OSError:
+                    pass
+            removed = self._remove_own_items(targets, save_dims=False)
+            gone = {id(item) for item in targets}
+            keep = [item for item in self.local_items if id(item) not in gone]
+            for i, item in enumerate(keep, start=1):
+                item.record["block"] = i
+            self.local_items = keep
+            self._rebuild_block_maps()
+            if sig is not None:
+                newest = max((int(i.record.get("_mtime_ns") or 0) for i in keep), default=0)
+                new_sig = (max(0, sig[0] - removed), newest, max(0, sig[2] - had_label))
+                self._own_pool_sig = new_sig
+                self._own_sig_memo = (
+                    time.monotonic(),
+                    new_sig,
+                    (str(self.local_image_dir), str(self.local_label_dir)),
+                )
+        if self.local_items:
+            self.current_index = min(max(self.current_index, 0), len(self.local_items) - 1)
+        else:
+            self.current_index = -1
+        self.save_state()
+        return {"removed": removed, "total": len(self.local_items)}
 
     def delete_own_days(self, days: list[str]) -> dict:
         """Delete every Own image (New, SAM3 draft and Done) of the given calendar days."""

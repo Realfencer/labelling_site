@@ -5433,9 +5433,10 @@ export default function App({
             const next = await api.deleteOwnRange({ itemKeys: [ask.key] });
             workspacePoolsRef.current.own = next;
             applyState(next);
+            // One image gone: the details we hold carry the old block numbers, so those go. Decoded images and thumbnails
+            // are keyed by URL (stem + block): the ones before the deleted image stay valid, the shifted ones simply
+            // get new URLs. Wiping them all made every thumbnail and the next image download again.
             clearDetailCache();
-            clearDecodedImages();
-            clearThumbnailBlobCache();
             setDeleteImageAsk(null);
             setError("");
             const idx = Math.min(ask.index, next.challenges.length - 1);
