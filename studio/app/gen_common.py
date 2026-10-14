@@ -127,7 +127,8 @@ def _variant_prompt_raw(base_prompt: str, variant_idx: int, total: int) -> str:
     return (
         f"{task.strip()}\n\n---\nTHIS IMAGE — {recipe}\n\n---\n{profile}\n\n---\n{rules.strip()}\n\n---\n"
         "FINAL CHECK: a NEW location and camera position (not a copy of the reference); the SAME overall brightness and "
-        "contrast as the reference (EXPOSURE LOCK — not darker, not flatter); only the source's drink classes, "
+        "contrast as the reference (EXPOSURE LOCK — not darker, not flatter) and the SAME color (COLOR LOCK — not greyer, "
+        "not re-tinted); only the source's drink classes, "
         "about the source's drink count; drinks as small, soft, partly hidden and low-contrast as in the reference — "
         "nothing made clearer or bigger to be readable, but every drink physically real (in a hand, on a surface, in a "
         "bag) and findable by an attentive annotator; FAILURE FOCUS drinks keep their reference look, orientation "

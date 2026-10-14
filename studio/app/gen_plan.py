@@ -759,6 +759,36 @@ def _exposure_line(rec: dict, stats: dict[str, list[float]]) -> str:
             "frame.")
 
 
+def _color_line(rec: dict) -> str:
+    """COLOR LOCK: the reference's measured saturation and colour cast. gpt-image read the camera look's "muted,
+    desaturated, greenish-grey" literally and greyed warm, colourful frames (2026-10-14); measured numbers win.
+    Words from ABSOLUTE platform-wide levels (400 frames: saturation p10 0.05 / median 0.18 / p90 0.29; Lab b
+    (warm+) median +0.6, p10 -0.9, p90 +3.4)."""
+    import cv2
+
+    sat = float(rec.get("saturation") or 0)
+    a_mean = b_mean = 0.0
+    try:
+        from PIL import Image
+
+        rgb = np.asarray(Image.open(rec["path"]).convert("RGB").resize((256, 256)))
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        a_mean, b_mean = float(lab[..., 1].mean() - 128), float(lab[..., 2].mean() - 128)
+    except Exception:  # noqa: BLE001 — no cast words without the pixels
+        pass
+    level = ("near-grayscale, almost no color" if sat < 0.08 else "muted, low-saturation color" if sat < 0.14
+             else "natural, moderate color" if sat < 0.22 else "colorful, well-saturated")
+    cast = ("a WARM yellow-orange tint" if b_mean >= 2.0 else "a slightly warm tint" if b_mean >= 1.0
+            else "a COOL bluish tint" if b_mean <= -1.0 else "neutral white balance")
+    if a_mean <= -1.0:
+        cast += ", slightly green"
+    elif a_mean >= 1.0:
+        cast += ", slightly magenta"
+    return (f"COLOR LOCK (hard, measured on the reference — wins over the CAMERA LOOK's color words): {level} "
+            f"(saturation {sat:.0%}), {cast}. Keep exactly this color: do not desaturate, grey out or re-tint the frame "
+            "(\"muted\" CCTV color means slightly less vivid than a phone photo, not grey).")
+
+
 def _source_profile_block(
     fn: str,
     rec: dict,
@@ -789,7 +819,8 @@ def _source_profile_block(
     elif ctx["crowd"] is False:
         people = "PEOPLE: few people."
     quality = _degradation_block(rec, degr_stats or {}, caption or {}) if (degr_stats or caption) else ""
-    lines = [f"THIS SOURCE (measured on the reference {fn}):", f"- {_exposure_line(rec, degr_stats or {})}", f"- {count_line}",
+    lines = [f"THIS SOURCE (measured on the reference {fn}):", f"- {_exposure_line(rec, degr_stats or {})}",
+             f"- {_color_line(rec)}", f"- {count_line}",
              f"- {_drink_sizes_line(rec, boxes, ctx['scale'])}"]
     if scene_line:
         lines.append(f"- {scene_line}")
