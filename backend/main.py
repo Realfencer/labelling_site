@@ -1843,6 +1843,10 @@ def ultralytics_list_datasets(body: UltralyticsKeyBody) -> dict:
         raise _ultra_http_error(exc) from exc
 
 
+# The Ultralytics Platform rejects a single archive over 10 GB; stay clearly under it.
+ULTRA_MAX_ARCHIVE_BYTES = 9 * 1000**3
+
+
 @app.post("/api/ultralytics/upload")
 def ultralytics_upload(body: UltralyticsUploadBody, state: AppStateDep) -> dict:
     policy = (body.conflict_policy or "skip").strip().lower()
@@ -1896,27 +1900,51 @@ def ultralytics_upload(body: UltralyticsUploadBody, state: AppStateDep) -> dict:
         if not dataset_id:
             raise HTTPException(status_code=400, detail="Dataset id missing after lookup/create")
 
-        zip_path, filename, packed = state.build_reviewed_gt_zip(
+        selection = dict(
             block_min=body.block_min,
             block_max=body.block_max,
             quality=quality,
             item_keys=body.item_keys,
             own_days=body.own_days,
+        )
+        split_args = dict(
             train_pct=body.train_pct,
             val_pct=body.val_pct,
             test_pct=body.test_pct,
             force_split=forced,
         )
-        result = ultra.upload_archive_and_ingest(
-            _ultra_key(body.api_key),
-            owner=owner,
-            dataset_slug=dataset_slug,
-            dataset_id=dataset_id,
-            zip_path=zip_path,
-            conflict_policy=policy,
-            # Archive already has train/val/test folders — only force when user picks one split.
-            target_split=forced,
-        )
+        # The Platform refuses an archive over 10 GB ("File too large"). Big exports go up as several archives, each under
+        # the limit, into the same dataset (disjoint images, so no conflicts between the parts).
+        parts, _total_bytes = state.plan_reviewed_gt_parts(**selection, max_bytes=ULTRA_MAX_ARCHIVE_BYTES)
+        plan: list[dict] = [dict(selection)] if len(parts) <= 1 else [dict(item_keys=keys, quality="all") for keys in parts]
+        uploads: list[dict] = []
+        packed = 0
+        filename = ""
+        result: dict = {}
+        for i, sel in enumerate(plan):
+            if zip_path is not None:
+                zip_path.unlink(missing_ok=True)
+                zip_path = None
+            zip_path, filename, n = state.build_reviewed_gt_zip(
+                block_min=sel.get("block_min"),
+                block_max=sel.get("block_max"),
+                quality=sel.get("quality", "all"),
+                item_keys=sel.get("item_keys"),
+                own_days=sel.get("own_days"),
+                **split_args,
+            )
+            result = ultra.upload_archive_and_ingest(
+                _ultra_key(body.api_key),
+                owner=owner,
+                dataset_slug=dataset_slug,
+                dataset_id=dataset_id,
+                zip_path=zip_path,
+                conflict_policy=policy,
+                # Archive already has train/val/test folders — only force when user picks one split.
+                target_split=forced,
+            )
+            packed += n
+            uploads.append({"part": i + 1, "packed": n, "bytes": result.get("bytes"), "filename": filename})
         return {
             "ok": True,
             "packed": packed,
@@ -1927,6 +1955,7 @@ def ultralytics_upload(body: UltralyticsUploadBody, state: AppStateDep) -> dict:
             "conflictPolicy": policy,
             "url": f"https://platform.ultralytics.com/{owner}/datasets/{dataset_slug}",
             **result,
+            "parts": uploads,
         }
     except HTTPException:
         raise

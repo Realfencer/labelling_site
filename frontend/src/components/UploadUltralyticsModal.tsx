@@ -60,6 +60,7 @@ export default function UploadUltralyticsModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [resultUrl, setResultUrl] = useState("");
+  const [resultNote, setResultNote] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const trainPct = trainEnd;
@@ -201,6 +202,7 @@ export default function UploadUltralyticsModal({
     setBusy(true);
     setError("");
     setResultUrl("");
+    setResultNote("");
     try {
       const res = await api.ultralyticsUpload({
         api_key: "",
@@ -221,6 +223,7 @@ export default function UploadUltralyticsModal({
         conflict_policy: conflict,
       });
       setResultUrl(res.url || "");
+      setResultNote(res.parts && res.parts.length > 1 ? `${res.packed} images in ${res.parts.length} archives (each under the 10 GB limit)` : "");
       setConfirmOpen(false);
       if (createNew) {
         setCreateNew(false);
@@ -591,7 +594,7 @@ export default function UploadUltralyticsModal({
           )}
           {resultUrl && (
             <p className="text-[11px] font-semibold text-emerald-600">
-              Uploaded ·{" "}
+              Uploaded{resultNote ? ` ${resultNote}` : ""} ·{" "}
               <a href={resultUrl} target="_blank" rel="noreferrer" className="underline">
                 open dataset
               </a>

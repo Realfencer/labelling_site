@@ -439,7 +439,7 @@ export const api = {
     request<UltralyticsUploadResult>("/ultralytics/upload", {
       method: "POST",
       body: JSON.stringify(body),
-      timeoutMs: 15 * 60_000,
+      timeoutMs: 6 * 60 * 60_000, // big exports go up as several ~9 GB archives, one after the other
     }),
   dppDefaults: () => request<{ min_gt: number; topic_slug: string; class_names: string[]; reviewed_available: number }>("/dpp/defaults"),
   dppHistory: () => request<{ history: DppHistoryEntry[]; topic_slug: string }>("/dpp/history"),
@@ -1684,6 +1684,8 @@ export type UltralyticsUploadResult = {
   url: string;
   sessionId?: string;
   ingest?: Record<string, unknown>;
+  /** One entry per archive: exports over the 10 GB limit are split into several. */
+  parts?: Array<{ part: number; packed: number; bytes?: number; filename: string }>;
 };
 
 export type DppJob = {

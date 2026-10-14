@@ -5721,45 +5721,17 @@ class ReviewAppState:
             "path": SEND_GT_REMOTE,
         }
 
-    def build_reviewed_gt_zip(
+    def _select_reviewed_gt_items(
         self,
         *,
-        block_min: int | None = None,
-        block_max: int | None = None,
-        quality: str = "all",
-        item_keys: list[str] | None = None,
-        own_days: list[str] | None = None,
-        train_pct: int = 80,
-        val_pct: int = 10,
-        test_pct: int = 10,
-        force_split: str | None = None,
-    ) -> tuple[Path, str, int]:
-        """Pack Done (reviewed) GT images+labels into a YOLO-style zip.
-
-        Layout: ``images/{split}/``, ``labels/{split}/``, ``classes.txt``, ``data.yaml``.
-        ``force_split`` (train|val|test) puts every image in that split; otherwise uses
-        ``train_pct`` / ``val_pct`` / ``test_pct`` (must sum to 100) with a stable hash.
-        Returns ``(zip_path, download_filename, image_count)``.
-        """
-        import hashlib
-        import tempfile
-        import zipfile
-
-        quality = (quality or "all").strip().lower()
-        if quality not in {"all", "pass", "fail"}:
-            raise ValueError("quality must be all, pass, or fail")
-        own_mode = self.review_mode == "local"
-        if own_mode:
-            quality = "all"
-        forced = (force_split or "").strip().lower() or None
-        if forced and forced not in {"train", "val", "test"}:
-            raise ValueError("force_split must be train, val, test, or empty")
-        t_pct = max(0, int(train_pct))
-        v_pct = max(0, int(val_pct))
-        e_pct = max(0, int(test_pct))
-        if not forced and t_pct + v_pct + e_pct != 100:
-            raise ValueError("train_pct + val_pct + test_pct must equal 100")
-
+        own_mode: bool,
+        quality: str,
+        block_min: int | None,
+        block_max: int | None,
+        item_keys: list[str] | None,
+        own_days: list[str] | None,
+    ) -> list:
+        """The Done (reviewed) GT images a zip export would contain (same rules as ``build_reviewed_gt_zip``)."""
         if own_mode:
             try:
                 self.reload_own_pool(force=False, dedupe=False)
@@ -5814,6 +5786,106 @@ class ReviewAppState:
                 f"{where} has {done_total} Done image(s) — widen From–To"
                 + (" or set quality to All." if not own_mode else ".")
             )
+        return reviewed
+
+    def plan_reviewed_gt_parts(
+        self,
+        *,
+        quality: str = "all",
+        block_min: int | None = None,
+        block_max: int | None = None,
+        item_keys: list[str] | None = None,
+        own_days: list[str] | None = None,
+        max_bytes: int,
+    ) -> tuple[list[list[str]], int]:
+        """Split the export into parts whose zip stays under ``max_bytes`` (the zip stores images as-is, so its size is
+        the sum of the image + label files). Returns ``(item_keys per part, total bytes)``."""
+        quality = (quality or "all").strip().lower()
+        own_mode = self.review_mode == "local"
+        if own_mode or quality not in {"all", "pass", "fail"}:
+            quality = "all"
+        reviewed = self._select_reviewed_gt_items(
+            own_mode=own_mode,
+            quality=quality,
+            block_min=block_min,
+            block_max=block_max,
+            item_keys=item_keys,
+            own_days=own_days,
+        )
+        parts: list[list[str]] = []
+        cur: list[str] = []
+        cur_bytes = 0
+        total = 0
+        for item in reviewed:
+            image_dir, label_dir, _ = self.output_dirs_for_item(item)
+            label_path = core.label_path_for_item(item, label_dir)
+            image_path = self.display_image_path_for_item(item)
+            if image_path is None or not image_path.exists():
+                image_path = item.image_path
+            size = 0
+            for path in (image_path, label_path):
+                try:
+                    if path is not None:
+                        size += path.stat().st_size
+                except OSError:
+                    pass
+            if cur and cur_bytes + size > max_bytes:
+                parts.append(cur)
+                cur, cur_bytes = [], 0
+            cur.append(str(item.item_key))
+            cur_bytes += size
+            total += size
+        if cur:
+            parts.append(cur)
+        return parts, total
+
+    def build_reviewed_gt_zip(
+        self,
+        *,
+        block_min: int | None = None,
+        block_max: int | None = None,
+        quality: str = "all",
+        item_keys: list[str] | None = None,
+        own_days: list[str] | None = None,
+        train_pct: int = 80,
+        val_pct: int = 10,
+        test_pct: int = 10,
+        force_split: str | None = None,
+    ) -> tuple[Path, str, int]:
+        """Pack Done (reviewed) GT images+labels into a YOLO-style zip.
+
+        Layout: ``images/{split}/``, ``labels/{split}/``, ``classes.txt``, ``data.yaml``.
+        ``force_split`` (train|val|test) puts every image in that split; otherwise uses
+        ``train_pct`` / ``val_pct`` / ``test_pct`` (must sum to 100) with a stable hash.
+        Returns ``(zip_path, download_filename, image_count)``.
+        """
+        import hashlib
+        import tempfile
+        import zipfile
+
+        quality = (quality or "all").strip().lower()
+        if quality not in {"all", "pass", "fail"}:
+            raise ValueError("quality must be all, pass, or fail")
+        own_mode = self.review_mode == "local"
+        if own_mode:
+            quality = "all"
+        forced = (force_split or "").strip().lower() or None
+        if forced and forced not in {"train", "val", "test"}:
+            raise ValueError("force_split must be train, val, test, or empty")
+        t_pct = max(0, int(train_pct))
+        v_pct = max(0, int(val_pct))
+        e_pct = max(0, int(test_pct))
+        if not forced and t_pct + v_pct + e_pct != 100:
+            raise ValueError("train_pct + val_pct + test_pct must equal 100")
+
+        reviewed = self._select_reviewed_gt_items(
+            own_mode=own_mode,
+            quality=quality,
+            block_min=block_min,
+            block_max=block_max,
+            item_keys=item_keys,
+            own_days=own_days,
+        )
 
         def assign_split(item: core.ChallengeRecord) -> str:
             if forced:
