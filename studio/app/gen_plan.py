@@ -130,8 +130,9 @@ CCTV_APPEARANCE = """CCTV / SURVEILLANCE CAMERA APPEARANCE (match the eval frame
 - IMAGE QUALITY: follow this source's CAMERA LOOK and IMAGE QUALITY LOCK (focus, grain, color, exposure, motion
   blur) — every frame of the eval set has its own camera look. In general: CCTV softness —
   fine texture, printed text and small objects are NOT resolved; visible sensor grain, strongest in shadows; mild
-  compression; flat tone curve; slightly muted full color. Never photo-sharp; no HDR, no bokeh, no cinematic grading.
-  Compression shows as SMEARING and mushy shadows only — measured on the eval set: no visible 8×8 block grid, so never
+  compression; the reference's own tone curve and exposure (see EXPOSURE LOCK); slightly muted full color. Never
+  photo-sharp; no HDR, no bokeh, no cinematic grading.
+  Compression shows as SMEARING of fine detail only — measured on the eval set: no visible 8×8 block grid, so never
   paint blocky / pixelated macroblocks, even where a CAMERA LOOK mentions macroblocking.
 - NO OVERLAY TEXT: no timestamp, date, camera name or any other text."""
 
@@ -141,7 +142,8 @@ DRINK_LOOK = """HOW THE DRINKS LOOK (hard — this is what makes the eval drinks
 - Small and soft: most drinks are only a few percent of the frame height (see DRINK SIZES); their edges blend into
   hands, sleeves and clothes; lids, rims and labels are usually NOT resolved.
 - Partly hidden: fingers wrapped around them, sleeves, bags, other people and table clutter cover part of many drinks.
-- Low contrast: many drinks have a tone close to what is behind them (white cup against a light coat, dark can
+- Low contrast AROUND THE DRINK (the frame's overall brightness and contrast follow the EXPOSURE LOCK): many drinks
+  have a tone close to what is behind them (white cup against a light coat, dark can
   against a dark jacket, clear bottle against a pale floor, a drink in shadow or against glare).
 - In motion: drinks in the hands of walking people share the hand's motion blur.
 - Natural, not posed: held low at the hip, swinging, tilted while walking or drinking; a few in bags, bins or on the
@@ -637,7 +639,8 @@ def _drink_sizes_line(rec: dict, boxes: list[tuple[str, float, float]], scale: s
             "larger than the reference's largest. Never enlarge drinks to make them readable; no product-size drinks.")
 
 
-DEGRADATION_KEYS = ("sharpness", "noise_sigma", "motion_aniso", "cup_sharpness", "can_sharpness", "bottle_sharpness")
+DEGRADATION_KEYS = ("sharpness", "noise_sigma", "motion_aniso", "cup_sharpness", "can_sharpness", "bottle_sharpness",
+                    "brightness", "contrast")
 
 
 def degradation_stats(records: list[dict]) -> dict[str, list[float]]:
@@ -731,6 +734,31 @@ def _degradation_block(rec: dict, stats: dict[str, list[float]], caption: dict) 
             "drinks get the same quality as the rest of the frame):\n" + "\n".join(f"  * {line}" for line in lines))
 
 
+def _exposure_line(rec: dict, stats: dict[str, list[float]]) -> str:
+    """EXPOSURE LOCK: the reference's measured brightness / contrast / highlights, ranked in the eval set. Without it
+    the CCTV wording (muted, soft, grain, low contrast) made gpt-image darken and flatten frames: generated / source
+    brightness 0.68-0.89 and contrast 0.61-0.74 on OpenAI runs (Gemini 0.92-1.03 / ~0.91), 2026-10-14."""
+    b, c = float(rec.get("brightness") or 0), float(rec.get("contrast") or 0)
+    bp = _pct(stats, "brightness", b)
+    # words from ABSOLUTE levels (platform-wide over 400 frames: brightness p10 0.25 / median 0.33 / p90 0.40,
+    # contrast p10 0.20 / median 0.25 / p90 0.30) — a 22-frame eval set's own ranking would call a normal frame "dark"
+    level = ("very BRIGHT, brightly lit" if b >= 0.45 else "BRIGHT, well lit" if b >= 0.36 else "medium brightness"
+             if b >= 0.30 else "somewhat dim" if b >= 0.25 else "DARK, dim")
+    clevel = "strong contrast" if c >= 0.27 else "normal contrast" if c >= 0.18 else "low contrast"
+    hi, dk = float(rec.get("highlight_ratio") or 0), float(rec.get("dark_ratio") or 0)
+    extra = []
+    if hi >= 0.02:
+        extra.append(f"bright light sources / windows clip to white ({hi:.0%} of the frame)")
+    if dk >= 0.25:
+        extra.append(f"deep shadows cover {dk:.0%} of the frame")
+    rank = (f", {'one of the brighter frames' if bp >= 0.66 else 'one of the darker frames' if bp < 0.33 else 'a mid-range frame'} of the "
+            "current eval set" if bp is not None else "")
+    return (f"EXPOSURE LOCK (hard, measured on the reference): {level} (mean brightness {b:.0%}{rank}), {clevel} "
+            f"({c:.0%})" + (f"; {'; '.join(extra)}" if extra else "") + ". Keep exactly this overall exposure, "
+            "brightness and contrast — the CCTV softness, grain and muted color must NOT darken, grey out or flatten the "
+            "frame.")
+
+
 def _source_profile_block(
     fn: str,
     rec: dict,
@@ -761,7 +789,7 @@ def _source_profile_block(
     elif ctx["crowd"] is False:
         people = "PEOPLE: few people."
     quality = _degradation_block(rec, degr_stats or {}, caption or {}) if (degr_stats or caption) else ""
-    lines = [f"THIS SOURCE (measured on the reference {fn}):", f"- {count_line}",
+    lines = [f"THIS SOURCE (measured on the reference {fn}):", f"- {_exposure_line(rec, degr_stats or {})}", f"- {count_line}",
              f"- {_drink_sizes_line(rec, boxes, ctx['scale'])}"]
     if scene_line:
         lines.append(f"- {scene_line}")
