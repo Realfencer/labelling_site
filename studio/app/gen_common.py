@@ -463,8 +463,12 @@ def list_runs() -> list[dict]:
         if n_img == 0 and not (p / "batch" / "job.json").exists():
             continue
         chunks = job_meta.get("chunks") or []
+        # a chunk that "failed" because its batch was cancelled can never be collected — not pending
         chunk_active = any(
-            (c.get("status") or "") in {"pending", "submitted", "failed"} for c in chunks
+            (c.get("status") or "") in {"pending", "submitted", "failed"}
+            and "cancelled" not in str(c.get("error") or "")
+            and job_meta.get("status") != "cancelled"
+            for c in chunks
         )
         if chunks:
             pending = bool(job_meta.get("provider") == "openai" and chunk_active)
