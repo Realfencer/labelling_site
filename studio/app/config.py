@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     )
 
     # Default image model shown in Generate UI — OpenAI gpt-image-2 Batch only
-    default_image_model: str = "gpt-image-2"
+    default_image_model: str = "gpt-image-2.5-sunburst"
 
     # Gemini Nano Banana (Batch generateContent)
     gemini_api_key: str = ""
@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # OpenAI GPT Image (Batch API /v1/images/edits) — beverage_gt eval images carry OpenAI SynthID
     openai_api_key: str = ""
     openrouter_api_key: str = ""
-    openai_model: str = "gpt-image-2"
+    openai_model: str = "gpt-image-2.5-sunburst"
     openai_image_quality: str = "medium"  # low | medium | high
     openai_input_fidelity: str = ""  # "" (model default) | low | high — high = closer to reference
     openai_cctv_degrade: bool = False  # unused: all post-processing removed (generator output is saved as-is)

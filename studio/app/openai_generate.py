@@ -38,13 +38,15 @@ from app.gen_common import (
 )
 from app.gen_plan import MASTER_PROMPT, prepare_package
 
+# 2026-10-14 test, 5 sources x 1 image, same prompts: gpt-image-2.5-sunburst kept the source's light and colour far
+# better (contrast x0.92 vs x0.79, saturation x0.75 vs x0.68 of the source) at half the price (439 vs 1,756 output
+# tokens at medium: $0.0365 vs $0.076 per image instant). gpt-image-1 retires 2026-10-23; 1.5 / 1-mini 2026-12-01.
 OPENAI_MODELS = (
-    {"id": "gpt-image-2", "label": "GPT Image 2", "hint": "best CCTV realism + layout diversity in tests", "provider": "openai"},
-    {"id": "gpt-image-1.5", "label": "GPT Image 1.5", "hint": "tends to near-copy the source", "provider": "openai"},
-    {"id": "gpt-image-1", "label": "GPT Image 1", "hint": "GPT-4o image generation · weakest in tests", "provider": "openai"},
-    {"id": "gpt-image-1-mini", "label": "GPT Image 1 Mini", "hint": "OpenAI · cheapest", "provider": "openai"},
+    {"id": "gpt-image-2.5-sunburst", "label": "GPT Image 2.5 Sunburst", "hint": "best light / colour match, half the price of GPT Image 2", "provider": "openai"},
+    {"id": "gpt-image-2.5-flare", "label": "GPT Image 2.5 Flare", "hint": "OpenAI's fast small model (untested here)", "provider": "openai"},
+    {"id": "gpt-image-2", "label": "GPT Image 2", "hint": "earlier default — greyer, flatter images than its source", "provider": "openai"},
 )
-DEFAULT_OPENAI_MODEL = "gpt-image-2"
+DEFAULT_OPENAI_MODEL = "gpt-image-2.5-sunburst"
 BATCH_ENDPOINT = "/v1/images/edits"
 BATCH_POLL_S = 30.0
 IMAGE_SIZE = "1024x1024"  # OpenAI 1:1 square (Gemini uses 16:9 separately)

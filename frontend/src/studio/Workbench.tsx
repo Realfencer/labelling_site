@@ -9,12 +9,13 @@ import { ImagePickerModal, type PickItem } from "../components/ImagePicker";
 import type { AnalyzeNeeded, GenMode, GtCandidate, SwitchName } from "./types";
 import { Btn, Confirm, errText, GenBadge, Progress } from "./ui";
 
-/** $ per 1024² image (OpenAI Batch API: low / medium / high). */
+/** $ per 1024² image-to-image request, Batch API (low / medium / high), INCLUDING the prompt text (~3,000 tokens,
+ *  $0.0075) and the reference image (1,024 tokens, $0.0041) — measured 2026-10-14 with OpenAI's token counts;
+ *  output tokens per quality from OpenAI's calculator (2.5 medium: 439 measured, gpt-image-2 medium: 1,756 measured). */
 const PRICE: Record<string, [number, number, number]> = {
-  "gpt-image-1": [0.012, 0.03, 0.09],
-  "gpt-image-1.5": [0.01, 0.032, 0.08],
-  "gpt-image-2": [0.008, 0.038, 0.11],
-  "gpt-image-1-mini": [0.002, 0.005, 0.018],
+  "gpt-image-2.5-sunburst": [0.013, 0.018, 0.038],
+  "gpt-image-2.5-flare": [0.013, 0.018, 0.038],
+  "gpt-image-2": [0.015, 0.038, 0.117],
 };
 const GEMINI_PRICE = 0.036; // gemini-3.1-flash-image batch, measured: $0.0358/image incl. prompt input (2026-10-10)
 const CHUNK = 13;
@@ -460,11 +461,11 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
 
   useEffect(() => {
     if (!models.length) return;
-    const saved = localStorage.getItem("studio_image_model") || "";
+    const saved = localStorage.getItem("studio_image_model_v2") || ""; // v2: everyone starts on the new default
     setModel((cur) => (models.some((m) => m.id === cur) ? cur : (models.find((m) => m.id === saved) || models.find((m) => m.id === h?.default_model) || models[0]).id));
   }, [models, h?.default_model]);
 
-  const unit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
+  const unit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2.5-sunburst"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
   const nFinal = st.nFinal;
   const nAll = Math.max(st.sources.length, st.nAllSources);
   const sameGen = st.sources.filter((s) => st.genOf(s.source_image) === mode).map((s) => s.source_image);
@@ -590,7 +591,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
             <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Model</span>
             <select
               value={model}
-              onChange={(e) => (setModel(e.target.value), localStorage.setItem("studio_image_model", e.target.value))}
+              onChange={(e) => (setModel(e.target.value), localStorage.setItem("studio_image_model_v2", e.target.value))}
               className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-ink-800"
             >
               {models.map((m) => (

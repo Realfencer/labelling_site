@@ -16,8 +16,8 @@ from typing import Any
 
 import numpy as np
 
-DEFAULT_MODEL = "gpt-image-2"
-COST_PER_IMAGE_USD = 0.038  # OpenAI Batch, medium, 1024² (measured in tests)
+DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+COST_PER_IMAGE_USD = 0.018  # OpenAI Batch, gpt-image-2.5-sunburst medium, 1024² image-to-image (measured 2026-10-14)
 DEFAULT_ASPECT_RATIO = "1:1"
 
 REGIME_PROMPTS: dict[str, str] = {

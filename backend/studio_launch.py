@@ -62,7 +62,7 @@ def build_env() -> dict[str, str]:
         OPENROUTER_API_KEY=vault.service_key("openrouter"),
         ULTRALYTICS_API_KEY=vault.ultralytics_key(),
         HF_TOKEN=vault.hf_token(repo=hf_repo()),
-        DEFAULT_IMAGE_MODEL=env.get("DEFAULT_IMAGE_MODEL", "gpt-image-2"),
+        DEFAULT_IMAGE_MODEL=env.get("DEFAULT_IMAGE_MODEL", "gpt-image-2.5-sunburst"),
         OPENAI_IMAGE_QUALITY=env.get("OPENAI_IMAGE_QUALITY", "medium"),
         HF_DATASET_PRIVATE="true",
         REMOTE_SEND_HOST="local",

@@ -317,7 +317,7 @@ def start_generation(
                 )
             else:
                 gen_mode = "openai"
-                model_name = (model or "gpt-image-2").strip()
+                model_name = (model or "gpt-image-2.5-sunburst").strip()
                 if model_name.startswith("openai/"):
                     model_name = model_name.split("/", 1)[1]
                 if not is_openai_model(model_name):

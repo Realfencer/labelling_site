@@ -183,7 +183,7 @@ def health() -> dict[str, Any]:
         "dataset": ds,
         "out_dir": s.get("out_dir"),
         "images": n,
-        "default_model": settings.default_image_model or settings.openai_model or "gpt-image-2",
+        "default_model": settings.default_image_model or settings.openai_model or "gpt-image-2.5-sunburst",
         "has_hf_token": bool((settings.hf_token or "").strip()),
         "hf_repo": hf_repo,
         "hf_private": bool(settings.hf_dataset_private),
