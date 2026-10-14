@@ -3938,23 +3938,23 @@ export default function App({
         }, G_HOLD_MS);
         return;
       }
-      if (e.key === "n" || e.key === "N" || e.key === "Tab") {
-        e.preventDefault(); // Tab = same as N: next
+      if (e.key === "n" || e.key === "N") {
+        e.preventDefault(); // next image that still needs work
         requestNeedsWorkNav(1);
         return;
       }
-      if (e.key === "b" || e.key === "B" || e.key === "q" || e.key === "Q") {
-        e.preventDefault(); // Q = same as B: back
+      if (e.key === "b" || e.key === "B") {
+        e.preventDefault(); // previous image that still needs work
         requestNeedsWorkNav(-1);
         return;
       }
-      if (e.key === "ArrowRight") {
+      if (e.key === "ArrowRight" || e.key === "Tab") {
         e.preventDefault();
         requestRelativeNav(1);
         return;
       }
-      if (e.key === "ArrowLeft") {
-        e.preventDefault();
+      if (e.key === "ArrowLeft" || e.key === "q" || e.key === "Q") {
+        e.preventDefault(); // Tab = same as →, Q = same as ←
         requestRelativeNav(-1);
         return;
       }
@@ -5060,7 +5060,7 @@ export default function App({
             const ownBaseBoxes =
               (itemKey && winnerPredCache.get(itemKey)) || fromDetail;
             const ownHint =
-              `C/V inspect · R guides${ownGuides ? " on" : ""} · E dual${ownDualView ? " on" : " off"} · Z/X zoom · N·Tab next / B·Q back (NEW) · M Done · ←/→ navigate`;
+              `C/V inspect · R guides${ownGuides ? " on" : ""} · E dual${ownDualView ? " on" : " off"} · Z/X zoom · N next / B back (NEW) · Tab/Q = →/← · M Done`;
             const ownUrls = {
               fullUrl: challengeImageUrl(
                 idx,
