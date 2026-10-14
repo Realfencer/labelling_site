@@ -435,8 +435,11 @@ def run_generation_batch(
     per_source: int | None = None,
     progress_cb: ProgressCb | None = None,
     poll_s: float = BATCH_POLL_S,
+    instant: bool = False,
 ) -> dict:
-    """Generate via Gemini Batch API (~50% off, async; keeps CCTV reference images)."""
+    """Generate via Gemini Batch API (~50% off, async; keeps CCTV reference images).
+
+    instant=True sends the very same requests straight to generateContent (standard price ≈ 2×, ~1 minute)."""
     if mode not in {"test", "final"}:
         raise GeminiError(f"Unsupported mode for batch: {mode}")
 
@@ -560,6 +563,11 @@ def run_generation_batch(
         for row in request_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     (bdir / "pending.json").write_text(json.dumps(pending, indent=2), encoding="utf-8")
+
+    if instant:
+        return _run_instant(client=client, request_rows=request_rows, run_dir=run_dir, bdir=bdir, lab_dir=lab_dir,
+                            pending=pending, model_name=model_name, mode=mode, labels_root=labels_root,
+                            uploaded_sources=uploaded_sources, progress_cb=progress_cb)
 
     if progress_cb:
         progress_cb(0, total, f"Uploading batch JSONL ({len(request_rows)} requests)…")
@@ -745,6 +753,68 @@ def _load_results_by_key(
     return results_by_key
 
 
+INSTANT_WORKERS = 5
+
+
+def _run_instant(*, client: genai.Client, request_rows: list[dict], run_dir: Path, bdir: Path, lab_dir: Path,
+                 pending: dict, model_name: str, mode: str, labels_root: Path | None, uploaded_sources: dict,
+                 progress_cb: ProgressCb | None) -> dict:
+    """Each batch request row sent as a direct generateContent call (parallel, retried on 429 / 5xx)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    (bdir / "job.json").write_text(json.dumps({
+        "provider": "gemini", "instant": True, "model": model_name, "mode": mode, "n_requests": len(request_rows),
+        "reference": f"unsquashed to {UNSQUASH_SIZE[0]}x{UNSQUASH_SIZE[1]}", "status": "running",
+        "created_at": datetime.now(timezone.utc).isoformat()}, indent=2), encoding="utf-8")
+    config = types.GenerateContentConfig(
+        response_modalities=["IMAGE"],
+        image_config=types.ImageConfig(aspect_ratio=GEMINI_ASPECT_RATIO, image_size=BATCH_IMAGE_SIZE))
+
+    def call(row: dict):
+        text, ref = row["request"]["contents"][0]["parts"]
+        contents = [types.Part.from_text(text=text["text"]),
+                    types.Part.from_uri(file_uri=ref["file_data"]["file_uri"], mime_type=ref["file_data"]["mime_type"])]
+        try:
+            resp = _with_retry(lambda: client.models.generate_content(model=model_name, contents=contents,
+                                                                      config=config), "generate", attempts=6)
+        except Exception as exc:  # noqa: BLE001
+            return row["key"], None, str(exc), None
+        um = getattr(resp, "usage_metadata", None)
+        use = {"input": getattr(um, "prompt_token_count", 0) or 0, "output": getattr(um, "candidates_token_count", 0) or 0}
+        for part in getattr(resp, "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            if inline is not None and getattr(inline, "data", None):
+                raw = inline.data
+                return row["key"], {"_raw_bytes": base64.b64decode(raw) if isinstance(raw, str) else bytes(raw)}, None, use
+        return row["key"], None, "No image returned" + (f" ({_refusal_reason(resp)})" if _refusal_reason(resp) else ""), use
+
+    total = len(request_rows)
+    results: dict[str, tuple[dict | None, object | None]] = {}
+    usage: list[dict] = []
+    with ThreadPoolExecutor(max_workers=INSTANT_WORKERS) as ex:
+        futs = [ex.submit(call, r) for r in request_rows]
+        for done, fut in enumerate(as_completed(futs), start=1):
+            k, resp, err, use = fut.result()
+            results[k] = (resp, err)
+            if use:
+                usage.append(use)
+            if progress_cb:
+                ok = sum(1 for r, _ in results.values() if r)
+                progress_cb(done, total, f"Instant · {done}/{total} done (ok={ok} fail={done - ok})")
+    for src in uploaded_sources.values():  # the reference uploads are no longer needed
+        try:
+            client.files.delete(name="files/" + src["file_uri"].rsplit("/files/", 1)[-1])
+        except Exception:  # noqa: BLE001
+            pass
+    manifest = _finalize_batch_job(client=client, key="", job=None, run_dir=run_dir, bdir=bdir, lab_dir=lab_dir,
+                                   pending=pending, model_name=model_name, mode=mode, labels_root=labels_root,
+                                   progress_cb=progress_cb, instant_results=results)
+    job = json.loads((bdir / "job.json").read_text(encoding="utf-8"))
+    job.update(status="completed", usage=usage)
+    (bdir / "job.json").write_text(json.dumps(job, indent=2), encoding="utf-8")
+    return manifest
+
+
 def _finalize_batch_job(
     *,
     client: genai.Client,
@@ -758,16 +828,19 @@ def _finalize_batch_job(
     mode: str,
     labels_root: Path | None,
     progress_cb: ProgressCb | None,
+    instant_results: dict | None = None,
 ) -> dict:
-    state = getattr(job.state, "name", str(job.state))
-    if state != "JOB_STATE_SUCCEEDED":
-        raise GeminiError(f"Batch job failed: {state} · {getattr(job, 'error', None)}")
+    if instant_results is None:
+        state = getattr(job.state, "name", str(job.state))
+        if state != "JOB_STATE_SUCCEEDED":
+            raise GeminiError(f"Batch job failed: {state} · {getattr(job, 'error', None)}")
+    instant = instant_results is not None
 
     total = len(pending)
-    if progress_cb:
+    if progress_cb and not instant:
         progress_cb(0, total, "Collecting batch results…")
 
-    results_by_key = _load_results_by_key(client, key, job, bdir, pending)
+    results_by_key = instant_results if instant else _load_results_by_key(client, key, job, bdir, pending)
 
     saved = []
     fails = 0
@@ -782,7 +855,7 @@ def _finalize_batch_job(
                     "source_index": info["source_index"],
                     "source_path": info["source_path"],
                     "variant": info["variant"],
-                    "batch": True,
+                    "batch": not instant,
                     "url": f"/api/gen/image/{out_img.name}?run={run_dir.name}",
                     "source_url": f"/api/dataset/image/{info['source_image']}",
                 }
@@ -813,7 +886,7 @@ def _finalize_batch_job(
                     "source_index": info["source_index"],
                     "source_path": info["source_path"],
                     "variant": info["variant"],
-                    "batch": True,
+                    "batch": not instant,
                     "url": f"/api/gen/image/{out_img.name}?run={run_dir.name}",
                     "source_url": f"/api/dataset/image/{info['source_image']}",
                     **nc,
@@ -828,11 +901,13 @@ def _finalize_batch_job(
             )
 
     if not saved:
-        raise GeminiError(f"Batch finished but 0 images saved ({fails} failures)")
+        raise GeminiError(f"{'Instant run' if instant else 'Batch'} finished but 0 images saved ({fails} failures)")
 
     manifest = {
         "mode": mode,
-        "batch": True,
+        "provider": "gemini",
+        "batch": not instant,
+        "instant": instant,
         "batch_job": getattr(job, "name", None),
         "model": model_name,
         "run_dir": str(run_dir),
@@ -858,9 +933,11 @@ def run_generation(
     source_images: list[str] | None = None,
     per_source: int | None = None,
     progress_cb: ProgressCb | None = None,
+    instant: bool = False,
 ) -> dict:
-    # Test + Final both use Gemini Batch API (cheaper async path with reference images).
+    # Test + Final both use Gemini Batch API (cheaper async path with reference images); instant = direct calls.
     return run_generation_batch(
+        instant=instant,
         mode=mode,
         analysis_dir=analysis_dir,
         dataset_root=dataset_root,

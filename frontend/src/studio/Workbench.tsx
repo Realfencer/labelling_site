@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bot, Check, ChevronDown, DatabaseZap, FlaskConical, FolderUp, Images, Loader2, Rocket, ScanSearch, Sparkles, Upload, X } from "lucide-react";
+import { Bot, Check, ChevronDown, Clock, DatabaseZap, FlaskConical, FolderUp, Images, Loader2, Rocket, ScanSearch, Sparkles, Upload, X, Zap } from "lucide-react";
 import { cn } from "../lib/utils";
 import { timeAgo } from "../store/useTeam";
 import { img, studio } from "./api";
@@ -18,6 +18,16 @@ const PRICE: Record<string, [number, number, number]> = {
   "gpt-image-2": [0.015, 0.038, 0.117],
 };
 const GEMINI_PRICE = 0.036; // gemini-3.1-flash-image batch, measured: $0.0358/image incl. prompt input (2026-10-10)
+/** Instant (direct API calls): OpenAI and Google bill their standard rates, exactly twice the Batch rates
+ *  (gpt-image-2.5-sunburst medium measured $0.0365/image instant vs $0.018 batch, 2026-10-14). */
+const INSTANT_X = 2;
+const INSTANT_WORKERS = 5; // parallel requests the Studio sends in instant mode
+const INSTANT_SEC = 45; // ~ seconds per request (OpenAI and Gemini image edits, measured 30-60 s)
+/** "≈ 2 min" for n instant images. */
+const instantTime = (n: number) => {
+  const s = Math.ceil(n / INSTANT_WORKERS) * INSTANT_SEC;
+  return s < 90 ? "≈ 1 min" : s < 3600 ? `≈ ${Math.round(s / 60)} min` : `≈ ${(s / 3600).toFixed(1)} h`;
+};
 const CHUNK = 13;
 
 type StepState = "done" | "todo" | "running" | "idle";
@@ -452,6 +462,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
   const [quality, setQuality] = useState("medium");
   const [fidelity, setFidelity] = useState("");
   const [per, setPer] = useState(() => Number(localStorage.getItem("studio_per_source")) || 4);
+  const [instant, setInstant] = useState(() => localStorage.getItem("studio_gen_speed") === "instant");
   const [confirm, setConfirm] = useState<null | "test" | "final">(null);
   const [need, setNeed] = useState<AnalyzeNeeded | null>(null);
   const pending = useRef<StartArgs | null>(null);
@@ -465,7 +476,8 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
     setModel((cur) => (models.some((m) => m.id === cur) ? cur : (models.find((m) => m.id === saved) || models.find((m) => m.id === h?.default_model) || models[0]).id));
   }, [models, h?.default_model]);
 
-  const unit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2.5-sunburst"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
+  const batchUnit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2.5-sunburst"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
+  const unit = batchUnit * (instant ? INSTANT_X : 1);
   const nFinal = st.nFinal;
   const nAll = Math.max(st.sources.length, st.nAllSources);
   const sameGen = st.sources.filter((s) => st.genOf(s.source_image) === mode).map((s) => s.source_image);
@@ -489,12 +501,17 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
     source_images: kind === "final" ? st.finalSel : multiTest ? ticked : null,
     quality: isGemini ? null : quality,
     input_fidelity: isGemini ? null : fidelity,
+    instant,
   });
   const startWith = async (args: StartArgs) => {
     try {
       st.gen.setJob(await studio.start(args));
       st.gen.kick();
-      const what = args.mode === "final" ? "Final run submitted — results arrive within minutes to a few hours." : `Test started on ${args.source_images?.length ? `${args.source_images.length} sources` : args.source_image}.`;
+      const what = args.instant
+        ? `Instant ${args.mode} started — images arrive as each one finishes.`
+        : args.mode === "final"
+          ? "Final run submitted — results arrive within minutes to a few hours."
+          : `Test started on ${args.source_images?.length ? `${args.source_images.length} sources` : args.source_image}.`;
       st.setToast({ kind: "info", text: what });
     } catch (e) {
       st.setToast({ kind: "error", text: errText(e) });
@@ -559,7 +576,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
       state={state}
       open={open || genRunning}
       onToggle={toggle}
-      summary={genRunning ? job?.message : `${isGemini ? "Gemini" : "OpenAI"} · ${model || "—"} · ${per}/source · ≈ $${unit.toFixed(3)}/image`}
+      summary={genRunning ? job?.message : `${isGemini ? "Gemini" : "OpenAI"} · ${model || "—"} · ${instant ? "instant" : "batch"} · ${per}/source · ≈ $${unit.toFixed(3)}/image`}
     >
       <div className="space-y-3 text-[12px]">
         <div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
@@ -636,6 +653,31 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
             className="w-full accent-violet-600"
           />
         </label>
+
+        <div>
+          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Speed</span>
+          <div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+            {[false, true].map((fast) => (
+              <button
+                key={String(fast)}
+                type="button"
+                disabled={genRunning}
+                onClick={() => (setInstant(fast), localStorage.setItem("studio_gen_speed", fast ? "instant" : "batch"))}
+                className={cn(
+                  "flex flex-col items-center rounded-lg py-1 transition disabled:opacity-50",
+                  fast === instant ? "bg-white text-slate-900 shadow dark:bg-ink-800 dark:text-white" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
+                )}
+              >
+                <span className="flex items-center gap-1 text-[12px] font-bold">
+                  {fast ? <Zap className="h-3.5 w-3.5 text-amber-500" /> : <Clock className="h-3.5 w-3.5" />} {fast ? "Instant" : "Batch"}
+                </span>
+                <span className="text-[10px] font-semibold opacity-75">
+                  ≈ ${(batchUnit * (fast ? INSTANT_X : 1)).toFixed(3)}/img · {fast ? instantTime(nTest * per) : "min – hours"}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 p-2 dark:border-slate-700">
           {source ? (
@@ -756,7 +798,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
       {confirm === "test" && multiTest && (
         <Confirm
           title={`Test on ${nTest} sources?`}
-          confirmLabel={`${need?.needed ? "Analyze + generate" : "Generate"} ${nTest * per} images · ≈ $${(unit * nTest * per).toFixed(2)}${plus}`}
+          confirmLabel={`${need?.needed ? "Analyze + generate" : "Generate"} ${nTest * per} images${instant ? " instantly" : ""} · ≈ $${(unit * nTest * per).toFixed(2)}${plus}`}
           onCancel={() => setConfirm(null)}
           onConfirm={() => launch("test")}
         >
@@ -764,13 +806,14 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
           <p>
             <b>{model}</b> makes {per} new scenes for each of the {nTest} sources ticked on the Plan tab ({nTest} × {per} = <b>{nTest * per}</b> images).
           </p>
+          <SpeedNote instant={instant} n={nTest * per} unit={unit} batchUnit={batchUnit} />
           <p>A test run: nothing is uploaded to Hugging Face or sent to Own.</p>
         </Confirm>
       )}
       {confirm === "test" && !multiTest && source && (
         <Confirm
           title="Test on one source?"
-          confirmLabel={`${need?.needed ? "Analyze + generate" : "Generate"} ${per} images · ≈ $${(unit * per).toFixed(2)}${plus}`}
+          confirmLabel={`${need?.needed ? "Analyze + generate" : "Generate"} ${per} images${instant ? " instantly" : ""} · ≈ $${(unit * per).toFixed(2)}${plus}`}
           onCancel={() => setConfirm(null)}
           onConfirm={() => launch("test")}
         >
@@ -781,12 +824,13 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
               <b>{model}</b> makes {per} new scenes in the style of <code>{source.source_image}</code>.
             </p>
           </div>
+          <SpeedNote instant={instant} n={per} unit={unit} batchUnit={batchUnit} />
         </Confirm>
       )}
       {confirm === "final" && (
         <Confirm
           title={st.finalSel ? `Generate on ${nFinal} chosen sources?` : "Generate the full set?"}
-          confirmLabel={`${need?.needed ? "Analyze + spend" : "Spend"} ≈ $${(unit * nFinal * per).toFixed(2)}${plus}`}
+          confirmLabel={`${need?.needed ? "Analyze + spend" : "Spend"}${instant ? " (instant)" : ""} ≈ $${(unit * nFinal * per).toFixed(2)}${plus}`}
           onCancel={() => setConfirm(null)}
           onConfirm={() => launch("final")}
         >
@@ -797,7 +841,13 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
           </p>
           <p>
             Estimated <b className="text-amber-600 dark:text-amber-300">≈ ${(unit * nFinal * per).toFixed(2)}</b>
-            {!isGemini && <> in {Math.ceil(nFinal / CHUNK)} batches</>}. Results arrive within minutes to a few hours — you can close this page.
+            {instant ? (
+              <> with instant calls, {instantTime(nFinal * per)} (batch would be ≈ ${(batchUnit * nFinal * per).toFixed(2)}). Keep the Studio running; you can close this page.</>
+            ) : (
+              <>
+                {!isGemini && <> in {Math.ceil(nFinal / CHUNK)} batches</>}. Results arrive within minutes to a few hours — you can close this page.
+              </>
+            )}
           </p>
         </Confirm>
       )}
@@ -806,6 +856,19 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
 }
 
 type StartArgs = Parameters<typeof studio.start>[0];
+
+/** Batch vs instant line inside the generate confirmations. */
+function SpeedNote({ instant, n, unit, batchUnit }: { instant: boolean; n: number; unit: number; batchUnit: number }) {
+  return instant ? (
+    <p>
+      <b>Instant</b>: direct calls at the standard price (≈ ${unit.toFixed(3)}/image, 2× batch) — {instantTime(n)}. Batch would cost ≈ ${(batchUnit * n).toFixed(2)}.
+    </p>
+  ) : (
+    <p>
+      <b>Batch</b>: half price (≈ ${unit.toFixed(3)}/image); results usually arrive within minutes, at most a few hours.
+    </p>
+  );
+}
 
 /** The "analysis runs first" note inside the generate confirmations. */
 function AnalyzeFirst({ need }: { need: AnalyzeNeeded }) {

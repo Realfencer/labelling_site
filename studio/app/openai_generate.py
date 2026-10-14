@@ -663,6 +663,129 @@ def cancel_run(run_dir: Path, api_key: str | None = None) -> str:
     return status
 
 
+# Standard (instant) Image API rates per 1M tokens, same for gpt-image-2 and 2.5: text in $5, image in $8, image out
+# $30 (Batch API: half). Instant ≈ 2× the batch price, results in about a minute instead of minutes-hours.
+INSTANT_RATES = (5.0, 8.0, 30.0)
+INSTANT_WORKERS = 5
+
+
+def _instant_cost(usage: dict) -> float:
+    d = usage.get("input_tokens_details") or {}
+    t, i, o = INSTANT_RATES
+    return (d.get("text_tokens", 0) * t + d.get("image_tokens", 0) * i + (usage.get("output_tokens") or 0) * o) / 1e6
+
+
+def run_generation_instant(
+    *,
+    mode: str,
+    analysis_dir: Path,
+    dataset_root: Path | None,
+    api_key: str | None,
+    model: str | None = None,
+    source_index: int | None = None,
+    source_image: str | None = None,
+    source_images: list[str] | None = None,
+    per_source: int | None = None,
+    progress_cb: ProgressCb | None = None,
+    quality: str | None = None,
+    input_fidelity: str | None = None,
+    cctv_degrade: bool | None = None,
+) -> dict:
+    """The same requests as a batch run, sent straight to the Image API (standard price, ~1 minute)."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import httpx
+
+    settings = get_settings()
+    key = resolve_api_key(api_key)
+    client = get_client(key)
+    model_name = (model or settings.openai_model or DEFAULT_OPENAI_MODEL).strip()
+    if not is_openai_model(model_name):
+        raise OpenAIGenError(f"Unsupported image model: {model_name}")
+    options = resolve_options(quality, input_fidelity, cctv_degrade)
+    analysis_dir = Path(analysis_dir)
+    pkg = prepared_package_dir(analysis_dir)
+    if not (pkg / "manifest.csv").exists():
+        prepare_package(analysis_dir, dataset_root=dataset_root, per_source=per_source or 10)
+    rows = _select_manifest_rows(load_manifest(pkg), mode=mode, source_index=source_index, source_image=source_image,
+                                 source_images=source_images)
+    if not rows:
+        raise OpenAIGenError("No sources selected")
+    jobs = _build_jobs(rows, mode=mode, per_source=per_source)
+    run_dir, img_dir, lab_dir = _init_run_dir(mode)
+    bdir = run_dir / "batch"
+    bdir.mkdir(exist_ok=True)
+    total = len(jobs)
+    if progress_cb:
+        progress_cb(0, total, f"Instant · uploading {len({r['source_image'] for r in rows})} sources…")
+    refs: dict[str, dict] = {}
+    paths: dict[str, str] = {}
+    _ensure_source_refs(client, rows, dataset_root=dataset_root, ref_mode="file_id", source_refs=refs, source_paths=paths)
+    pending, lines = _build_pending_and_jsonl(jobs=jobs, pkg=pkg, img_dir=img_dir, model_name=model_name, options=options,
+                                              source_refs=refs, source_paths=paths)
+    (bdir / "requests_c0.jsonl").write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+    (bdir / "pending_c0.json").write_text(json.dumps(pending, indent=2), encoding="utf-8")
+    job_meta = {"provider": "openai", "model": model_name, "mode": mode, "instant": True, "options": options,
+                "created_at": _utcnow(), "status": "running"}
+    _write_job(bdir, job_meta)
+
+    def call(line: dict):
+        for attempt in range(6):
+            try:
+                r = httpx.post("https://api.openai.com/v1/images/edits", json=line["body"], timeout=300,
+                               headers={"Authorization": f"Bearer {key}"})
+            except httpx.HTTPError as exc:
+                err = str(exc)
+            else:
+                if r.status_code == 200:
+                    return line["custom_id"], r.json(), None
+                err = f"{r.status_code}: {r.text[:300]}"
+                if r.status_code not in (429, 500, 502, 503, 504):
+                    return line["custom_id"], None, err
+            time.sleep(min(60, 4 * 2 ** attempt))  # rate limit / server hiccup: back off and retry
+        return line["custom_id"], None, err
+
+    saved: list[dict] = []
+    fails = 0
+    usage: list[dict] = []
+    labels_root = Path(dataset_root) / "labels" if dataset_root else None
+    with ThreadPoolExecutor(max_workers=INSTANT_WORKERS) as ex:
+        futs = [ex.submit(call, x) for x in lines]
+        for done, fut in enumerate(as_completed(futs), start=1):
+            cid, body, err = fut.result()
+            info = pending[cid]
+            try:
+                data = (body or {}).get("data") or []
+                if err or not data or not data[0].get("b64_json"):
+                    raise OpenAIGenError(err or "no image")
+                image_bytes = as_png(base64.b64decode(data[0]["b64_json"]))
+                nc = flag_near_copy(image_bytes, info.get("source_path") or "")
+                Path(info["image_path"]).write_bytes(image_bytes)
+                _write_label(lab_dir, info["stem"], info["source_image"], labels_root)
+                saved.append({**_item_from_info(run_dir, info), "batch": False, **nc})
+                usage.append(body.get("usage") or {})
+            except Exception as exc:  # noqa: BLE001
+                fails += 1
+                (bdir / f"{info['stem']}.error.txt").write_text(str(exc), encoding="utf-8")
+            if progress_cb:
+                progress_cb(done, total, f"Instant · {done}/{total} done (ok={len(saved)} fail={fails})")
+    for fid in {r["file_id"] for r in refs.values() if "file_id" in r}:
+        try:
+            client.files.delete(fid)
+        except Exception:  # noqa: BLE001
+            pass
+    cost = round(sum(_instant_cost(u) for u in usage), 4)
+    job_meta.update(status="completed", cost_usd=cost, usage=usage)
+    _write_job(bdir, job_meta)
+    if not saved:
+        raise OpenAIGenError(f"Instant run: 0 images saved ({fails} failures)")
+    manifest = _write_run_manifest(run_dir, {**job_meta, "name": None}, saved=saved, fails=fails, batch_ids=[])
+    manifest.update(batch=False, instant=True, cost_usd=cost)
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {**manifest, "run_dir": str(run_dir), "batch": False}
+
+
 def run_generation_batch(
     *,
     mode: str = "final",

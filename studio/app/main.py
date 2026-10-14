@@ -81,6 +81,8 @@ class GenerateBody(BaseModel):
     quality: str | None = Field(None, pattern="^(low|medium|high|auto)$")
     input_fidelity: str | None = Field(None, pattern="^(|low|high)$")
     cctv_degrade: bool | None = None
+    # True → direct API calls (standard price ≈ 2× batch, ~1 minute) instead of the Batch API
+    instant: bool = False
 
 
 class RunActionBody(BaseModel):
@@ -846,6 +848,7 @@ def api_gen_start(body: GenerateBody) -> dict:
                 "input_fidelity": body.input_fidelity,
                 "cctv_degrade": body.cctv_degrade,
             },
+            instant=body.instant,
         )
     except Exception as e:
         raise HTTPException(400, str(e)) from e

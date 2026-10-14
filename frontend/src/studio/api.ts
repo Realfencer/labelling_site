@@ -141,6 +141,8 @@ export const studio = {
     source_images?: string[] | null;
     quality?: string | null;
     input_fidelity?: string | null;
+    /** Direct API calls (standard price ≈ 2×, ~1 minute) instead of the Batch API. */
+    instant?: boolean;
   }) => post<GenJob>("/gen/start", { ...body, source_index: null, cctv_degrade: false }, 120_000),
   collect: (run: string) => post<GenJob>("/gen/collect", { run }, 120_000),
   cancel: (run: string) => post<{ status: string }>("/gen/cancel", { run }, 120_000),

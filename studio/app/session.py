@@ -236,8 +236,10 @@ def start_generation(
     openrouter_api_key: str | None = None,
     openai_options: dict | None = None,
     collect_run: str | None = None,
+    instant: bool = False,
 ) -> dict:
-    """Start a generation thread: OpenAI gpt-image-* Batch or Gemini (Nano Banana) Batch, chosen by model id."""
+    """Start a generation thread: OpenAI gpt-image-* or Gemini (Nano Banana), chosen by model id — through the Batch
+    API (half price, minutes–hours) or, instant=True, direct calls (standard price ≈ 2×, about a minute)."""
     with _lock:
         if _gen_job["status"] == "running":
             raise RuntimeError("Generation already running")
@@ -273,6 +275,7 @@ def start_generation(
         from app.openai_generate import collect_run as collect_openai_run
         from app.openai_generate import is_openai_model
         from app.openai_generate import run_generation_batch as run_openai_generation
+        from app.openai_generate import run_generation_instant as run_openai_instant
 
         def cb(done: int, total: int, msg: str):
             with _lock:
@@ -314,6 +317,7 @@ def start_generation(
                     source_images=source_images,
                     per_source=per_source,
                     progress_cb=cb,
+                    instant=instant,
                 )
             else:
                 gen_mode = "openai"
@@ -324,7 +328,7 @@ def start_generation(
                     raise RuntimeError(
                         f"Unknown image model {model!r} (OpenAI gpt-image-* or Gemini *-image)"
                     )
-                result = run_openai_generation(
+                result = (run_openai_instant if instant else run_openai_generation)(
                     mode=mode,
                     analysis_dir=out_dir,
                     dataset_root=Path(dataset) if dataset else None,
@@ -341,7 +345,8 @@ def start_generation(
             run_name = Path(run_dir).name if run_dir else ""
             base_msg = (
                 f"Saved {result.get('count')} images"
-                + (" (batch)" if result.get("batch") else "")
+                + (" (instant)" if result.get("instant") else " (batch)" if result.get("batch") else "")
+                + (f" · ${result['cost_usd']:.3f}" if result.get("cost_usd") else "")
                 + (f" · {result.get('failed')} failed" if result.get("failed") else "")
             )
             chunk_errors = result.get("chunk_errors") or []
