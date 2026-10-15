@@ -224,6 +224,70 @@ def start_analyze(dataset: str | None = None, workers: int = 8, mode: str | None
     return get_job()
 
 
+_t2i_job = {"status": "idle", "message": "", "progress": 0.0, "done": 0, "total": 0, "error": None, "usd": None}
+
+
+def get_t2i_job() -> dict:
+    with _lock:
+        return dict(_t2i_job)
+
+
+def start_t2i_analyze(run_base: bool = False) -> dict:
+    """Text → Image deep analysis of the eval frames: (the normal analysis first when it is stale, then) one Gemini
+    scene + drink card per frame that lacks one. Paid — the caller confirms the estimate first."""
+    with _lock:
+        if _t2i_job["status"] == "running":
+            raise RuntimeError("Text → Image analysis already running")
+        if _gen_job["status"] == "running":
+            raise RuntimeError("Generation running — wait")
+        if _job.status == "running":
+            raise RuntimeError("Analysis running — wait")
+        _t2i_job.update(status="running", message="Starting…", progress=0.0, done=0, total=0, error=None, usd=None)
+
+    def cb(done: int, total: int, msg: str):
+        with _lock:
+            _t2i_job.update(done=done, total=total, progress=(done / total) if total else 0.0, message=msg)
+
+    def run():
+        import time as _time
+
+        from app import gemini_usage, t2i_cards
+
+        try:
+            spent = 0.0
+            if run_base:
+                cb(0, 0, "Analyzing the eval set first…")
+                start_analyze()
+                while True:
+                    _time.sleep(2)
+                    j = get_job()
+                    cb(j["done"], j["total"], f"Eval-set analysis: {j['message']}")
+                    if j["status"] != "running":
+                        break
+                if j["status"] == "error":
+                    raise RuntimeError(f"eval-set analysis failed: {j.get('error')}")
+                spent += float(((j.get("summary_preview") or {}).get("gemini_cost") or {}).get("usd") or 0)
+            session = load_session()
+            out_dir = Path(session.get("out_dir") or DEFAULT_OUT)
+            ds = Path(session.get("dataset") or DEFAULT_DATASET)
+            records = json.loads((out_dir / "score_records.json").read_text(encoding="utf-8"))
+            gemini_usage.start_tally()
+            cards = t2i_cards.load_or_describe(out_dir, records, ds, progress_cb=cb)
+            cost = gemini_usage.tally()
+            spent += cost["usd"]
+            missing = len(records) - len(cards)
+            with _lock:
+                _t2i_job.update(status="done", progress=1.0, usd=round(spent, 4),
+                                message=f"Cards ready for {len(cards)}/{len(records)} frames · Gemini ${spent:.2f}"
+                                + (f" · {missing} failed (run again to retry)" if missing else ""))
+        except Exception as e:  # noqa: BLE001
+            with _lock:
+                _t2i_job.update(status="error", error=str(e)[:500], message=f"Failed: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return get_t2i_job()
+
+
 def start_generation(
     mode: str,
     model: str | None = None,
@@ -237,6 +301,7 @@ def start_generation(
     openai_options: dict | None = None,
     collect_run: str | None = None,
     instant: bool = False,
+    t2i_recipes: list[dict] | None = None,
 ) -> dict:
     """Start a generation thread: OpenAI gpt-image-* or Gemini (Nano Banana), chosen by model id — through the Batch
     API (half price, minutes–hours) or, instant=True, direct calls (standard price ≈ 2×, about a minute)."""
@@ -304,6 +369,21 @@ def start_generation(
                         api_key=openai_api_key,
                         progress_cb=cb,
                     )
+            elif t2i_recipes is not None:
+                from app.t2i_generate import run as run_t2i
+
+                gen_mode = "gemini" if is_gemini_model(model) else "openai"
+                result = run_t2i(
+                    mode=mode,
+                    provider=gen_mode,
+                    model=(model or "").strip().removeprefix("openai/"),
+                    recipes=t2i_recipes,
+                    dataset_root=Path(dataset) if dataset else None,
+                    instant=instant,
+                    quality=(openai_options or {}).get("quality") or "medium",
+                    api_key=gemini_api_key if gen_mode == "gemini" else openai_api_key,
+                    progress_cb=cb,
+                )
             elif is_gemini_model(model):
                 gen_mode = "gemini"
                 result = run_gemini_generation(

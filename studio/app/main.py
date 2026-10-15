@@ -83,6 +83,9 @@ class GenerateBody(BaseModel):
     cctv_degrade: bool | None = None
     # True → direct API calls (standard price ≈ 2× batch, ~1 minute) instead of the Batch API
     instant: bool = False
+    # Text → Image: run the current plan's recipes (test: the first t2i_count of them; final: all)
+    t2i: bool = False
+    t2i_count: int | None = Field(None, ge=1, le=5000)
 
 
 class RunActionBody(BaseModel):
@@ -541,6 +544,96 @@ def api_analyze_needed() -> dict:
             "est_usd": round(est, 2), "est_max_usd": round(worst, 2), "measured": bool(avg), "mode": mode}
 
 
+# ── Text → Image ──────────────────────────────────────────────────────────────
+
+
+def _t2i_paths() -> tuple[Path, Path, list[dict]]:
+    s = sess.load_session()
+    out_dir = Path(s.get("out_dir") or sess.DEFAULT_OUT)
+    ds = Path(s.get("dataset") or sess.DEFAULT_DATASET)
+    try:
+        records = json.loads((out_dir / "score_records.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        records = []
+    return out_dir, ds, records
+
+
+@app.get("/api/t2i/status")
+def api_t2i_status() -> dict:
+    """What the deep analysis has / still needs for the eval frames, its exact estimate, and the current plan."""
+    from app import t2i_cards, t2i_plan
+
+    out_dir, ds, records = _t2i_paths()
+    base = api_analyze_needed()
+    miss = t2i_cards.missing(out_dir, records, ds) if records else []
+    frames = base["frames"]
+    if base["needed"] and not records:
+        # nothing analysed yet: every frame needs a card; drinks unknown → the eval set's label count
+        n_drinks = sum(len(p.read_text(encoding="utf-8").split("\n")) for p in (ds / "labels").glob("*.txt"))
+        cards_est = t2i_cards.estimate_usd(frames, n_drinks)
+        n_missing = frames
+    else:
+        cards_est = t2i_cards.estimate_usd(len(miss), sum(m["drinks"] for m in miss))
+        n_missing = len(miss)
+    plan = t2i_plan.load(out_dir)
+    return {
+        "frames": frames,
+        "with_cards": len(records) - len(miss) if records else 0,
+        "missing_cards": n_missing,
+        "base": base,
+        "est_usd": round((base["est_usd"] if base["needed"] else 0) + (cards_est["usd"] if n_missing else 0), 3),
+        "est_max_usd": round((base["est_max_usd"] if base["needed"] else 0) + (cards_est["max_usd"] if n_missing else 0), 3),
+        "cards_est": cards_est if n_missing else None,
+        "job": sess.get_t2i_job(),
+        "plan": None if not plan else {k: plan[k] for k in ("created_at", "n", "provider", "hard_share", "frames",
+                                                            "frames_missing_cards", "coverage")},
+    }
+
+
+@app.post("/api/t2i/analyze")
+def api_t2i_analyze() -> dict:
+    """Paid: the eval-set analysis when stale, then the missing scene + drink cards (estimate from /api/t2i/status)."""
+    try:
+        return sess.start_t2i_analyze(run_base=bool(api_analyze_needed()["needed"]))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/t2i/job")
+def api_t2i_job() -> dict:
+    return sess.get_t2i_job()
+
+
+class T2iPlanBody(BaseModel):
+    n: int = Field(..., ge=1, le=5000)
+    provider: str = Field("openai", pattern="^(openai|gemini)$")
+    source_images: list[str] | None = None
+    hard_share: float = Field(0.5, ge=0.0, le=1.0)
+    look_alikes: int = Field(1, ge=0, le=3)
+    seed: int = 0
+
+
+@app.post("/api/t2i/plan")
+def api_t2i_plan(body: T2iPlanBody) -> dict:
+    """Free: exactly n recipes + prompts from the selected eval frames' cards (saved as the current plan)."""
+    from app import t2i_plan
+
+    out_dir, ds, _ = _t2i_paths()
+    try:
+        return t2i_plan.build(out_dir, ds, body.n, provider=body.provider, source_images=body.source_images,
+                              hard_share=body.hard_share, look_alikes=body.look_alikes, seed=body.seed)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/t2i/plan")
+def api_t2i_plan_get() -> dict:
+    from app import t2i_plan
+
+    out_dir, _, _ = _t2i_paths()
+    return t2i_plan.load(out_dir) or {}
+
+
 @app.get("/api/summary")
 def api_summary() -> dict:
     path = ANALYSIS / "score_summary.json"
@@ -830,6 +923,21 @@ def api_package(block_only: bool = Query(True)) -> dict:
     return {"ready": True, "package_dir": str(pkg), "sources": sources, **meta}
 
 
+def _t2i_recipes(body: "GenerateBody") -> list[dict]:
+    from app import t2i_plan
+
+    out_dir, _, _ = _t2i_paths()
+    plan = t2i_plan.load(out_dir) or {}
+    recipes = plan.get("recipes") or []
+    if not recipes:
+        raise ValueError("No Text → Image plan yet — make a plan first")
+    from app.gemini_generate import is_gemini_model
+
+    if (plan.get("provider") == "gemini") != is_gemini_model(body.model):
+        raise ValueError(f"The plan's prompts were written for {plan.get('provider')} — re-plan for this provider")
+    return recipes[: body.t2i_count] if body.mode == "test" else recipes
+
+
 @app.post("/api/gen/start")
 def api_gen_start(body: GenerateBody) -> dict:
     try:
@@ -849,6 +957,7 @@ def api_gen_start(body: GenerateBody) -> dict:
                 "cctv_degrade": body.cctv_degrade,
             },
             instant=body.instant,
+            t2i_recipes=_t2i_recipes(body) if body.t2i else None,
         )
     except Exception as e:
         raise HTTPException(400, str(e)) from e

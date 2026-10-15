@@ -492,6 +492,7 @@ def list_runs() -> list[dict]:
                 "mode": meta.get("mode") or ("test" if p.name.startswith("test_") else "final" if p.name.startswith("final_") else None),
                 "batch": bool(meta["batch"]) if "batch" in meta else not job_meta.get("instant") and job_path.exists(),
                 "instant": bool(meta.get("instant") or job_meta.get("instant")),
+                "kind": meta.get("kind") or job_meta.get("kind") or "i2i",
                 "batch_job": meta.get("batch_job") or job_meta.get("name"),
                 "model": meta.get("model") or job_meta.get("model"),
                 "provider": provider,

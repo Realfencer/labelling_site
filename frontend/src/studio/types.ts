@@ -244,6 +244,8 @@ export type Run = {
   /** Optional short tag and explanation (comparison runs). */
   label?: string | null;
   note?: string | null;
+  instant?: boolean;
+  kind?: "i2i" | "t2i";
 };
 
 export type ClearPreview = {
@@ -333,4 +335,35 @@ export type AnalyzeNeeded = {
   /** true once the cost ledger has real measurements */
   measured?: boolean;
   mode: GenMode;
+};
+
+/** Text → Image */
+export type T2iJob = { status: string; message: string; progress: number; done: number; total: number; error: string | null; usd: number | null };
+export type T2iCoverage = {
+  images: number;
+  drinks: number;
+  drinks_per_image: number;
+  class_mix: Record<string, number>;
+  source_class_mix: Record<string, number>;
+  hard_share: number;
+  hard_cases_used: number;
+  hard_cases_total: number;
+  anchors: Record<string, number>;
+  look_alikes: number;
+  look_alike_bank: number;
+};
+export type T2iPlanMeta = { created_at: number; n: number; provider: GenMode; hard_share: number; frames: number; frames_missing_cards: string[]; coverage: T2iCoverage };
+export type T2iDrink = { key: string; cls: string; hard: boolean; status: string | null; h_pct: number; distance?: string; directive?: string; why?: string };
+export type T2iRecipe = { id: string; anchor: string; variation: string | null; drinks: T2iDrink[]; look_alikes: { object: string; resembles: string }[]; prompt: string };
+export type T2iPlan = T2iPlanMeta & { seed: number; recipes: T2iRecipe[] };
+export type T2iStatus = {
+  frames: number;
+  with_cards: number;
+  missing_cards: number;
+  base: AnalyzeNeeded;
+  est_usd: number;
+  est_max_usd: number;
+  cards_est: { usd: number; max_usd: number; measured: boolean } | null;
+  job: T2iJob;
+  plan: T2iPlanMeta | null;
 };

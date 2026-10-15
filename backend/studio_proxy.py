@@ -31,7 +31,7 @@ SETTINGS_FILE = STUDIO / "outputs" / "labeler_settings.json"
 HF_REPO_FILE = STUDIO / "outputs" / "hf_repo.txt"
 DEFAULT_ALLOWED = ["fencer", "hikari"]
 # Requests that spend money at OpenAI / Google / OpenRouter.
-PAID = {("POST", "gen/start")}
+PAID = {("POST", "gen/start"), ("POST", "t2i/analyze")}
 SERVICE = "score-studio"
 
 router = APIRouter(tags=["studio"])

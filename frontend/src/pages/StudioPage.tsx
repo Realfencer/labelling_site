@@ -14,8 +14,9 @@ import { AnalyzeCard, EvalSetCard, GenerateCard } from "../studio/Workbench";
 const Results = lazy(() => import("../studio/Results"));
 const PlanPanel = lazy(() => import("../studio/PlanPanel"));
 const Insights = lazy(() => import("../studio/Insights"));
+const TextToImage = lazy(() => import("../studio/TextToImage"));
 
-type Tab = "results" | "plan" | "insights";
+type Tab = "results" | "plan" | "t2i" | "insights";
 
 export default function StudioPage() {
   useSiteBackdrop("vivid");
@@ -175,6 +176,7 @@ function Studio() {
                   [
                     ["results", `Results${st.runs.length ? ` · ${st.runs.length} runs` : ""}`],
                     ["plan", `Plan${st.sources.length ? ` · ${st.sources.length} sources` : ""}`],
+                    ["t2i", "Text → Image"],
                     ["insights", "Insights"],
                   ] as [Tab, string][]
                 ).map(([t, l]) => (
@@ -198,7 +200,7 @@ function Studio() {
                   </div>
                 }
               >
-                {tab === "results" ? <Results /> : tab === "plan" ? <PlanPanel /> : <Insights />}
+                {tab === "results" ? <Results /> : tab === "plan" ? <PlanPanel /> : tab === "t2i" ? <TextToImage /> : <Insights />}
               </Suspense>
             </section>
           </div>

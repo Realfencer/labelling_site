@@ -478,6 +478,7 @@ function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPi
       </button>
       <button type="button" onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-[12px] hover:border-violet-400 dark:border-slate-600 dark:bg-ink-800">
         {cur ? line(cur) : "Pick a run"}
+        {cur?.kind === "t2i" && <Chip tone="sky">text → image</Chip>}
         {cur?.label && <Chip tone="violet">{cur.label}</Chip>}
         <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
       </button>
@@ -492,6 +493,7 @@ function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPi
                 <input type="checkbox" checked={del.has(r.name)} onChange={() => tick(r.name)} disabled={r.pending} title={r.pending ? "Still generating at the provider" : "Tick to delete"} className="accent-rose-500" />
                 <button type="button" onClick={() => (onPick(r.name), setOpen(false))} className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 px-1 py-1.5 text-left text-[12px]" title={r.note || r.name}>
                   {line(r)}
+                  {r.kind === "t2i" && <Chip tone="sky">T→I</Chip>}
                   {r.label && <Chip tone="violet">{r.label}</Chip>}
                   {r.near_copies > 0 && <Chip tone="amber">{r.near_copies} near</Chip>}
                   {(r.camera_drift ?? 0) > 0 && <Chip tone="rose">{r.camera_drift} drift</Chip>}
@@ -546,6 +548,7 @@ function RunPicker({ runs, active, onPick }: { runs: Run[]; active: string; onPi
             {asking.map((r) => (
               <li key={r.name} className="flex flex-wrap items-center gap-1.5">
                 {line(r)}
+                {r.kind === "t2i" && <Chip tone="sky">T→I</Chip>}
                 {r.label && <Chip tone="violet">{r.label}</Chip>}
               </li>
             ))}

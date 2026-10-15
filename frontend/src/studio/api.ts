@@ -21,6 +21,9 @@ import type {
   StudioStatus,
   Summary,
   SwitchName,
+  T2iJob,
+  T2iPlan,
+  T2iStatus,
 } from "./types";
 
 /** Studio API through the labeler: /api/studio/<path> → Studio /api/<path> (login + keys handled server-side). */
@@ -143,6 +146,9 @@ export const studio = {
     input_fidelity?: string | null;
     /** Direct API calls (standard price ≈ 2×, ~1 minute) instead of the Batch API. */
     instant?: boolean;
+    /** Text → Image: generate the current plan's recipes (test: the first t2i_count). */
+    t2i?: boolean;
+    t2i_count?: number | null;
   }) => post<GenJob>("/gen/start", { ...body, source_index: null, cctv_degrade: false }, 120_000),
   collect: (run: string) => post<GenJob>("/gen/collect", { run }, 120_000),
   cancel: (run: string) => post<{ status: string }>("/gen/cancel", { run }, 120_000),
@@ -157,6 +163,12 @@ export const studio = {
     post<{ ok: boolean; url: string; repo_id: string; path_in_repo: string; n_images: number }>("/gen/upload-hf", { run }, 30 * 60_000),
   send: (run: string, filenames: string[] | null) => post<SendJob>("/gen/send-remote", { run, filenames }),
   sendJob: () => get<SendJob>("/gen/send-job"),
+  t2iStatus: () => get<T2iStatus>("/t2i/status", 60_000),
+  t2iAnalyze: () => post<T2iJob>("/t2i/analyze", {}),
+  t2iJob: () => get<T2iJob>("/t2i/job"),
+  t2iPlan: (body: { n: number; provider: GenMode; source_images: string[] | null; hard_share: number; look_alikes: number; seed: number }) =>
+    post<T2iPlan>("/t2i/plan", body, 120_000),
+  t2iPlanGet: () => get<T2iPlan | Record<string, never>>("/t2i/plan"),
   clearPreview: () => get<ClearPreview>("/studio/clear-preview"),
   clear: () => post<{ ok: boolean }>("/studio/clear", { beverage_gt: true, history: true, analysis: true, confirm: "CLEAR" }),
 };

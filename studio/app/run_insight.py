@@ -100,8 +100,30 @@ def parse_plan(prompt: str) -> dict:
     return plan
 
 
+def t2i_plan_view(r: dict) -> dict:
+    """A Text → Image recipe in the same shape as a parsed i2i plan (Results' plan list)."""
+    targets = [{"distance": str(d.get("distance") or "").replace("_", " "), "height_pct": d.get("h_pct"),
+                "directive": f"{d['cls']}: {d.get('directive') or ''}".strip(": "),
+                "why": d.get("why") or ("missed by the base model" if d.get("status") == "missed" else
+                                        "wrong class from the base model" if d.get("status") == "wrong_class" else "")}
+               for d in r.get("drinks") or []]
+    plan = {"regime": "text → image", "view": r.get("variation") or "as the anchor frame", "targets": targets,
+            "camera_look": "CAMERA LOOK (hard" in (r.get("prompt") or ""), "prompt_chars": len(r.get("prompt") or ""),
+            "motion_blur": False, "deep_scene": False, "t2i": True, "recipe": r.get("id"),
+            "hard": sum(bool(d.get("hard")) for d in r.get("drinks") or [])}
+    if r.get("look_alikes"):
+        plan["negative"] = "; ".join(f"{x['object']} (not a drink)" for x in r["look_alikes"])
+    return plan
+
+
 def run_plan(run_dir: Path) -> dict[str, dict]:
     """{image stem: plan}, cached in <run>/plan.json (request files never change after submission)."""
+    t2i = run_dir / "t2i_recipes.json"
+    if t2i.exists():
+        try:
+            return {stem: t2i_plan_view(r) for stem, r in json.loads(t2i.read_text(encoding="utf-8")).items()}
+        except (OSError, ValueError):
+            return {}
     cache = run_dir / PLAN_FILE
     req = sorted((run_dir / "batch").glob("requests*.jsonl"))
     sig = ";".join(f"{p.name}:{p.stat().st_size}" for p in req)
