@@ -42,6 +42,7 @@ export default function TextToImage() {
   if (!status) return <Empty>Loading Text → Image…</Empty>;
   return (
     <div className="space-y-4">
+      <ProviderSwitch />
       <AnalyzeStep status={status} job={job.job} onStart={async () => {
         try {
           job.setJob(await studio.t2iAnalyze());
@@ -52,6 +53,44 @@ export default function TextToImage() {
       }} />
       <PlanStep status={status} plan={plan} onPlan={setPlan} />
       {plan && <GenerateStep plan={plan} />}
+    </div>
+  );
+}
+
+/** OpenAI / Gemini for the plan's prompts and the generation (the same setting as Image → Image). */
+function ProviderSwitch() {
+  const st = useStudio();
+  const mode = st.health?.gen_mode || "openai";
+  const busy = st.gen.job?.status === "running" || st.analyze.job?.status === "running";
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="grid w-72 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800">
+        {(["openai", "gemini"] as const).map((p) => (
+          <button
+            key={p}
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              if (p === mode) return;
+              try {
+                await studio.setMode(p);
+                await st.loadHealth();
+              } catch (e) {
+                st.setToast({ kind: "error", text: errText(e) });
+              }
+            }}
+            className={cn(
+              "rounded-lg py-1.5 text-[12px] font-bold transition disabled:opacity-50",
+              p === mode ? (p === "gemini" ? "bg-violet-600 text-white shadow" : "bg-sky-600 text-white shadow") : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
+            )}
+          >
+            {p === "openai" ? "OpenAI" : "Gemini"}
+          </button>
+        ))}
+      </div>
+      <span className="text-[11px] text-slate-500">
+        {mode === "gemini" ? "Gemini: 16:9 images, cropped and squashed to 1024² like the platform's Gemini frames." : "OpenAI: native 1024×1024 images like the platform's OpenAI frames."}
+      </span>
     </div>
   );
 }
@@ -346,7 +385,7 @@ function GenerateStep({ plan }: { plan: T2iPlan }) {
       <StepHead n={3} title="Generate" sub="One image per recipe, no reference image. Test runs the first recipes of the plan; Final runs all of them." />
       <div className="mt-3 grid gap-3 text-[12px] sm:grid-cols-2 lg:grid-cols-4">
         <label>
-          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Model ({isGemini ? "Gemini" : "OpenAI"} — switch on the left)</span>
+          <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Model ({isGemini ? "Gemini" : "OpenAI"})</span>
           <select value={model} onChange={(e) => (setModel(e.target.value), localStorage.setItem("studio_image_model_v2", e.target.value))} className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-600 dark:bg-ink-800">
             {models.map((m) => (
               <option key={m.id} value={m.id}>

@@ -38,6 +38,15 @@ function Studio() {
     setTab(t);
     localStorage.setItem("studio_tab2", t);
   };
+  // Image → Image (eval frame as reference) or Text → Image (recipes from the eval frames, no reference image)
+  const [kind, setKind] = useState<"i2i" | "t2i">(() => (localStorage.getItem("studio_kind") === "t2i" ? "t2i" : "i2i"));
+  const tabs: Tab[] = kind === "t2i" ? ["t2i", "results"] : ["results", "plan", "insights"];
+  const shownTab: Tab = tabs.includes(tab) ? tab : tabs[0];
+  const pickKind = (k: "i2i" | "t2i") => {
+    setKind(k);
+    localStorage.setItem("studio_kind", k);
+    pick(k === "t2i" ? "t2i" : "results");
+  };
   useEffect(() => {
     const open = (e: Event) => pick((e as CustomEvent<Tab>).detail);
     window.addEventListener("studio-open-tab", open);
@@ -92,12 +101,24 @@ function Studio() {
             <div className="text-base font-black tracking-tight">Studio</div>
           </div>
           <div className="flex rounded-xl bg-slate-100 p-1 text-[12px] font-bold dark:bg-slate-800">
-            <span className="flex items-center gap-1.5 rounded-lg bg-white px-3 py-1 text-slate-900 shadow dark:bg-ink-900 dark:text-white">
-              <ImageIcon className="h-3.5 w-3.5" /> Image → Image
-            </span>
-            <span className="flex cursor-not-allowed items-center gap-1.5 px-3 py-1 text-slate-400" title="Coming next: generate from text only, no source frame">
-              <Type className="h-3.5 w-3.5" /> Text → Image <span className="rounded bg-slate-200 px-1 text-[9px] uppercase dark:bg-slate-700">soon</span>
-            </span>
+            {(
+              [
+                ["i2i", "Image → Image", ImageIcon],
+                ["t2i", "Text → Image", Type],
+              ] as const
+            ).map(([k, label, Icon]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => pickKind(k)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1 transition",
+                  kind === k ? "bg-white text-slate-900 shadow dark:bg-ink-900 dark:text-white" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" /> {label}
+              </button>
+            ))}
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2 text-[11px]">
             <Chip tone={st.status?.up ? "green" : "rose"}>
@@ -123,7 +144,8 @@ function Studio() {
       </header>
 
       <main className="mx-auto max-w-[1700px] space-y-4 p-4">
-        {/* next step */}
+        {/* next step (Image → Image; Text → Image has its own numbered steps) */}
+        {kind === "i2i" && (
         <div className={cn("relative overflow-hidden rounded-2xl bg-gradient-to-r p-[1px] shadow-lg", tones[next.tone])}>
           <div className="flex flex-wrap items-center gap-4 rounded-2xl bg-white/95 px-5 py-3 dark:bg-ink-900/95">
             <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br text-white", tones[next.tone])}>
@@ -141,6 +163,7 @@ function Studio() {
             )}
           </div>
         </div>
+        )}
         {st.toast && (
           <div className="flex items-start gap-2">
             <div className="flex-1">
@@ -167,26 +190,32 @@ function Studio() {
           <div className="grid gap-4 xl:grid-cols-[370px_1fr]">
             <aside className="space-y-3 xl:sticky xl:top-[64px] xl:max-h-[calc(100vh-80px)] xl:self-start xl:overflow-y-auto xl:pr-1">
               <EvalSetCard syncRef={syncRef} />
-              <AnalyzeCard analyzeRef={analyzeRef} />
-              <GenerateCard startRef={startRef} />
+              {kind === "i2i" && (
+                <>
+                  <AnalyzeCard analyzeRef={analyzeRef} />
+                  <GenerateCard startRef={startRef} />
+                </>
+              )}
             </aside>
             <section className="min-w-0 space-y-3">
               <nav className="flex gap-1 rounded-xl bg-slate-100 p-1 text-[12px] font-bold dark:bg-slate-800">
                 {(
                   [
+                    ["t2i", "Text → Image"],
                     ["results", `Results${st.runs.length ? ` · ${st.runs.length} runs` : ""}`],
                     ["plan", `Plan${st.sources.length ? ` · ${st.sources.length} sources` : ""}`],
-                    ["t2i", "Text → Image"],
                     ["insights", "Insights"],
                   ] as [Tab, string][]
-                ).map(([t, l]) => (
+                )
+                  .filter(([t]) => tabs.includes(t))
+                  .map(([t, l]) => (
                   <button
                     key={t}
                     type="button"
                     onClick={() => pick(t)}
                     className={cn(
                       "flex-1 rounded-lg px-3 py-1.5 transition",
-                      tab === t ? "bg-white text-slate-900 shadow dark:bg-ink-900 dark:text-white" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
+                      shownTab === t ? "bg-white text-slate-900 shadow dark:bg-ink-900 dark:text-white" : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200",
                     )}
                   >
                     {l}
@@ -200,7 +229,7 @@ function Studio() {
                   </div>
                 }
               >
-                {tab === "results" ? <Results /> : tab === "plan" ? <PlanPanel /> : tab === "t2i" ? <TextToImage /> : <Insights />}
+                {shownTab === "results" ? <Results /> : shownTab === "plan" ? <PlanPanel /> : shownTab === "t2i" ? <TextToImage /> : <Insights />}
               </Suspense>
             </section>
           </div>
