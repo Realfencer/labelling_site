@@ -351,10 +351,15 @@ export type T2iCoverage = {
   anchors: Record<string, number>;
   look_alikes: number;
   look_alike_bank: number;
+  drink_count_range?: [number, number];
+  places_mixed?: number;
+  crowds_mixed?: number;
+  drinks_changed?: number;
+  distinct_places?: number;
 };
 export type T2iPlanMeta = { created_at: number; n: number; provider: GenMode; hard_share: number; frames: number; frames_missing_cards: string[]; coverage: T2iCoverage };
-export type T2iDrink = { key: string; cls: string; hard: boolean; status: string | null; h_pct: number; distance?: string; directive?: string; why?: string };
-export type T2iRecipe = { id: string; anchor: string; variation: string | null; drinks: T2iDrink[]; look_alikes: { object: string; resembles: string }[]; prompt: string };
+export type T2iDrink = { key: string; cls: string; hard: boolean; status: string | null; h_pct: number; distance?: string; object?: string; holder?: string; spot?: string; why?: string; changed?: string[] };
+export type T2iRecipe = { id: string; anchor: string; variation: string | null; place?: string; place_from?: string | null; layout?: string; drinks: T2iDrink[]; look_alikes: { object: string; resembles: string }[]; prompt: string };
 export type T2iPlan = T2iPlanMeta & { seed: number; recipes: T2iRecipe[] };
 export type T2iStatus = {
   frames: number;

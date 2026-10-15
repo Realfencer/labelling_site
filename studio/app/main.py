@@ -610,6 +610,7 @@ class T2iPlanBody(BaseModel):
     source_images: list[str] | None = None
     hard_share: float = Field(0.5, ge=0.0, le=1.0)
     look_alikes: int = Field(1, ge=0, le=3)
+    variety: float = Field(0.7, ge=0.0, le=1.0)
     seed: int = 0
 
 
@@ -621,7 +622,8 @@ def api_t2i_plan(body: T2iPlanBody) -> dict:
     out_dir, ds, _ = _t2i_paths()
     try:
         return t2i_plan.build(out_dir, ds, body.n, provider=body.provider, source_images=body.source_images,
-                              hard_share=body.hard_share, look_alikes=body.look_alikes, seed=body.seed)
+                              hard_share=body.hard_share, look_alikes=body.look_alikes, variety=body.variety,
+                              seed=body.seed)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

@@ -103,11 +103,15 @@ def parse_plan(prompt: str) -> dict:
 def t2i_plan_view(r: dict) -> dict:
     """A Text → Image recipe in the same shape as a parsed i2i plan (Results' plan list)."""
     targets = [{"distance": str(d.get("distance") or "").replace("_", " "), "height_pct": d.get("h_pct"),
-                "directive": f"{d['cls']}: {d.get('directive') or ''}".strip(": "),
+                "directive": f"{d['cls']}: " + (" — ".join(str(x) for x in (d.get("object"), d.get("holder"), d.get("spot")) if x)
+                                                 or str(d.get("directive") or "")),
                 "why": d.get("why") or ("missed by the base model" if d.get("status") == "missed" else
                                         "wrong class from the base model" if d.get("status") == "wrong_class" else "")}
                for d in r.get("drinks") or []]
-    plan = {"regime": "text → image", "view": r.get("variation") or "as the anchor frame", "targets": targets,
+    view = " · ".join(str(x) for x in (r.get("place"), r.get("layout")) if x) or r.get("variation") or "as the anchor frame"
+    if r.get("place_from"):
+        view += f" (place type from {r['place_from']})"
+    plan = {"regime": "text → image", "view": view, "targets": targets,
             "camera_look": "CAMERA LOOK (hard" in (r.get("prompt") or ""), "prompt_chars": len(r.get("prompt") or ""),
             "motion_blur": False, "deep_scene": False, "t2i": True, "recipe": r.get("id"),
             "hard": sum(bool(d.get("hard")) for d in r.get("drinks") or [])}

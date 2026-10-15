@@ -166,7 +166,7 @@ export const studio = {
   t2iStatus: () => get<T2iStatus>("/t2i/status", 60_000),
   t2iAnalyze: () => post<T2iJob>("/t2i/analyze", {}),
   t2iJob: () => get<T2iJob>("/t2i/job"),
-  t2iPlan: (body: { n: number; provider: GenMode; source_images: string[] | null; hard_share: number; look_alikes: number; seed: number }) =>
+  t2iPlan: (body: { n: number; provider: GenMode; source_images: string[] | null; hard_share: number; look_alikes: number; variety: number; seed: number }) =>
     post<T2iPlan>("/t2i/plan", body, 120_000),
   t2iPlanGet: () => get<T2iPlan | Record<string, never>>("/t2i/plan"),
   clearPreview: () => get<ClearPreview>("/studio/clear-preview"),
