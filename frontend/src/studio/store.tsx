@@ -94,7 +94,13 @@ function useStudioState() {
     void loadData();
   });
   const send = useJob<SendJob>(studio.sendJob, 1000, (j) => {
-    if (j.status === "done" && j.result) setToast({ kind: "ok", text: `Sent ${j.result.images} images to the Own workspace — they are ready to label.` });
+    if (j.status === "done" && j.result)
+      setToast({
+        kind: "ok",
+        text: j.result.images
+          ? `Sent ${j.result.images} images to the Own workspace — they are ready to label.${j.result.skipped ? ` ${j.result.skipped} were already there and were skipped.` : ""}`
+          : `Nothing new to send: all ${j.result.skipped ?? 0} images are already in the Own workspace.`,
+      });
     else if (j.status === "error") setToast({ kind: "error", text: j.error || j.message });
   });
 

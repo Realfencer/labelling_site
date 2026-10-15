@@ -625,7 +625,8 @@ def start_send(run: str, filenames: list[str] | None = None) -> dict:
             res = send_run_to_labeler(run, filenames, progress_cb=cb)
             with _lock:
                 _send_job.update(status="done", result=res, progress=1.0,
-                                 message=f"Sent {res['images']} imgs → {res['host']}:{res['dest']}/images")
+                                 message=f"Sent {res['images']} imgs → {res['host']}:{res['dest']}/images"
+                                 + (f" · {res['skipped']} already in Own, skipped" if res.get("skipped") else ""))
         except Exception as e:  # noqa: BLE001
             with _lock:
                 _send_job.update(status="error", error=str(e), message=f"Send failed: {e}")

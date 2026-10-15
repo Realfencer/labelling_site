@@ -91,6 +91,37 @@ def _register_provider(run_dir: Path, stems: list[str]) -> None:
     tmp.replace(OWN_GENERATOR_REGISTRY)
 
 
+LEDGER = "sent_to_own.json"  # {run image filename: the Own filename it was sent as}
+
+
+def _load_ledger(run_dir: Path) -> dict[str, str]:
+    try:
+        return json.loads((run_dir / LEDGER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ledger(run_dir: Path, ledger: dict[str, str]) -> None:
+    (run_dir / LEDGER).write_text(json.dumps(ledger, indent=1), encoding="utf-8")
+
+
+def _already_in_own(out_dir: Path, name: str, prepared: Path, recorded: str | None) -> str | None:
+    """The Own filename this image already has (the ledger's, or an identical file of the same stem), else None."""
+    import hashlib
+
+    if recorded and (out_dir / recorded).is_file():
+        return recorded
+    stem = Path(name).stem
+    twins = [p for p in out_dir.glob(f"{stem}_*.png") if p.stem[len(stem) + 1:].replace("_", "").isdigit()]
+    if not twins:
+        return None
+    want = hashlib.md5(prepared.read_bytes()).hexdigest()
+    for p in sorted(twins):
+        if p.stat().st_size == prepared.stat().st_size and hashlib.md5(p.read_bytes()).hexdigest() == want:
+            return p.name
+    return None
+
+
 def send_run_to_labeler(
     run: str,
     filenames: list[str] | None = None,
@@ -129,6 +160,7 @@ def send_run_to_labeler(
         raise RemoteSendError(f"Missing images in run: {', '.join(missing[:5])}")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    ledger = _load_ledger(run_dir)
 
     if local:
         # Studio runs on the labeler's server: write straight into the Own pool (same names as an scp send).
@@ -137,19 +169,31 @@ def send_run_to_labeler(
         # the labeler files each image under OpenAI or Gemini: record the run's provider BEFORE the images appear
         _register_provider(run_dir, [Path(_dated_name(n, stamp)).stem for n in names])
         sent: list[str] = []
+        skipped: list[str] = []
         total = len(names)
         for i, name in enumerate(names, 1):
             final = out_dir / _dated_name(name, stamp)
             tmp = final.with_name(f".{final.name}.part")
             try:
                 _stretch_to_square(img_dir / name, tmp, SEND_SIZE)
-                tmp.replace(final)  # appear complete or not at all (the Own pool scans this folder)
+                # already in Own (sent before — recorded in the run's ledger, or the same bytes under this stem from a
+                # send made before the ledger existed): skip, so a re-send never doubles the labelling work
+                prev = _already_in_own(out_dir, name, tmp, ledger.get(name))
+                if prev:
+                    tmp.unlink(missing_ok=True)
+                    ledger[name] = prev
+                    skipped.append(name)
+                else:
+                    tmp.replace(final)  # appear complete or not at all (the Own pool scans this folder)
+                    ledger[name] = final.name
+                    sent.append(final.name)
             except Exception as e:
                 tmp.unlink(missing_ok=True)
+                _save_ledger(run_dir, ledger)
                 raise RemoteSendError(f"copy failed after {len(sent)}/{total} images ({name}): {e}") from e
-            sent.append(final.name)
             if progress_cb:
-                progress_cb(len(sent), total, f"Copied {len(sent)}/{total} → Own")
+                progress_cb(i, total, f"Copied {len(sent)}/{total} → Own" + (f" · {len(skipped)} already there, skipped" if skipped else ""))
+        _save_ledger(run_dir, ledger)
         return {
             "ok": True,
             "run": run_name,
@@ -157,6 +201,7 @@ def send_run_to_labeler(
             "dest": dest_root,
             "sent_at": stamp,
             "images": len(sent),
+            "skipped": len(skipped),
             "labels": 0,
             "size": SEND_SIZE,
             "stretched": True,
@@ -182,6 +227,8 @@ def send_run_to_labeler(
     if identity:
         scp_base += ["-i", identity]
 
+    skipped = [n for n in names if n in ledger]  # recorded as sent by an earlier send of this run
+    names = [n for n in names if n not in ledger]
     total = len(names)
     with tempfile.TemporaryDirectory(prefix="bs_send_") as tmp:
         tmp_dir = Path(tmp)
@@ -211,6 +258,8 @@ def send_run_to_labeler(
                     f"({batch[0][0]}…): {(r.stderr or r.stdout or '').strip()}"
                 )
             sent_images += [p.name for _, p in batch]
+            ledger.update({n: p.name for n, p in batch})
+            _save_ledger(run_dir, ledger)
             if progress_cb:
                 progress_cb(len(sent_images), total, f"Sent {len(sent_images)}/{total} → {host}")
 
@@ -221,6 +270,7 @@ def send_run_to_labeler(
         "dest": dest_root,
         "sent_at": stamp,
         "images": len(sent_images),
+        "skipped": len(skipped),
         "labels": 0,
         "size": SEND_SIZE,
         "stretched": True,

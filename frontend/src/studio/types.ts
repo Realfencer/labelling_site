@@ -100,7 +100,7 @@ export type SendJob = {
   total: number;
   progress: number;
   error: string | null;
-  result: null | { ok: boolean; run: string; host: string; dest: string; images: number; filenames: string[] };
+  result: null | { ok: boolean; run: string; host: string; dest: string; images: number; skipped?: number; filenames: string[] };
 };
 
 export type Gallery = {
