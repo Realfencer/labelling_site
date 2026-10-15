@@ -77,7 +77,14 @@ def run(*, mode: str, provider: str, model: str, recipes: list[dict], dataset_ro
                                                "created_at": datetime.now(timezone.utc).isoformat()}, indent=2),
                                    encoding="utf-8")
     fn = _openai if provider == "openai" else _gemini
-    saved, fails, extra = fn(run_dir, bdir, pairs, model, quality, instant, dataset_root, api_key, progress_cb)
+    try:
+        saved, fails, extra = fn(run_dir, bdir, pairs, model, quality, instant, dataset_root, api_key, progress_cb)
+    except Exception:
+        job = json.loads((bdir / "job.json").read_text(encoding="utf-8"))
+        if not job.get("chunks"):  # chunked runs keep their chunk states (Collect continues them)
+            job["status"] = "failed"
+            (bdir / "job.json").write_text(json.dumps(job, indent=2), encoding="utf-8")
+        raise
     job = json.loads((bdir / "job.json").read_text(encoding="utf-8"))
     job.update(status="completed", **extra)
     (bdir / "job.json").write_text(json.dumps(job, indent=2), encoding="utf-8")
@@ -90,7 +97,7 @@ def run(*, mode: str, provider: str, model: str, recipes: list[dict], dataset_ro
 def _openai(run_dir, bdir, pairs, model, quality, instant, dataset_root, api_key, progress_cb):
     import httpx
 
-    from app.openai_generate import _instant_cost, _read_jsonl_file, get_client, poll_batch, resolve_api_key
+    from app.openai_generate import _instant_cost, resolve_api_key
 
     key = resolve_api_key(api_key)
     body = lambda r: {"model": model, "prompt": r["prompt"], "size": "1024x1024", "quality": quality,  # noqa: E731
@@ -138,32 +145,136 @@ def _openai(run_dir, bdir, pairs, model, quality, instant, dataset_root, api_key
                     progress_cb(done, total, f"Text → Image instant · {done}/{total} (ok={len(saved)} fail={fails})")
         return saved, fails, {"cost_usd": round(sum(_instant_cost(u) for u in usage), 4)}
 
+    saved2, fails2, extra = _openai_batch_chunks(run_dir, bdir, by_stem, key, quality, dataset_root, progress_cb)
+    return saved + saved2, fails + fails2, extra
+
+
+def _est_tokens(prompt: str, quality: str) -> int:
+    """Conservative enqueued tokens of one text → image request: prompt (~3.8 chars / token) + output by quality."""
+    from app.openai_generate import EST_OUTPUT_TOKENS
+
+    return int(len(prompt) / 3.8) + EST_OUTPUT_TOKENS.get(quality, 7000)
+
+
+def _openai_batch_chunks(run_dir: Path, bdir: Path, by_stem: dict[str, dict], key: str, quality: str,
+                         dataset_root: Path | None, progress_cb: ProgressCb | None) -> tuple[list[dict], int, dict]:
+    """Sequential Batch API chunks that each fit the org's enqueued-token cap (1M for gpt-image-2.5): a chunk is only
+    submitted when the previous one finished. A chunk OpenAI still rejects with token_limit_exceeded is split in two.
+    State lives in job.json["chunks"], so collect() continues a run after a Studio restart."""
+    from app.config import get_settings
+    from app.openai_generate import (CHUNK_TOKEN_BUDGET_FRACTION, _instant_cost, _read_jsonl_file, get_client,
+                                     poll_batch)
+
     client = get_client(key)
-    if progress_cb:
-        progress_cb(0, total, f"Submitting an OpenAI batch of {total} text → image requests…")
-    up = client.files.create(file=(bdir / "requests.jsonl").open("rb"), purpose="batch")
-    batch = client.batches.create(input_file_id=up.id, endpoint="/v1/images/generations", completion_window="24h")
-    job = json.loads((bdir / "job.json").read_text(encoding="utf-8"))
-    job.update(batch_id=batch.id, input_file_id=up.id)
-    (bdir / "job.json").write_text(json.dumps(job, indent=2), encoding="utf-8")
-    batch = poll_batch(client, batch.id, poll_s=30.0, progress_cb=progress_cb, total=total, label="Text → Image")
-    if batch.status in {"failed", "cancelled", "expired"} and not batch.output_file_id:
-        errs = getattr(getattr(batch, "errors", None), "data", None) or []
-        raise GenerationError(f"OpenAI batch {batch.id} {batch.status} · "
-                              + "; ".join(f"{getattr(e, 'code', '')}: {getattr(e, 'message', '')}" for e in errs[:3]))
-    rows = _read_jsonl_file(client, batch.output_file_id, bdir / f"results_{batch.id}.jsonl")
-    rows += _read_jsonl_file(client, batch.error_file_id, bdir / f"errors_{batch.id}.jsonl")
-    got = {}
-    for row in rows:
-        resp = row.get("response") or {}
-        ok = resp.get("status_code") == 200
-        got[row.get("custom_id")] = (resp.get("body") if ok else None, None if ok else json.dumps(row.get("error") or resp)[:300])
-    for i, stem in enumerate(by_stem, 1):
-        keep(stem, *got.get(stem, (None, f"missing in batch results ({batch.status})")))
-        if progress_cb:
-            progress_cb(i, total, f"Text → Image · collected {i}/{total} (ok={len(saved)} fail={fails})")
+    job_path = bdir / "job.json"
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    lines = {json.loads(x)["custom_id"]: json.loads(x) for x in (bdir / "requests.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()}
+    if not job.get("chunks"):
+        budget = get_settings().openai_enqueued_token_limit * CHUNK_TOKEN_BUDGET_FRACTION
+        chunks, cur, used = [], [], 0
+        for stem, r in by_stem.items():
+            t = _est_tokens(r["prompt"], quality)
+            if cur and used + t > budget:
+                chunks.append(cur)
+                cur, used = [], 0
+            cur.append(stem)
+            used += t
+        if cur:
+            chunks.append(cur)
+        job["chunks"] = [{"index": i, "stems": c, "status": "pending", "batch_id": None} for i, c in enumerate(chunks)]
+        job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+    total = len(by_stem)
+    saved, fails, usage = [], 0, []
+    done_before = sum(len(c["stems"]) for c in job["chunks"] if c["status"] == "completed")
+
+    def save_job() -> None:
+        job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+
+    i = 0
+    while i < len(job["chunks"]):
+        ch = job["chunks"][i]
+        n_ch = len(job["chunks"])
+        label = f"Text → Image · chunk {i + 1}/{n_ch} ({len(ch['stems'])} images)"
+        if ch["status"] in ("completed", "split"):
+            i += 1
+            continue
+        if ch["status"] == "failed":  # Collect after a failure: submit that chunk again
+            ch.update(batch_id=None, status="pending", error=None)
+        if not ch.get("batch_id"):
+            part = bdir / f"requests_c{ch['index']}.jsonl"
+            part.write_text("\n".join(json.dumps(lines[st]) for st in ch["stems"]), encoding="utf-8")
+            up = client.files.create(file=part.open("rb"), purpose="batch")
+            batch = client.batches.create(input_file_id=up.id, endpoint="/v1/images/generations", completion_window="24h")
+            ch.update(batch_id=batch.id, input_file_id=up.id, status="submitted")
+            save_job()
+        batch = poll_batch(client, ch["batch_id"], poll_s=30.0, progress_cb=progress_cb, total=total, label=label)
+        if batch.status in {"failed", "cancelled", "expired"} and not batch.output_file_id:
+            errs = getattr(getattr(batch, "errors", None), "data", None) or []
+            codes = {getattr(e, "code", "") for e in errs}
+            if "token_limit_exceeded" in codes and len(ch["stems"]) > 1:  # still too big: split in two and go on
+                half = len(ch["stems"]) // 2
+                ch["status"] = "split"
+                job["chunks"][i + 1:i + 1] = [
+                    {"index": max(c["index"] for c in job["chunks"]) + 1, "stems": ch["stems"][:half], "status": "pending", "batch_id": None},
+                    {"index": max(c["index"] for c in job["chunks"]) + 2, "stems": ch["stems"][half:], "status": "pending", "batch_id": None}]
+                save_job()
+                i += 1
+                continue
+            ch["status"] = "failed"
+            ch["error"] = "; ".join(f"{getattr(e, 'code', '')}: {getattr(e, 'message', '')}" for e in errs[:3])
+            save_job()
+            raise GenerationError(f"OpenAI batch {batch.id} {batch.status} · {ch['error']}"
+                                  + (f" — {done_before + len(saved)} images saved; press Collect to continue" if saved or done_before else ""))
+        rows = _read_jsonl_file(client, batch.output_file_id, bdir / f"results_{batch.id}.jsonl")
+        rows += _read_jsonl_file(client, batch.error_file_id, bdir / f"errors_{batch.id}.jsonl")
+        got = {}
+        for row in rows:
+            resp = row.get("response") or {}
+            ok = resp.get("status_code") == 200
+            got[row.get("custom_id")] = (resp.get("body") if ok else None,
+                                         None if ok else json.dumps(row.get("error") or resp)[:300])
+        for k, stem in enumerate(ch["stems"], 1):
+            if (run_dir / "images" / f"{stem}.png").exists():
+                continue
+            body, err = got.get(stem, (None, f"missing in batch results ({batch.status})"))
+            try:
+                data = (body or {}).get("data") or []
+                if err or not data or not data[0].get("b64_json"):
+                    raise GenerationError(err or "no image")
+                saved.append(_save(run_dir, stem, by_stem[stem], base64.b64decode(data[0]["b64_json"]), dataset_root, True))
+                usage.append(body.get("usage") or {})
+            except Exception as exc:  # noqa: BLE001
+                fails += 1
+                (bdir / f"{stem}.error.txt").write_text(str(exc), encoding="utf-8")
+            if progress_cb:
+                progress_cb(done_before + len(saved) + fails, total, f"{label} · collected (ok={done_before + len(saved)} fail={fails})")
+        ch["status"] = "completed"
+        save_job()
+        i += 1
     cost = round(sum(_instant_cost(u) for u in usage) / 2, 4)  # Batch API: half the standard rates
-    return saved, fails, {"cost_usd": cost, "batch_job": batch.id}
+    return saved, fails, {"cost_usd": cost, "batch_jobs": [c["batch_id"] for c in job["chunks"] if c.get("batch_id")]}
+
+
+def collect(run_dir: Path, *, dataset_root: Path | None, api_key: str | None = None,
+            progress_cb: ProgressCb | None = None) -> dict:
+    """Continue an OpenAI text → image batch run (after a Studio restart or a stopped chunk)."""
+    from app.openai_generate import resolve_api_key
+
+    run_dir = Path(run_dir)
+    bdir = run_dir / "batch"
+    job = json.loads((bdir / "job.json").read_text(encoding="utf-8"))
+    by_stem = json.loads((run_dir / RECIPES_FILE).read_text(encoding="utf-8"))
+    if job.get("provider") != "openai" or job.get("instant"):
+        raise GenerationError("Only OpenAI text → image batch runs can be collected")
+    _, fails, extra = _openai_batch_chunks(run_dir, bdir, by_stem, resolve_api_key(api_key),
+                                           (job.get("options") or {}).get("quality") or "medium", dataset_root, progress_cb)
+    saved = [_item(run_dir, stem, r, dataset_root, True, {}) for stem, r in by_stem.items()
+             if (run_dir / "images" / f"{stem}.png").exists()]
+    job.update(json.loads((bdir / "job.json").read_text(encoding="utf-8")))
+    job.update(status="completed", **extra)
+    (bdir / "job.json").write_text(json.dumps(job, indent=2), encoding="utf-8")
+    meta = {k: job.get(k) for k in ("mode", "provider", "model", "batch", "instant", "options")}
+    return _finish(run_dir, {**meta, **extra}, saved, fails)
 
 
 # ── Gemini ────────────────────────────────────────────────────────────────────

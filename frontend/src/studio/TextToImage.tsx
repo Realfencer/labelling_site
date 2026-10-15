@@ -24,13 +24,15 @@ import {
   useJob,
 } from "./ui";
 
-/** $ per text → image request through the Batch API (low / medium / high): the image-to-image price minus the
- *  reference image and the longer prompt (≈ $0.0086 less), measured token counts 2026-10-14. Instant = 2×. */
-const T2I_PRICE: Record<string, [number, number, number]> = {
-  "gpt-image-2.5-sunburst": [0.0044, 0.0094, 0.0294],
-  "gpt-image-2.5-flare": [0.0044, 0.0094, 0.0294],
-  "gpt-image-2": [0.0064, 0.029, 0.108],
+/** $ per text → image request through the Batch API: the image OUTPUT by model / quality (low / medium / high, from
+ *  measured token counts: 2.5 medium 439 output tokens, gpt-image-2 medium 1,756) plus the prompt's TEXT input, priced
+ *  from the plan's own prompt lengths ($2.50 per 1M text tokens in batch, ≈ 3.8 characters per token). Instant = 2×. */
+const T2I_OUT: Record<string, [number, number, number]> = {
+  "gpt-image-2.5-sunburst": [0.0016, 0.0066, 0.0266],
+  "gpt-image-2.5-flare": [0.0016, 0.0066, 0.0266],
+  "gpt-image-2": [0.0036, 0.0266, 0.1056],
 };
+const TEXT_PER_CHAR = 2.5e-6 / 3.8;
 const T2I_GEMINI = 0.034; // gemini-3.1-flash-image batch, 1K image out; the text-only prompt costs < $0.001
 const INSTANT_X = 2;
 const PAGE = 24;
@@ -675,11 +677,13 @@ function GenerateStep({ plan }: { plan: T2iPlan }) {
           ).id,
     );
   }, [models, h?.default_model]);
+  const chars = plan.coverage.avg_prompt_chars ?? 6000;
   const batchUnit = isGemini
     ? T2I_GEMINI
-    : (T2I_PRICE[model] || T2I_PRICE["gpt-image-2.5-sunburst"])[
+    : (T2I_OUT[model] || T2I_OUT["gpt-image-2.5-sunburst"])[
         quality === "low" ? 0 : quality === "high" ? 2 : 1
-      ];
+      ] +
+      chars * TEXT_PER_CHAR;
   const unit = batchUnit * (instant ? INSTANT_X : 1);
   const genRunning = st.gen.job?.status === "running";
   const canSpend = Boolean(st.status?.can_spend);

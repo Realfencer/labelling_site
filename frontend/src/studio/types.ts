@@ -356,6 +356,7 @@ export type T2iCoverage = {
   crowds_mixed?: number;
   drinks_changed?: number;
   distinct_places?: number;
+  avg_prompt_chars?: number;
 };
 export type T2iPlanMeta = { created_at: number; n: number; provider: GenMode; hard_share: number; frames: number; frames_missing_cards: string[]; coverage: T2iCoverage };
 export type T2iDrink = { key: string; cls: string; hard: boolean; status: string | null; h_pct: number; distance?: string; object?: string; holder?: string; spot?: string; why?: string; changed?: string[] };

@@ -475,7 +475,8 @@ def list_runs() -> list[dict]:
             pending = bool(job_meta.get("provider") == "openai" and chunk_active)
         else:
             # instant runs have nothing to collect later (a run cut off by a restart just keeps what it saved)
-            pending = n_img == 0 and job_path.exists() and not job_meta.get("instant")
+            pending = (n_img == 0 and job_path.exists() and not job_meta.get("instant")
+                       and job_meta.get("status") != "failed")
         n_chunks = len(chunks) if chunks else (1 if job_meta else 0)
         provider = meta.get("provider") or job_meta.get("provider")
         if not provider:

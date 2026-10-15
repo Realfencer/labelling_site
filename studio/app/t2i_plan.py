@@ -367,6 +367,8 @@ def coverage(recipes: list[dict], bank: list[dict], alloc: dict[str, int], la_ba
         "crowds_mixed": sum(r.get("crowd") is not None and bool(r.get("crowd_from")) for r in recipes),
         "drinks_changed": sum(bool(d.get("changed")) for d in drinks),
         "distinct_places": len({r.get("place") for r in recipes}),
+        # prices the text input of a run (≈ 3.8 characters per token)
+        "avg_prompt_chars": round(sum(len(r.get("prompt") or "") for r in recipes) / max(1, len(recipes))),
     }
 
 

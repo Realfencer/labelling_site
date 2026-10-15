@@ -353,9 +353,15 @@ def start_generation(
             if collect_run:
                 run_path = GENERATED_ROOT / collect_run
                 job_path = run_path / "batch" / "job.json"
-                provider = json.loads(job_path.read_text(encoding="utf-8")).get("provider") if job_path.exists() else ""
+                job_meta = json.loads(job_path.read_text(encoding="utf-8")) if job_path.exists() else {}
+                provider = job_meta.get("provider") or ""
                 gen_mode = "gemini" if provider == "gemini" else "openai"
-                if provider == "gemini":
+                if job_meta.get("kind") == "t2i":
+                    from app.t2i_generate import collect as collect_t2i
+
+                    result = collect_t2i(run_path, dataset_root=Path(dataset) if dataset else None,
+                                         api_key=openai_api_key, progress_cb=cb)
+                elif provider == "gemini":
                     result = collect_gemini_run(
                         run_path,
                         dataset_root=Path(dataset) if dataset else None,
