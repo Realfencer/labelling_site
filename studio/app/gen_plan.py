@@ -129,8 +129,8 @@ CCTV_APPEARANCE = """CCTV / SURVEILLANCE CAMERA APPEARANCE (match the eval frame
   mild barrel distortion — no fisheye circle, no black rounded corners. Natural body proportions.
 - IMAGE QUALITY: follow this source's CAMERA LOOK and IMAGE QUALITY LOCK (focus, grain, color, exposure, motion
   blur) — every frame of the eval set has its own camera look. In general: CCTV softness —
-  fine texture, printed text and small objects are NOT resolved; visible sensor grain, strongest in shadows; mild
-  compression; the reference's own tone curve and exposure (see EXPOSURE LOCK); slightly muted full color. Never
+  fine texture, printed text and small objects are NOT resolved; grain exactly as this source's NOISE LOCK says
+  (many eval frames are clean — then no visible grain at all); mild compression; the reference's own tone curve and exposure (see EXPOSURE LOCK); slightly muted full color. Never
   photo-sharp; no HDR, no bokeh, no cinematic grading.
   Compression shows as SMEARING of fine detail only — measured on the eval set: no visible 8×8 block grid, so never
   paint blocky / pixelated macroblocks, even where a CAMERA LOOK mentions macroblocking.
@@ -695,11 +695,11 @@ def _degradation_block(rec: dict, stats: dict[str, list[float]], caption: dict) 
         else:
             lines.append(f"Overall focus: among the crisper frames of this set (pct {sp:.0%}) — still CCTV-soft, never "
                          "photo-sharp; fine texture and printed text stay unresolved.")
-    npct = _pct(stats, "noise_sigma", rec.get("noise_sigma"))
-    if npct is not None:
-        level = "HEAVY" if npct >= 0.66 else "MODERATE" if npct >= 0.33 else "LIGHT"
-        lines.append(f"Sensor noise: {level} (pct {npct:.0%}) — luminance + chroma grain, strongest in shadows and dark "
-                     "clothing; the grain also covers the drinks.")
+    from app.look import noise_lock_line
+
+    nl = noise_lock_line(rec.get("path"))  # absolute, measured grain (a within-set rank called clean frames "grainy")
+    if nl:
+        lines.append(nl + " The drinks get the same grain as the rest of the frame.")
     motion = _motion_level(rec, stats)
     if motion == "present":
         lines.append("Motion blur: PRESENT — directional smear on walking people, swinging arms and the drinks in their "
@@ -718,8 +718,8 @@ def _degradation_block(rec: dict, stats: dict[str, list[float]], caption: dict) 
         elif cp <= 0.66:
             lines.append(f"{cls.upper()}S are moderately soft (pct {cp:.0%}): outline only, edges and details smeared.")
         else:
-            lines.append(f"{cls.upper()}S are among the better-defined in this set (pct {cp:.0%}) — still CCTV-soft with "
-                         "grain; no product-photo detail.")
+            lines.append(f"{cls.upper()}S are among the better-defined in this set (pct {cp:.0%}) — still CCTV-soft; "
+                         "no product-photo detail.")
     if rec.get("is_grayscale") and float(rec.get("saturation") if rec.get("saturation") is not None else 1.0) < 0.05:
         lines.append("Color: near-grayscale / IR-like — keep the frame desaturated to almost monochrome.")
     cctv = caption.get("cctv") or {}

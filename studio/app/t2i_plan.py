@@ -410,6 +410,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
     exp = _exposure_line(src["record"], degr)
     col = _color_line(src["record"])
     lock = camera_lock_line(src.get("geometry"))
+    from app.look import noise_lock_line
+
+    noise = noise_lock_line(src["record"].get("path"))
     las_txt = "; ".join(f"{x['object']} (looks a bit like a {x['resembles']}, but it is NOT a drink)" for x in las)
 
     def j(*bits: object, sep: str = "; ") -> str:  # joins only the fields the card filled
@@ -439,9 +442,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
             f"Drinks in the frame — {drinks_head}:",
             *dl,
             f"Also in the scene, and clearly NOT drinks: {las_txt}." if las_txt else "",
-            look, exp, col,
-            "Real CCTV quality: soft focus, sensor grain, mild compression smearing, natural body proportions, no text, "
-            "no timestamp, no watermark, no boxes or outlines.",
+            look, exp, col, noise,
+            "Real CCTV quality: soft focus, mild compression smearing, grain only as the NOISE LOCK says, natural body "
+            "proportions, no text, no timestamp, no watermark, no boxes or outlines.",
         ]
     else:
         parts = [
@@ -455,9 +458,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
             f"DRINKS — {drinks_head}:",
             *dl,
             f"NOT DRINKS (look-alikes, keep them clearly non-drinks): {las_txt}." if las_txt else "",
-            look, exp, col,
-            "IMAGE QUALITY: real CCTV — soft, sensor grain, mild compression smearing; natural body proportions. "
-            "NO text, timestamp, watermark, boxes or outlines.",
+            look, exp, col, noise,
+            "IMAGE QUALITY: real CCTV — soft, mild compression smearing, grain only as the NOISE LOCK says; natural "
+            "body proportions. NO text, timestamp, watermark, boxes or outlines.",
         ]
     return "\n".join(p.strip() for p in parts if p and p.strip())
 

@@ -236,3 +236,46 @@ def match_run(run_dir: Path, analysis_dir: Path | None = None, texture: bool = F
             "at": datetime.now(timezone.utc).isoformat(), "per_image": report}
     (run_dir / "postprocess.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return meta
+
+
+# ── grain (NOISE LOCK) ────────────────────────────────────────────────────────
+# Pixel noise in FLAT areas (|gray − 3×3 median| on the 40 % lowest-gradient pixels, frame at 1024²). Unlike the
+# Immerkaer noise_sigma it ignores edges / texture, so it is the grain a viewer sees. Eval frames span ~0.25 (clean
+# OpenAI frames) to ~2.2 (grainy); generated images used to land at ~1.0 whatever their source had, because every
+# prompt asked for "sensor grain" and the CAMERA LOOK captions call almost every frame "moderate noise" (2026-10-15).
+GRAIN_LEVELS = ((0.45, "VERY CLEAN — no visible grain or noise; walls, floor, sky and clothing are smooth"),
+                (0.9, "LIGHT — barely visible fine grain, only in the darkest shadows; flat areas look smooth"),
+                (1.5, "MODERATE — fine luminance grain visible in flat areas and shadows"),
+                (99.0, "STRONG — clearly visible noise across flat areas, heaviest in shadows and dark clothing"))
+
+
+def grain_rgb(rgb: np.ndarray) -> float:
+    g = _gray(rgb)
+    res = g - cv2.medianBlur(g.astype(np.uint8), 3).astype(np.float32)
+    grad = cv2.GaussianBlur(np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1)), (0, 0), 2)
+    return round(float(np.abs(res[grad <= np.percentile(grad, 40)]).mean()), 3)
+
+
+_grain_cache: dict[str, float] = {}
+
+
+def grain_of(path: str | Path) -> float | None:
+    p = Path(path)
+    try:
+        key = f"{p}:{_sig(p)}"
+    except OSError:
+        return None
+    if key not in _grain_cache:
+        _grain_cache[key] = grain_rgb(_load_rgb(p))
+    return _grain_cache[key]
+
+
+def noise_lock_line(path: str | Path | None) -> str:
+    """NOISE LOCK for a source frame: its measured grain in absolute words (wins over any noise / grain wording)."""
+    g = grain_of(path) if path else None
+    if g is None:
+        return ""
+    words = next(w for top, w in GRAIN_LEVELS if g < top)
+    return (f"NOISE LOCK (hard, measured on the reference — wins over every noise / grain word elsewhere): {words} "
+            f"(grain {g:.2f}). Do NOT add grain, noise or speckle beyond this"
+            + (" — this camera's image is clean." if g < 0.45 else "."))

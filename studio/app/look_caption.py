@@ -111,7 +111,15 @@ def camera_look_line(look: dict | None) -> str:
     """CAMERA LOOK for THIS SOURCE (empty when the frame has no description)."""
     if not look or not look.get("directive"):
         return ""
-    bits = [f"{k}: {look[k]}" for k in ("sharpness", "detail", "noise", "compression", "color", "exposure", "lens", "motion")
+    import re
+
+    # noise / grain is left to the measured NOISE LOCK: the captions call almost every frame "moderate noise", clean
+    # ones included, and generated images came out grainier than their sources (2026-10-15)
+    noisy = re.compile(r"\b(noise|noisy|grain|grainy|speckle)", re.I)
+    directive = " ".join(x for x in re.split(r"(?<=[.!?])\s+", look["directive"]) if not noisy.search(x)).strip()
+    bits = [f"{k}: {look[k]}" for k in ("sharpness", "detail", "compression", "color", "exposure", "lens", "motion")
             if look.get(k)]
+    if not directive:
+        directive = "Reproduce this camera's rendering."
     return ("CAMERA LOOK (hard — described from the reference; reproduce THIS camera's rendering in the new scene, it "
-            f"matters as much as the content): {look['directive']} Details — " + "; ".join(bits) + ".")
+            f"matters as much as the content): {directive} Details — " + "; ".join(bits) + ". Noise / grain: see NOISE LOCK.")
