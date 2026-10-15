@@ -204,7 +204,7 @@ function PlanStep({ status, plan, onPlan }: { status: T2iStatus; plan: T2iPlan |
 
   return (
     <Card>
-      <StepHead n={2} title="Plan exactly N images" sub="Free. Each recipe starts from one of your frames' scenes, mixes in real drinks (hard ones first) and keeps that frame's camera, look, exposure and colour." />
+      <StepHead n={2} title="Plan exactly N images" sub="Free. Each recipe takes one of your frames' place type, light, crowd, camera, look, exposure and colour, invents a NEW location of that type, keeps that frame's own drinks (easy ones too) and adds hard drinks from other frames up to the hard share." />
       <div className="mt-3 grid gap-3 text-[12px] sm:grid-cols-2 lg:grid-cols-4">
         <label>
           <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-slate-400">Images (N)</span>
@@ -212,7 +212,7 @@ function PlanStep({ status, plan, onPlan }: { status: T2iStatus; plan: T2iPlan |
         </label>
         <label>
           <span className="mb-0.5 flex justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
-            <span>Hard drinks</span>
+            <span>Hard drinks (target)</span>
             <span className="text-slate-700 dark:text-slate-200">{hard}%</span>
           </span>
           <input type="range" min={0} max={100} step={10} value={hard} onChange={(e) => (setHard(Number(e.target.value)), save("t2i_hard", Number(e.target.value)))} className="w-full accent-violet-600" />

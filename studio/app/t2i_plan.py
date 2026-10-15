@@ -25,6 +25,19 @@ from collections import Counter
 from pathlib import Path
 
 PLAN_FILE = "t2i_plan.json"
+MAX_ADDED_HARD = 2  # hard drinks from other frames added to an image on top of its anchor's own drinks
+# How the NEW location is composed. The anchor gives the place TYPE, light, crowd, camera height / tilt and look —
+# never its layout (copying the anchor's layout, surfaces and props rebuilt the same scene, 2026-10-15 test).
+T2I_LAYOUTS: tuple[str, ...] = (
+    "the space recedes straight ahead, its vanishing point in the upper LEFT third of the frame",
+    "the space recedes straight ahead, its vanishing point in the upper RIGHT third of the frame",
+    "the main lines (walls, kerb, counter, rows of tables) run DIAGONALLY from the lower left to the upper right",
+    "the main lines run DIAGONALLY from the lower right to the upper left",
+    "an open area seen across its width — the far side runs roughly parallel to the top of the frame",
+    "the camera looks into a CORNER where two walls / building fronts meet, the space opening towards it",
+    "an entrance, doorway or gate in the middle distance with the area in front of it filling the lower half",
+    "a wide open area with the floor / ground filling most of the frame and the far edge near the top",
+)
 CLASSES = ("cup", "can", "bottle")
 GEMINI_ASPECT = "16:9"
 OPENAI_SIZE = "1024x1024"
@@ -116,7 +129,6 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
     rng = random.Random(seed)
     bank = _drink_bank(usable)
     hard_bank = [b for b in bank if b["hard"]]
-    soft_bank = [b for b in bank if not b["hard"]]
     la_bank = _look_alike_bank(usable)
     target_mix = Counter(b["cls"] for b in bank)
     hard_by_frame = Counter(b["frame"] for b in hard_bank)
@@ -134,9 +146,9 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
         if not ok:
             return None
         tot_planned = sum(planned_cls.values()) + 1
-        def score(b):  # least-used first; own frame first; classes behind the target mix first
+        def score(b):  # the anchor's own drinks first; then least used; classes behind the target mix first
             behind = target_mix[b["cls"]] / max(1, sum(target_mix.values())) - planned_cls[b["cls"]] / tot_planned
-            return (used[b["key"]], b["frame"] != anchor, -behind, rng.random())
+            return (b["frame"] != anchor, used[b["key"]], -behind, rng.random())
         return min(ok, key=score)
 
     for fn in sorted(alloc, key=lambda k: (-alloc[k], k)):
@@ -147,16 +159,45 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
         own = [b for b in bank if b["frame"] == fn]
         people = int((scene.get("crowd") or {}).get("count") or 0) > 0
         for j in range(alloc[fn]):
-            k = max(1, len(own) + rng.choice((-1, 0, 0, 1)))
-            n_hard = min(k, round(k * hard_share)) if hard_bank else 0
-            drinks = []
-            for pool, cnt in ((hard_bank, n_hard), (soft_bank or hard_bank, k - n_hard)):
-                for _ in range(cnt):
-                    b = pick([x for x in pool if x not in drinks], fn, people)
-                    if b:
-                        drinks.append(b)
-                        used[b["key"]] += 1
-                        planned_cls[b["cls"]] += 1
+            drinks = list(own)  # the frame's real drinks — the easy ones the base model finds stay in
+            rng.shuffle(drinks)
+            if len(drinks) > 1 and rng.random() < 0.25:  # small count jitter: drop one easy drink
+                easy = [b for b in drinks if not b["hard"]]
+                if easy:
+                    drinks.remove(rng.choice(easy))
+            for b in drinks:
+                used[b["key"]] += 1
+                planned_cls[b["cls"]] += 1
+
+            def short() -> int:  # hard drinks still missing for the requested share
+                return round(len(drinks) * hard_share) - sum(b["hard"] for b in drinks)
+
+            added = 0
+            while hard_bank and added < MAX_ADDED_HARD and short() > 0:
+                b = pick([x for x in hard_bank if x not in drinks], fn, people)
+                if not b:
+                    break
+                drinks.append(b)
+                added += 1
+                used[b["key"]] += 1
+                planned_cls[b["cls"]] += 1
+            # above 50 % hard: also swap easy drinks for hard ones, but at least half of the frame's easy drinks stay
+            keep_easy = (sum(not b["hard"] for b in drinks) + 1) // 2
+            while hard_bank and hard_share > 0.5 and short() > 0 and sum(not b["hard"] for b in drinks) > keep_easy:
+                b = pick([x for x in hard_bank if x not in drinks], fn, people)
+                if not b:
+                    break
+                out = rng.choice([x for x in drinks if not x["hard"]])
+                drinks.remove(out)
+                planned_cls[out["cls"]] -= 1
+                drinks.append(b)
+                used[b["key"]] += 1
+                planned_cls[b["cls"]] += 1
+            if not drinks and bank:
+                b = pick(bank, fn, people)
+                if b:
+                    drinks.append(b)
+            layout = T2I_LAYOUTS[(j + rng.randrange(len(T2I_LAYOUTS))) % len(T2I_LAYOUTS)]
             las = []
             if la_bank and look_alikes:
                 pool = sorted(la_bank, key=lambda x: (used["la:" + str(x["object"])], x["frame"] != fn, not x["fired"], rng.random()))
@@ -164,6 +205,7 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
                 for x in las:
                     used["la:" + str(x["object"])] += 1
             rec = {"id": f"r{len(recipes) + 1:04d}", "anchor": fn, "variation": variations[j % len(variations)],
+                   "layout": layout,
                    "drinks": [{"key": b["key"], "cls": b["cls"], "hard": b["hard"], "status": b["status"], "h_pct": b["h_pct"],
                                "distance": b["card"].get("distance"), "directive": b["card"].get("directive"),
                                "why": b["card"].get("why")} for b in drinks],
@@ -236,13 +278,13 @@ def write_prompt(rec: dict, src: dict, drinks: dict[str, dict], las: list[dict],
         return sep.join(str(x).strip().rstrip(".;,") for x in bits if x and str(x).strip())
 
     where = place + (f" — {variation}" if variation else "")
-    setting = j(scene.get("layout"), j("surfaces: " + str(scene.get("surfaces")) if scene.get("surfaces") else "",
-                                       "props: " + str(scene.get("props")) if scene.get("props") else ""), sep=". ")
+    setting = (f"Invent a NEW, specific {place} with its own architecture, materials, furniture and layout — a real, "
+               f"lived-in place, not a showroom. Composition: {rec.get('layout') or T2I_LAYOUTS[0]}")
     light = j(scene.get("light"), scene.get("time_of_day"),
               f"weather {scene['weather']}" if scene.get("weather") not in (None, "", "n/a") else "")
     ppl = (j(f"{crowd['count']} people" + (f" ({crowd['density']})" if crowd.get("density") else ""),
              crowd.get("activities"), crowd.get("appearance")) if crowd.get("count") else "no people in view")
-    camera = j(cam.get("height"), cam.get("tilt"), cam.get("view"), f"{cam['lens']} lens" if cam.get("lens") else "",
+    camera = j(cam.get("height"), cam.get("tilt"), f"{cam['lens']} lens" if cam.get("lens") else "",
                cam.get("nearest_person"))
     if provider == "gemini":
         parts = [
