@@ -26,6 +26,7 @@ if str(SCORE_ROOT) not in sys.path:
 DPP_ROOT = SCORE_ROOT / "review_datasets" / "deep_postproc"
 HF_MINERS = SCORE_ROOT / "review_datasets" / "hf_miners"
 MERGED = SCORE_ROOT / "review_datasets" / "merged_models"
+BEVERAGE_DEFAULT_TEMPLATE = "lovelydev1007__bd0915__main"
 REQUIRED = ("miner.py", "weights.onnx", "chute_config.yml")
 MIN_GT_IMAGES = 20
 
@@ -80,6 +81,7 @@ class DppJob:
     block_max: int | None = None
     quality: str = "all"
     n_gt: int = 0
+    template: str = ""  # folder name of the miner.py this pack was built from
     cancel: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
 
@@ -102,6 +104,7 @@ class DppJob:
             "block_max": self.block_max,
             "quality": self.quality,
             "n_gt": self.n_gt,
+            "template": self.template,
             "ship_ready": (self.root / "ship" / "weights.onnx").is_file()
             and (self.root / "ship" / "miner.py").is_file(),
         }
@@ -164,6 +167,7 @@ class DeepPostProcManager:
         except (TypeError, ValueError):
             job.block_max = None
         job.quality = str(meta.get("quality") or "all")
+        job.template = str(meta.get("template") or "")
         try:
             job.n_gt = int(meta.get("n_gt") or 0)
         except (TypeError, ValueError):
@@ -209,6 +213,7 @@ class DeepPostProcManager:
             shutil.copy2(raw_path, onnx_path)
 
         template = self._resolve_template(template_miner_dir, topic_slug)
+        job.template = template.name
         shutil.copy2(template / "miner.py", pack / "miner.py")
         chute_src = template / "chute_config.yml"
         if chute_src.is_file():
@@ -248,6 +253,15 @@ class DeepPostProcManager:
         return job
 
     def _resolve_template(self, template_miner_dir: Path | None, topic_slug: str) -> Path:
+        # Measured with one uploaded ONNX on the latest + previous 50 passed images (42 template miners, no tuning): the
+        # labeler's care-bev-5 averaged 0.8394 and this one 0.8466 (p95 ~90 ms). The single best scorer (Gaisy112
+        # bev_1_1c16, 0.8505) exposes no knobs, and Realfencer bev918-1 is not exactly replayable, so the robust deep
+        # post-process cannot tune either; this template can, and its low per-class thresholds are what the search adjusts.
+        compact_slug = (topic_slug or "").lower().replace("_", "").replace("-", "")
+        if "beverage" in compact_slug or "bev" in compact_slug:
+            preferred = HF_MINERS / BEVERAGE_DEFAULT_TEMPLATE
+            if (preferred / "miner.py").is_file():
+                return preferred
         if template_miner_dir and (template_miner_dir / "miner.py").is_file():
             return template_miner_dir
         # Prefer HF winner / known strong packs for topic slug
