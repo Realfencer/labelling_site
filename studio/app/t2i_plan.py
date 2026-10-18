@@ -77,6 +77,22 @@ def sources(analysis_dir: Path, dataset_root: Path | None, source_images: list[s
     return out
 
 
+# Words that name each class. A card whose "object" names ANOTHER class and not its own (a labelled can described as
+# "disposable coffee cup", a cup as "light blue sports bottle") describes a different object than the label — Gemini
+# then pasted something in (2026-10-18); such objects are dropped and the line just says "a can".
+CLASS_WORDS = {"cup": re.compile(r"\b(cups?|mugs?|tumblers?|glass(es)?)\b", re.I),
+               "can": re.compile(r"\bcans?\b", re.I),
+               "bottle": re.compile(r"\b(bottles?|flasks?|thermos(es)?)\b", re.I)}
+
+
+def object_fits(obj: str | None, cls: str) -> bool:
+    if not obj:
+        return False
+    if CLASS_WORDS[cls].search(obj):
+        return True
+    return not any(rx.search(obj) for c, rx in CLASS_WORDS.items() if c != cls)
+
+
 def _drink_bank(srcs: dict) -> list[dict]:
     """One entry per labelled drink with a card: class, measured size, base-model status, card text."""
     bank = []
@@ -92,6 +108,8 @@ def _drink_bank(srcs: dict) -> list[dict]:
                 continue
             x1, y1, x2, y2 = m["xyxy"]
             hard = m.get("status") != "hit" or str(d.get("difficulty", "")).lower() == "hard"
+            if d.get("object") and not object_fits(d["object"], m["gt_class"]):
+                d = {**d, "object": None}
             bank.append({"key": f"{fn}#{m['gt_index'] + 1}", "frame": fn, "cls": m["gt_class"], "status": m.get("status"),
                          "hard": hard, "h_pct": round((y2 - y1) / h * 100, 1), "card": d})
     return bank
@@ -205,7 +223,14 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
             # 2 · scene: the anchor's place type / light / camera / look, mixed with other frames
             sc = mix.scene(fn, donors_used, j)
             indoor = bool(scene.get("indoor"))
-            specs = [mix.drink(b, people or bool(sc["crowd"].get("count")), indoor, sc["donor"], allow_bin) for b in drinks]
+            specs = [mix.drink(b, people or bool(sc["crowd"].get("count")), indoor, sc["donor"], allow_bin, fn)
+                     for b in drinks]
+            seen_holders: set[str] = set()
+            for d in specs:  # one holder text per image (three cups "on top of a dark blue rolling suitcase")
+                h = str(d.get("holder") or "").strip().lower()
+                if h and h in seen_holders and d["holder"] != GENERIC_SURFACE:
+                    d["holder"] = GENERIC_HELD if str(d.get("placement")) in HELD else GENERIC_SURFACE
+                seen_holders.add(h)
             has_bin = any(in_bin(d) for d in specs)
             bin_images += has_bin
             if not has_bin:  # no bin in this image: size comparisons must not bring one in either
@@ -249,7 +274,9 @@ def in_bin(b: dict) -> bool:
     return str(c.get("placement")) == "bin" or bool(BIN_RE.search(f"{c.get('holder') or ''} {c.get('object') or ''}"))
 
 
-HELD = {"hand", "bag", "pocket"}  # carried by a person; anything else stands / lies on something
+HELD = {"hand", "bag", "pocket"}
+GENERIC_SURFACE = "standing on a table, ledge, bench or counter that fits this place"
+GENERIC_HELD = "held in the hand of another person"  # carried by a person; anything else stands / lies on something
 # horizontal spots; the vertical one follows the drink's distance (the camera looks down: far = higher in the frame)
 H_SPOTS = ("left third", "centre", "right third", "left of centre", "right of centre")
 V_BY_DISTANCE = {"near": "lower part of the frame", "mid": "middle of the frame", "far": "upper-middle of the frame",
@@ -327,7 +354,8 @@ class Mixer:
             self.stats["crowd_mixed"] += 1
         return {"place": place, "donor": donor, "crowd": crowd, "crowd_from": crowd_from}
 
-    def drink(self, b: dict, people: bool, indoor: bool, donor: str | None = None, allow_bin: bool = True) -> dict:
+    def drink(self, b: dict, people: bool, indoor: bool, donor: str | None = None, allow_bin: bool = True,
+              anchor: str | None = None) -> dict:
         c = b["card"]
         spec = {"key": b["key"], "cls": b["cls"], "hard": b["hard"], "status": b["status"], "h_pct": b["h_pct"],
                 "distance": str(c.get("distance") or "mid"), "object": c.get("object"), "holder": c.get("holder"),
@@ -355,15 +383,26 @@ class Mixer:
         # a different holder / surface (easy drinks: a hard drink's holder is often what makes it hard). When the place
         # came from another frame, a drink standing on something takes that frame's surfaces (no kitchen counter on a
         # station concourse).
-        moved = bool(donor) and not held and b["frame"] != donor
-        if not b["hard"] and (moved or rnd() < 0.6 * self.v):
-            def ok(x: dict, same_distance: bool) -> bool:
-                return (x["key"] != b["key"] and bool(x["card"].get("holder")) and (allow_bin or not in_bin(x))
-                        and (str(x["card"].get("placement")) in HELD) == held
+        # Surfaces belong to their place: a drink standing on something keeps its surface only in the frame whose place
+        # this image shows; anywhere else it stands on "a surface that fits this place" (a kitchen rack on a station
+        # platform, or three cups on one suitcase, read as pasted-in, 2026-10-18). Hands travel: held drinks may
+        # take another frame's holder.
+        place_frame = donor or anchor
+        if not held and b["frame"] != place_frame:
+            pool = [x for x in self.bank if x["frame"] == place_frame and x["key"] != b["key"] and x["card"].get("holder")
+                    and str(x["card"].get("placement")) not in HELD and (allow_bin or not in_bin(x))]
+            if pool and not b["hard"]:
+                o = self.rng.choice(pool)["card"]
+                spec.update(holder=o["holder"], placement=o.get("placement"), relative_size=None)
+            elif not in_bin(b):
+                spec.update(holder=GENERIC_SURFACE, relative_size=None)
+            spec["changed"].append("holder")
+        elif held and not b["hard"] and rnd() < 0.6 * self.v:
+            def ok(x: dict) -> bool:
+                return (x["key"] != b["key"] and bool(x["card"].get("holder")) and str(x["card"].get("placement")) in HELD
                         and (people or str(x["card"].get("placement")) != "hand")
-                        and (not same_distance or str(x["card"].get("distance") or "mid") == spec["distance"]))
-            pool = ([x for x in self.bank if x["frame"] == donor and ok(x, False)] if moved else []) or \
-                   [x for x in self.bank if self.indoor(x["frame"]) == indoor and ok(x, True)]
+                        and str(x["card"].get("distance") or "mid") == spec["distance"])
+            pool = [x for x in self.bank if self.indoor(x["frame"]) == indoor and ok(x)]
             if pool:
                 o = self.rng.choice(pool)["card"]
                 spec.update(holder=o["holder"], placement=o.get("placement"), relative_size=None)
@@ -402,6 +441,13 @@ def coverage(recipes: list[dict], bank: list[dict], alloc: dict[str, int], la_ba
 # ── prompt writer ─────────────────────────────────────────────────────────────
 
 
+# Gemini drew yellow highlight frames and a zoomed inset of a hand + cup into a scene (2026-10-18): the drinks must be
+# plain parts of one ordinary camera frame.
+NATURAL = ("Every drink is an ordinary object drawn INTO the scene — same perspective, light, shadows and contact with "
+           "the hand or surface as everything around it. NO boxes, frames, outlines, circles, arrows, labels, insets, "
+           "zoomed close-up panels, picture-in-picture, collage or split views anywhere in the image.")
+
+
 def _drink_line(i: int, d: dict) -> str:
     def clean(x: object) -> str:
         return str(x).strip().rstrip(".;,") if x else ""
@@ -409,13 +455,13 @@ def _drink_line(i: int, d: dict) -> str:
     dist = clean(d.get("distance")).replace("_", " ")
     size = f"about {d['h_pct']:g}% of the frame height" + (f" ({clean(d['relative_size'])})" if d.get("relative_size") else "")
     bits = [f"a {d['cls'].upper()} {dist} from the camera, {size}",
-            clean(d.get("object")),
+            clean(d.get("object")) if object_fits(d.get("object"), d["cls"]) else "",
             f"held / placed: {clean(d['holder'])}" if d.get("holder") else "",
             f"in the {d['spot']}" if d.get("spot") else "",
             f"orientation {clean(d['orientation'])}" if d.get("orientation") not in (None, "", "upright") else "",
             f"occlusion: {clean(d['occlusion'])}" if d.get("occlusion") and not str(d["occlusion"]).startswith("none") else "",
             f"light: {clean(d['lighting'])}" if d.get("lighting") else "",
-            f"what makes it tricky for a detector: {clean(d['why'])}" if d.get("hard") and d.get("why") else ""]
+            f"hard to notice because: {clean(d['why'])}" if d.get("hard") and d.get("why") else ""]
     return f"{i}. " + " — ".join(x for x in bits if x) + "."
 
 
@@ -473,6 +519,7 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
             f"Drinks in the frame — {drinks_head}:",
             *dl,
             f"Also in the scene, and clearly NOT drinks: {las_txt}." if las_txt else "",
+            NATURAL,
             look, exp, col, noise, detail,
             "Real CCTV quality: mild compression smearing, detail as the DETAIL LOCK and grain as the NOISE LOCK say, "
             "natural body proportions, no text, no timestamp, no watermark, no boxes or outlines.",
@@ -489,6 +536,7 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
             f"DRINKS — {drinks_head}:",
             *dl,
             f"NOT DRINKS (look-alikes, keep them clearly non-drinks): {las_txt}." if las_txt else "",
+            NATURAL,
             look, exp, col, noise, detail,
             "IMAGE QUALITY: real CCTV — mild compression smearing; detail as the DETAIL LOCK, grain as the NOISE LOCK; "
             "natural body proportions. NO text, timestamp, watermark, boxes or outlines.",
