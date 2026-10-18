@@ -773,15 +773,25 @@ def _color_line(rec: dict) -> str:
         pass
     level = ("near-grayscale, almost no color" if sat < 0.08 else "muted, low-saturation color" if sat < 0.14
              else "natural, moderate color" if sat < 0.22 else "colorful, well-saturated")
-    cast = ("a WARM yellow-orange tint" if b_mean >= 2.0 else "a slightly warm tint" if b_mean >= 1.0
-            else "a COOL bluish tint" if b_mean <= -1.0 else "neutral white balance")
-    if a_mean <= -1.0:
+    # gpt-image warms frames on its own: on a 55-image Sunburst run, generated − source was Lab b +2.7 (yellow) and
+    # a +2.8 (red) — a brown, "hot" look — and every source with b ≥ 2 had been called "a WARM yellow-orange tint"
+    # (eval frames are mostly b +2…+7). The cast word is chosen after removing that bias, and a neutral-whites rule is
+    # always added (2026-10-18).
+    eff_b = b_mean - WARM_BIAS_B
+    cast = ("clearly warm lamp light (tungsten / sodium)" if eff_b >= 4.0 else "a faint warm tint" if eff_b >= 1.5
+            else "a cool bluish tint" if eff_b <= -2.5 else "neutral white balance")
+    if a_mean <= -1.5:
         cast += ", slightly green"
-    elif a_mean >= 1.0:
-        cast += ", slightly magenta"
-    return (f"COLOR LOCK (hard, measured on the reference — wins over the CAMERA LOOK's color words): {level} "
-            f"(saturation {sat:.0%}), {cast}. Keep exactly this color: do not desaturate, grey out or re-tint the frame "
-            "(\"muted\" CCTV color means slightly less vivid than a phone photo, not grey).")
+    neutral = ("the warmth comes from the lamps only — daylit and neutral surfaces stay neutral, no overall brown or "
+               "sepia cast" if eff_b >= 4.0 else
+               "whites and greys stay NEUTRAL (white walls, grey pavement, white cups look white / grey, not cream, "
+               "beige or golden); NO yellow, orange, red, brown or sepia cast")
+    return (f"COLOR LOCK (hard, measured on the reference): {level} (saturation {sat:.0%}), {cast}; {neutral}. Keep "
+            "exactly this color: do not desaturate, grey out, warm up or re-tint the frame (\"muted\" CCTV color means "
+            "slightly less vivid than a phone photo, not grey).")
+
+
+WARM_BIAS_B = 2.5  # Lab b the image generators add on their own (see _color_line)
 
 
 def _source_profile_block(
