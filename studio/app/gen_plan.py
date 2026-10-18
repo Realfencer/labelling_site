@@ -775,23 +775,21 @@ def _color_line(rec: dict) -> str:
              else "natural, moderate color" if sat < 0.22 else "colorful, well-saturated")
     # gpt-image warms frames on its own: on a 55-image Sunburst run, generated − source was Lab b +2.7 (yellow) and
     # a +2.8 (red) — a brown, "hot" look — and every source with b ≥ 2 had been called "a WARM yellow-orange tint"
-    # (eval frames are mostly b +2…+7). The cast word is chosen after removing that bias, and a neutral-whites rule is
-    # always added (2026-10-18).
+    # (eval frames are mostly b +2…+7). A one-sided "NO yellow / orange / brown / sepia" rule then over-corrected:
+    # b −3.7 and saturation ×0.52, grey-blue frames (12-image test, 2026-10-18). So: a small bias correction,
+    # gentle cast words, and a TWO-sided no-wash rule that also protects the colours.
     eff_b = b_mean - WARM_BIAS_B
-    cast = ("clearly warm lamp light (tungsten / sodium)" if eff_b >= 4.0 else "a faint warm tint" if eff_b >= 1.5
-            else "a cool bluish tint" if eff_b <= -2.5 else "neutral white balance")
+    cast = ("warm lamp light (tungsten / sodium)" if eff_b >= 5.0 else "slightly warm white balance" if eff_b >= 2.0
+            else "slightly cool white balance" if eff_b <= -2.0 else "neutral white balance")
     if a_mean <= -1.5:
-        cast += ", slightly green"
-    neutral = ("the warmth comes from the lamps only — daylit and neutral surfaces stay neutral, no overall brown or "
-               "sepia cast" if eff_b >= 4.0 else
-               "whites and greys stay NEUTRAL (white walls, grey pavement, white cups look white / grey, not cream, "
-               "beige or golden); NO yellow, orange, red, brown or sepia cast")
-    return (f"COLOR LOCK (hard, measured on the reference): {level} (saturation {sat:.0%}), {cast}; {neutral}. Keep "
-            "exactly this color: do not desaturate, grey out, warm up or re-tint the frame (\"muted\" CCTV color means "
-            "slightly less vivid than a phone photo, not grey).")
+        cast += ", a hint of green"
+    return (f"COLOR LOCK (hard, measured on the reference): {level} (saturation {sat:.0%}), {cast}. No colour wash in "
+            "either direction — no sepia, brown or orange filter and no grey-blue filter; skin, clothes, plants, signs "
+            "and cars keep their natural colours, exactly as vivid as stated (\"muted\" CCTV color means slightly less "
+            "vivid than a phone photo, not grey).")
 
 
-WARM_BIAS_B = 2.5  # Lab b the image generators add on their own (see _color_line)
+WARM_BIAS_B = 1.0  # Lab b the image generators add on their own (see _color_line)
 
 
 def _source_profile_block(
