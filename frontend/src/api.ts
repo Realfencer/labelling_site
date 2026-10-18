@@ -48,7 +48,7 @@ export type ReviewSummary = {
   model_check: ReviewModelCheck;
   version: number;
 };
-export type ReviewStatus = { version: number; summary: ReviewSummary; items?: Record<string, ReviewItemStatus | null> };
+export type ReviewStatus = { version: number; summary: ReviewSummary; keys_sig?: string; items?: Record<string, ReviewItemStatus | null> };
 
 const API = "/api";
 const REQUEST_TIMEOUT_MS = 30000;
@@ -288,6 +288,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ item_key: itemKey, on }),
     }),
+  /** Checked images (fixed / looks right) leave this tab's Review list; returns the shorter list. */
+  ownReviewDrop: (itemKeys: string[]) =>
+    request<AppState>("/own/review/drop", { method: "POST", body: JSON.stringify({ item_keys: itemKeys }), timeoutMs: 30000 }),
   ownReviewModelCheck: (action: "start" | "stop") =>
     request<ReviewModelCheck>("/own/review/model-check", { method: "POST", body: JSON.stringify({ action }), timeoutMs: 30000 }),
   listOwnDays: () =>

@@ -1036,6 +1036,10 @@ class OwnReviewDismissBody(BaseModel):
     on: bool = True
 
 
+class OwnReviewDropBody(BaseModel):
+    item_keys: list[str] = Field(default_factory=list, max_length=2000)
+
+
 class OwnReviewModelCheckBody(BaseModel):
     action: str = Field(default="start", pattern="^(start|stop)$")
 
@@ -1059,7 +1063,8 @@ def own_review_status(state: AppStateDep, since: int = -1) -> dict:
     store.auto_model_check(getattr(state, "miner_folder", None))
     keys = state.review_keys() if state.own_day == label_audit.REVIEW_DAY else []
     store.refresh_if_changed(keys[:3000])
-    out: dict = {"version": store.version, "summary": store.summary()}
+    # The list itself (it grows when a new edit makes an image risky): the page reloads it when this changes.
+    out: dict = {"version": store.version, "summary": store.summary(), "keys_sig": f"{len(keys)}:{hash(tuple(keys)) & 0xFFFFFFFF:x}"}
     if since != store.version:
         out["items"] = {k: store.status_of(k) for k in keys}
     return out
@@ -1071,6 +1076,15 @@ def own_review_dismiss(body: OwnReviewDismissBody, state: AppStateDep) -> dict:
     store = state.audit_store()
     store.dismiss(body.item_key, body.on)
     return {"ok": True, "status": store.status_of(body.item_key), "version": store.version}
+
+
+@app.post("/api/own/review/drop")
+def own_review_drop(body: OwnReviewDropBody, state: AppStateDep) -> dict:
+    """Checked images leave this tab's Review list; returns the shorter list."""
+    if state.own_day != label_audit.REVIEW_DAY:
+        raise HTTPException(status_code=400, detail="Not in the Review list")
+    state.drop_review_keys(body.item_keys)
+    return _fast_json(state.to_public_state(lite=True, boxes_window=8))
 
 
 @app.post("/api/own/review/model-check")

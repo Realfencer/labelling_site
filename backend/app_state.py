@@ -248,6 +248,20 @@ class ReviewAppState:
     def review_keys(self) -> list[str]:
         return [str(item.item_key) for item in self._review_items()]
 
+    def drop_review_keys(self, keys: list[str]) -> int:
+        """Take checked images (fixed, or marked "looks right") off this tab's Review list, so it empties as people
+        work. An image that is still to check stays; one that gets risky again later (a new edit) comes back."""
+        store = self.audit_store()
+        gone = set()
+        for k in keys:
+            st = store.status_of(str(k))
+            if st is None or not st["open"]:
+                gone.add(str(k))
+        if gone:
+            self._review_keys = [k for k in self._review_keys if k not in gone]
+            self._review_cache = None
+        return len(gone)
+
     def _local_items_for_day(self, day: str) -> list[core.ChallengeRecord]:
         day = str(day or "").strip()
         if not day:
@@ -5192,6 +5206,17 @@ class ReviewAppState:
             for i, item in enumerate(self.challenges):
                 if core.item_keys_match(item.item_key, key):
                     return i
+            # Review list: an image that just left the list (fixed / looks right) can still have a save in flight.
+            # Put it back rather than fall through to the index below, which would be a different image now.
+            if self.review_mode == "local" and self.own_day == label_audit.REVIEW_DAY:
+                hit = next((it for it in self.local_items if core.item_keys_match(it.item_key, key)), None)
+                if hit is not None:
+                    self._review_keys.append(str(hit.item_key))
+                    self._review_cache = None
+                    for i, item in enumerate(self.challenges):
+                        if core.item_keys_match(item.item_key, key):
+                            return i
+                raise IndexError(f"Unknown item_key: {key}")
         idx = self.current_index if index is None else index
         if 0 <= idx < len(self.challenges):
             return idx

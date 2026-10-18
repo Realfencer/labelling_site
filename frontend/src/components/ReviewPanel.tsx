@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Loader2, RotateCcw, ShieldAlert, ThumbsUp } from "lucide-react";
-import { api, type ReviewIssue } from "../api";
+import type { ReviewIssue } from "../api";
 import type { DetectionBox } from "../types";
 import { useReview } from "../store/useReview";
-import { syncReviewNow } from "../hooks/useReviewSync";
 import { cn } from "../lib/utils";
 
 const KIND_STYLE: Record<string, string> = {
@@ -38,39 +37,42 @@ function describe(issue: ReviewIssue, boxes: DetectionBox[], names: string[]): s
   }
 }
 
-/** Own Review: what looks wrong on this image, live — fixed by a save, or marked "looks right" (O). */
+/** Own Review: what looks wrong on this image, live — fixed by a save, or marked "looks right" (Enter). */
 export default function ReviewPanel({
   itemKey,
   boxes,
   classNames,
   openCount,
   totalCount,
+  cursor,
   onFocus,
   onHover,
+  onLooksRight,
 }: {
   itemKey: string | null;
   boxes: DetectionBox[];
   classNames: string[];
   openCount: number;
   totalCount: number;
+  /** The finding ` / Shift+` is on (-1 = none). */
+  cursor: number;
   onFocus: (issue: ReviewIssue) => void;
   onHover: (issue: ReviewIssue | null) => void;
+  onLooksRight: (on: boolean) => void;
 }) {
   const st = useReview((s) => (itemKey ? s.items[itemKey] : undefined));
-  const [busy, setBusy] = useState(false);
+  const lookRight = useReview((s) => (itemKey && s.lookRight?.key === itemKey ? s.lookRight : null));
+  const busy = false;
   const issues = (st?.issues ?? []).filter((i) => i.risk > 0);
-
-  const setLooksRight = async (on: boolean) => {
-    if (!itemKey) return;
-    setBusy(true);
-    try {
-      const r = await api.ownReviewDismiss(itemKey, on);
-      useReview.getState().patchItem(itemKey, r.status, r.version);
-      syncReviewNow();
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Countdown while a "looks right" can still be undone.
+  const [, setNow] = useState(0);
+  useEffect(() => {
+    if (!lookRight) return;
+    const t = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(t);
+  }, [lookRight]);
+  const secsLeft = lookRight ? Math.max(0, Math.ceil((lookRight.until - Date.now()) / 1000)) : 0;
+  const setLooksRight = (on: boolean) => onLooksRight(on);
 
   const fixed = st && !st.open && !st.dismissed;
   return (
@@ -98,7 +100,7 @@ export default function ReviewPanel({
         </span>
       ) : (
         <span className="inline-flex items-center gap-1 font-extrabold text-emerald-600 dark:text-emerald-300">
-          <Check className="h-3.5 w-3.5" /> {fixed ? "Fixed" : "Looks right"}
+          <Check className="h-3.5 w-3.5" /> {fixed ? "Fixed · leaves the list when you move on" : secsLeft > 0 ? `Looks right · next in ${secsLeft}s` : "Looks right"}
         </span>
       )}
 
@@ -109,11 +111,12 @@ export default function ReviewPanel({
           onClick={() => onFocus(issue)}
           onMouseEnter={() => onHover(issue)}
           onMouseLeave={() => onHover(null)}
-          title="Zoom to it"
+          title="Zoom to it (` next · Shift+` previous)"
           className={cn(
             "rounded-md border px-1.5 py-0.5 font-bold transition hover:brightness-110",
             KIND_STYLE[issue.kind] ?? "border-slate-300",
             st && !st.open && "opacity-60",
+            k === cursor && "ring-2 ring-offset-1 ring-sky-400 ring-offset-transparent",
           )}
         >
           {describe(issue, boxes, classNames)}
@@ -121,26 +124,26 @@ export default function ReviewPanel({
       ))}
 
       <span className="ml-auto tabular-nums text-slate-500 dark:text-slate-400">
-        {openCount} of {totalCount} still to check
+        {openCount} of {totalCount} still to check · ` = next reason
       </span>
       {st?.dismissed ? (
         <button
           type="button"
           disabled={busy}
-          onClick={() => void setLooksRight(false)}
+          onClick={() => setLooksRight(false)}
           className="inline-flex items-center gap-1 rounded-md border border-slate-300 px-2 py-0.5 font-bold text-slate-600 hover:border-amber-400 disabled:opacity-50 dark:border-slate-600 dark:text-slate-300"
         >
-          <RotateCcw className="h-3 w-3" /> Undo
+          <RotateCcw className="h-3 w-3" /> Undo{secsLeft > 0 ? ` (${secsLeft})` : ""}
         </button>
       ) : st?.open ? (
         <button
           type="button"
           disabled={busy}
-          onClick={() => void setLooksRight(true)}
-          title="The labels are right: take this image off the list (O)"
+          onClick={() => setLooksRight(true)}
+          title="The labels are right: take this image off the list (Enter)"
           className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-0.5 font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
         >
-          <ThumbsUp className="h-3 w-3" /> Looks right (O)
+          <ThumbsUp className="h-3 w-3" /> Looks right (Enter)
         </button>
       ) : null}
     </div>

@@ -18,6 +18,8 @@ type ResizeMode = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | null;
 type Transform = { scale: number; offsetX: number; offsetY: number };
 /** A zoom window in image terms (centre in image pixels, zoom relative to "fit"): looks the same on any screen size. */
 export type ViewShare = { cx: number; cy: number; z: number };
+/** A reason drawn around a box (Own Review): dashed frame in ``color`` with a tag; ``strong`` = the one being looked at. */
+export type Callout = { x1: number; y1: number; x2: number; y2: number; text: string; color: string; strong?: boolean };
 
 interface Props {
   fullUrl: string;
@@ -39,6 +41,8 @@ interface Props {
   onViewChange?: (v: ViewShare) => void;
   /** Smoothly move to this zoom window (a teammate is asking about this spot). */
   focusView?: ViewShare | null;
+  /** Reasons to draw around boxes (Own Review). */
+  callouts?: Callout[];
   canvasBg?: string;
   sceneId?: string;
   /** Per-box match vs left-pane GT (right panel compare mode). */
@@ -363,6 +367,7 @@ export default function AnnotationCanvas({
   onTransformChange,
   onViewChange,
   focusView,
+  callouts,
   canvasBg = "#0b1220",
   sceneId,
   boxCompare,
@@ -515,6 +520,8 @@ export default function AnnotationCanvas({
     [],
   );
 
+  const calloutsRef = useRef(callouts);
+  calloutsRef.current = callouts;
   const viewCbRef = useRef(onViewChange);
   viewCbRef.current = onViewChange;
   const applyView = useCallback(
@@ -1083,6 +1090,42 @@ export default function AnnotationCanvas({
       ctx.restore();
     }
 
+    // Review reasons: a dashed frame just outside the box and a tag saying what looks wrong.
+    const notes = calloutsRef.current;
+    if (notes?.length) {
+      ctx.save();
+      const fontPx = Math.max(9, 11.5 / scale);
+      ctx.font = `800 ${fontPx}px Inter, Segoe UI, sans-serif`;
+      for (const n of notes) {
+        const pad = (n.strong ? 5 : 3) / scale;
+        const x1 = Math.max(0, Math.min(n.x1, n.x2)) - pad;
+        const y1 = Math.max(0, Math.min(n.y1, n.y2)) - pad;
+        const x2 = Math.min(width, Math.max(n.x1, n.x2)) + pad;
+        const y2 = Math.min(height, Math.max(n.y1, n.y2)) + pad;
+        ctx.globalAlpha = n.strong ? 1 : 0.85;
+        ctx.setLineDash([6 / scale, 4 / scale]);
+        ctx.lineWidth = (n.strong ? 3 : 2) / scale;
+        ctx.shadowColor = n.color;
+        ctx.shadowBlur = (n.strong ? 10 : 4) / scale;
+        ctx.strokeStyle = n.color;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        const padX = 5 / scale;
+        const tw = ctx.measureText(n.text).width;
+        const th = fontPx + 6 / scale;
+        let ty = y1 - th - 2 / scale;
+        if (ty < 0) ty = Math.min(y2 + 2 / scale, height - th);
+        let tx = x1;
+        if (tx + tw + padX * 2 > width) tx = Math.max(0, width - tw - padX * 2);
+        ctx.fillStyle = n.color;
+        ctx.fillRect(tx, ty, tw + padX * 2, th);
+        ctx.fillStyle = "#0b1220";
+        ctx.fillText(n.text, tx + padX, ty + fontPx + 1 / scale);
+      }
+      ctx.restore();
+    }
+
     ctx.restore(); // sceneZoom
     ctx.restore();
   }, [boxes, canvasBg, classNames, currentClass, draftBox, editable, height, offset, scale, selectedIndex, width]);
@@ -1429,7 +1472,7 @@ export default function AnnotationCanvas({
   useEffect(() => {
     if (hasImage) scheduleDraw();
     kickAnim();
-  }, [hasImage, scheduleDraw, kickAnim, boxes, draftBox, offset, scale, selectedIndex, boxCompare, ghostBoxes]);
+  }, [hasImage, scheduleDraw, kickAnim, boxes, draftBox, offset, scale, selectedIndex, boxCompare, ghostBoxes, callouts]);
 
   useEffect(() => {
     const container = containerRef.current;

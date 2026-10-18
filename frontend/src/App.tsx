@@ -29,7 +29,7 @@ import { useTeam } from "./store/useTeam";
 import { useKeys } from "./store/useKeys";
 import { useTeamSync } from "./hooks/useTeamSync";
 import { dropPendingSave, flushOnUnload, hasPendingSaves, retrySave, setSaveConflictHandler } from "./store/saveRetry";
-import AnnotationCanvas, { type ViewShare } from "./components/AnnotationCanvas";
+import AnnotationCanvas, { type Callout, type ViewShare } from "./components/AnnotationCanvas";
 import ReviewPanel from "./components/ReviewPanel";
 import { useReviewSync, syncReviewNow } from "./hooks/useReviewSync";
 import { useReview, reviewIsOpen } from "./store/useReview";
@@ -606,14 +606,26 @@ function neighborNeedsWorkIndex(
     const key = app.challenges[from]?.item_key;
     if (key) pos = indices.findIndex((i) => itemKeysMatch(app.challenges[i]?.item_key, key));
   }
+  let res = -1;
   if (pos < 0) {
-    if (dir > 0) return indices.find((i) => i > from) ?? -1;
-    for (let k = indices.length - 1; k >= 0; k -= 1) {
-      if (indices[k] < from) return indices[k];
+    if (dir > 0) res = indices.find((i) => i > from) ?? -1;
+    else {
+      for (let k = indices.length - 1; k >= 0; k -= 1) {
+        if (indices[k] < from) {
+          res = indices[k];
+          break;
+        }
+      }
     }
-    return -1;
+  } else {
+    res = indices[pos + dir] ?? -1;
   }
-  return indices[pos + dir] ?? -1;
+  // Review: the list is worked until empty, so going past the end wraps to what is still left.
+  if (res < 0 && app.review_mode === "local" && app.own_day === "review") {
+    const rest = indices.filter((i) => i !== from);
+    if (rest.length) res = dir > 0 ? rest[0] : rest[rest.length - 1];
+  }
+  return res;
 }
 
 function matchesStripFilter(c: ChallengeItem | undefined, filter: StripFilter): boolean {
@@ -3892,21 +3904,49 @@ export default function App({
     }
   }, [teamLabels]);
 
-  /** Own Review: O = these labels look right (take the image off the list), O again = undo. */
+  /** Own Review: ` / Shift+` = next / previous reason on this image (set once the panel is on screen). */
+  const reviewCycleRef = useRef<((dir: 1 | -1) => void) | null>(null);
+  /** Own Review: the list has nothing left to check — leave it (set below). */
+  const reviewFinishRef = useRef<(() => void) | null>(null);
+  const lookRightTimerRef = useRef<number | null>(null);
+  /** Own Review: Enter = these labels look right, Enter again (or Undo) = no. Unless undone within 5 s, the next image to
+   *  check opens and this one leaves the list. */
+  const setReviewLooksRight = useCallback(
+    (on: boolean) => {
+      const key = useLabeler.getState().detail?.challenge?.item_key;
+      if (!key) return;
+      const st = useReview.getState().items[key];
+      if (!st || (!st.open && !st.dismissed)) return; // nothing to do / fixed already
+      if (Boolean(st.dismissed) === on) return;
+      if (lookRightTimerRef.current != null) window.clearTimeout(lookRightTimerRef.current);
+      lookRightTimerRef.current = null;
+      useReview.getState().setLookRight(on ? { key, until: Date.now() + 5000 } : null);
+      if (on) {
+        lookRightTimerRef.current = window.setTimeout(() => {
+          lookRightTimerRef.current = null;
+          useReview.getState().setLookRight(null);
+          if (useLabeler.getState().detail?.challenge?.item_key !== key) return;
+          const app = useLabeler.getState().appState;
+          const cur = detailIndexRef.current ?? app?.current_index ?? -1;
+          if (neighborNeedsWorkIndex(cur, 1) >= 0) requestNeedsWorkNav(1);
+          else reviewFinishRef.current?.();
+        }, 5000);
+      }
+      void api
+        .ownReviewDismiss(key, on)
+        .then((r) => {
+          useReview.getState().patchItem(key, r.status, r.version);
+          syncReviewNow();
+        })
+        .catch((err) => setError(String(err)));
+    },
+    [requestNeedsWorkNav, setError],
+  );
   const toggleReviewLooksRight = useCallback(() => {
     const key = useLabeler.getState().detail?.challenge?.item_key;
-    if (!key) return;
-    const st = useReview.getState().items[key];
-    if (!st) return;
-    if (!st.open && !st.dismissed) return; // fixed already
-    void api
-      .ownReviewDismiss(key, !st.dismissed)
-      .then((r) => {
-        useReview.getState().patchItem(key, r.status, r.version);
-        syncReviewNow();
-      })
-      .catch((err) => setError(String(err)));
-  }, [setError]);
+    const st = key ? useReview.getState().items[key] : undefined;
+    if (st) setReviewLooksRight(!st.dismissed);
+  }, [setReviewLooksRight]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3915,9 +3955,14 @@ export default function App({
         return;
       }
       if (modalOpenRef.current) return;
-      if ((e.key === "o" || e.key === "O") && !(e.ctrlKey || e.metaKey) && app.review_mode === "local" && app.own_day === "review") {
-        e.preventDefault();
+      if (e.key === "Enter" && !(e.ctrlKey || e.metaKey || e.altKey) && app.review_mode === "local" && app.own_day === "review") {
+        e.preventDefault(); // Enter = looks right (Enter again within 5 s = undo)
         if (!e.repeat) toggleReviewLooksRight();
+        return;
+      }
+      if (e.code === "Backquote" && !(e.ctrlKey || e.metaKey || e.altKey) && app.review_mode === "local" && app.own_day === "review") {
+        e.preventDefault(); // ` = next reason on this image, Shift+` = previous (zooms to it)
+        reviewCycleRef.current?.(e.shiftKey ? -1 : 1);
         return;
       }
       const cur = detailIndexRef.current ?? app.current_index;
@@ -4450,7 +4495,20 @@ export default function App({
   const activeRefVariant = referenceVariants[activeRefVariantIdx] || null;
   // ---- Own Review (label audit): live findings for the open image, highlighted on the canvas -------------
   const isReviewDay = appState?.review_mode === "local" && appState?.own_day === "review";
-  useReviewSync(Boolean(isReviewDay));
+  // The server's list changed (an edit made another image risky, or images left): reload it, unless a save is in flight.
+  const reloadReviewList = useCallback(() => {
+    if (hasPendingSaves() || dirtyItemKeyRef.current || saveSnapshotRef.current) return;
+    void api
+      .getState()
+      .then((s) => {
+        if (s.review_mode !== "local" || s.own_day !== "review") return;
+        workspacePoolsRef.current.own = s;
+        applyState(s);
+        if (!s.challenges.length) reviewFinishRef.current?.();
+      })
+      .catch(() => {});
+  }, []);
+  useReviewSync(Boolean(isReviewDay), reloadReviewList);
   const reviewItems = useReview((s) => s.items);
   const [reviewHover, setReviewHover] = useState<ReviewIssue | null>(null);
   const reviewKey = isReviewDay ? detail?.challenge?.item_key ?? null : null;
@@ -4484,6 +4542,96 @@ export default function App({
     [beginBoxInspect, boxes.length],
   );
   const inspectTarget = boxInspect ? boxInspect.box ?? boxes[boxInspect.idx] ?? null : null;
+
+  // ` / Shift+` walk through the reasons of the open image; the one in focus is drawn strongest.
+  const [reviewCursor, setReviewCursor] = useState(-1);
+  useEffect(() => {
+    setReviewCursor(-1);
+    if (lookRightTimerRef.current != null) {
+      window.clearTimeout(lookRightTimerRef.current);
+      lookRightTimerRef.current = null;
+    }
+    useReview.getState().setLookRight(null);
+  }, [reviewKey]);
+  const reviewOpenIssues = useMemo(() => (reviewStatus?.issues ?? []).filter((i) => i.risk > 0), [reviewStatus]);
+  reviewCycleRef.current = (dir) => {
+    const n = reviewOpenIssues.length;
+    if (!n) return;
+    const next = reviewCursor < 0 ? (dir > 0 ? 0 : n - 1) : (reviewCursor + dir + n) % n;
+    setReviewCursor(next);
+    focusReviewIssue(reviewOpenIssues[next]);
+  };
+  // What looks wrong, written next to the box itself.
+  const reviewNames = detail?.class_names?.length ? detail.class_names : appState?.model_class_names ?? [];
+  const reviewCallouts = useMemo<Callout[]>(() => {
+    if (!reviewStatus?.open) return [];
+    const nm = (c: number | undefined) => (c != null ? reviewNames[c] ?? `class ${c}` : "?");
+    const out: Callout[] = [];
+    reviewOpenIssues.forEach((issue, k) => {
+      const strong = k === reviewCursor || reviewHover === issue;
+      const at = (i: number | undefined) => (i != null && i >= 0 ? boxes[i] : undefined);
+      const b = at(issue.i);
+      if (issue.kind === "missed" && issue.box) {
+        const [x1, y1, x2, y2] = issue.box;
+        out.push({ x1, y1, x2, y2, text: `UNLABELED ${nm(issue.model_cls).toUpperCase()}?`, color: "#22d3ee", strong });
+        return;
+      }
+      if (!b) return;
+      const text =
+        issue.kind === "huge"
+          ? "BIG BOX · NO DRINK HERE"
+          : issue.kind === "tiny"
+            ? "TINY BOX"
+            : issue.kind === "stacked"
+              ? "2 BOXES ON 1 OBJECT"
+              : issue.kind === "nested"
+                ? "BOX IN BOX"
+                : issue.kind === "wrong"
+                  ? `MODEL: ${nm(issue.model_cls).toUpperCase()} ${Math.round((issue.conf ?? 0) * 100)}%`
+                  : issue.text.toUpperCase();
+      const color =
+        issue.kind === "huge" ? "#fb7185" : issue.kind === "tiny" ? "#fb923c" : issue.kind === "wrong" ? "#fbbf24" : "#e879f9";
+      out.push({ x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, text, color, strong });
+      const o = at(issue.other);
+      if ((issue.kind === "stacked" || issue.kind === "nested") && o) {
+        out.push({ x1: o.x1, y1: o.y1, x2: o.x2, y2: o.y2, text: issue.kind === "stacked" ? "2ND BOX" : "OUTER BOX", color, strong });
+      }
+    });
+    return out;
+  }, [reviewStatus, reviewOpenIssues, reviewCursor, reviewHover, boxes, reviewNames]);
+
+  // Checked images (fixed, or "looks right") leave the list once you move on — the list is worked until it is empty.
+  const saveAt = useTeam((s) => s.save.at);
+  useEffect(() => {
+    if (!isReviewDay) return;
+    const t = window.setTimeout(() => {
+      const app = useLabeler.getState().appState;
+      if (!app || app.own_day !== "review" || hasPendingSaves()) return;
+      const items = useReview.getState().items;
+      const cur = useLabeler.getState().detail?.challenge?.item_key;
+      const busy = new Set([dirtyItemKeyRef.current, saveSnapshotRef.current?.itemKey].filter(Boolean) as string[]);
+      const drop = app.challenges
+        .filter((c) => c.item_key !== cur && !busy.has(c.item_key) && items[c.item_key] !== undefined && !reviewIsOpen(items[c.item_key]))
+        .map((c) => c.item_key);
+      if (!drop.length) return;
+      void api
+        .ownReviewDrop(drop)
+        .then((s) => {
+          workspacePoolsRef.current.own = s;
+          applyState(s);
+          clearDetailCache();
+          if (!s.challenges.length) reviewFinishRef.current?.();
+        })
+        .catch(() => {});
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [isReviewDay, reviewItems, reviewKey, saveAt]);
+  reviewFinishRef.current = () => {
+    const items = useReview.getState().items;
+    if ((useLabeler.getState().appState?.challenges ?? []).some((c) => reviewIsOpen(items[c.item_key]))) return;
+    useTeam.getState().setNotice("Review list is empty — nothing left to check");
+    void leaveOwnDayRef.current?.();
+  };
 
   if (!appState) {
     return <BrandLoader label="Opening workspace" hint={`Loading ${topicSlug}`} accent="emerald" />;
@@ -5135,8 +5283,13 @@ export default function App({
               classNames={names}
               openCount={appState.challenges.filter((c) => c.loaded && reviewIsOpen(reviewItems[c.item_key])).length}
               totalCount={appState.challenges.length}
-              onFocus={focusReviewIssue}
+              cursor={reviewCursor}
+              onFocus={(issue) => {
+                setReviewCursor(reviewOpenIssues.indexOf(issue));
+                focusReviewIssue(issue);
+              }}
               onHover={setReviewHover}
+              onLooksRight={setReviewLooksRight}
             />
           )}
           {(() => {
@@ -5157,7 +5310,7 @@ export default function App({
             const ownBaseBoxes =
               (itemKey && winnerPredCache.get(itemKey)) || fromDetail;
             const ownHint =
-              `C/V inspect · R guides${ownGuides ? " on" : ""} · E dual${ownDualView ? " on" : " off"} · Z/X zoom · N next / B back (NEW) · Tab/Q = →/← · M Done`;
+              `C/V inspect · R guides${ownGuides ? " on" : ""} · E dual${ownDualView ? " on" : " off"} · Z/X zoom · N next / B back (NEW) · Tab/Q = →/← · M Done${isReviewDay ? " · \` reason · Enter looks right" : ""}`;
             const ownUrls = {
               fullUrl: challengeImageUrl(
                 idx,
@@ -5216,6 +5369,7 @@ export default function App({
                       linkedFocusIdxs={reviewFocusIdxs}
                       ghostBoxes={isReviewDay ? reviewGhosts : undefined}
                       linkedGhostIdxs={reviewGhostFocus}
+                      callouts={isReviewDay ? reviewCallouts : undefined}
                       {...peekProps}
                     />
                   </Pane>
@@ -5277,6 +5431,7 @@ export default function App({
                   linkedFocusIdxs={reviewFocusIdxs}
                   ghostBoxes={isReviewDay ? reviewGhosts : undefined}
                   linkedGhostIdxs={reviewGhostFocus}
+                  callouts={isReviewDay ? reviewCallouts : undefined}
                   {...peekProps}
                 />
               </Pane>
