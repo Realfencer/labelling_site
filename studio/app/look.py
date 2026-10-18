@@ -279,3 +279,35 @@ def noise_lock_line(path: str | Path | None) -> str:
     return (f"NOISE LOCK (hard, measured on the reference — wins over every noise / grain word elsewhere): {words} "
             f"(grain {g:.2f}). Do NOT add grain, noise or speckle beyond this"
             + (" — this camera's image is clean." if g < 0.45 else "."))
+
+
+# ── detail (DETAIL LOCK) ──────────────────────────────────────────────────────
+# Measured fine texture in flat areas + edge crispness. Generated images came out SMOOTHER than their sources
+# (fine texture ×0.74, acutance ×0.92 on a 998-image run, 2026-10-18): the CAMERA LOOK captions call most frames
+# "soft, smeared, waxy faces" and the prompts said "soft focus" — so the generator painted waxy, smoothed surfaces.
+# Levels from the eval set (fine_texture p10 1.3 / median 2.8 / p90 4.65).
+DETAIL_LEVELS = ((1.6, "SOFT — fine texture (fabric, hair, floor and wall grain) is smoothed away and small objects are soft outlines; keep exactly this softness"),
+                 (2.6, "MEDIUM — some fine texture is visible (fabric folds, floor tiles, hair strands at close range); faces and small text are not readable"),
+                 (3.6, "DETAILED — clear fine texture on clothing, floors and walls with clean edges; faces and small text are still not readable"),
+                 (99.0, "CRISP — strong fine texture and crisp edges everywhere (still a security camera, not a studio photo)"))
+_detail_cache: dict[str, dict] = {}
+
+
+def detail_lock_line(path: str | Path | None) -> str:
+    """DETAIL LOCK for a source frame: its measured fine texture / edge crispness in absolute words."""
+    if not path:
+        return ""
+    p = Path(path)
+    try:
+        key = f"{p}:{_sig(p)}"
+    except OSError:
+        return ""
+    if key not in _detail_cache:
+        _detail_cache[key] = measure(p)
+    m = _detail_cache[key]
+    ft, ac = float(m["fine_texture"]), float(m["acutance"])
+    words = next(w for top, w in DETAIL_LEVELS if ft < top)
+    edges = "edges slightly smeared" if ac < 1.55 else "edges crisp" if ac > 1.72 else "edges normal for CCTV"
+    return (f"DETAIL LOCK (hard, measured on the reference — wins over every soft / blurry / smeared / waxy word "
+            f"elsewhere): {words}; {edges} (texture {ft:.1f}, acutance {ac:.2f}). Do NOT smooth surfaces, skin or "
+            "clothing into a waxy, painted or airbrushed look" + (" — and do not sharpen beyond this either." if ft < 1.6 else "."))

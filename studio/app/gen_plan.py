@@ -127,11 +127,12 @@ CCTV_APPEARANCE = """CCTV / SURVEILLANCE CAMERA APPEARANCE (match the eval frame
 - CAMERA: wall or ceiling mount about 2–3.5 m up, looking DOWN at roughly 25–45° — people are seen slightly from
   above. Lens: follow this source's CAMERA LOOK (field of view, barrel distortion); without one, a wide-angle lens with
   mild barrel distortion — no fisheye circle, no black rounded corners. Natural body proportions.
-- IMAGE QUALITY: follow this source's CAMERA LOOK and IMAGE QUALITY LOCK (focus, grain, color, exposure, motion
-  blur) — every frame of the eval set has its own camera look. In general: CCTV softness —
-  fine texture, printed text and small objects are NOT resolved; grain exactly as this source's NOISE LOCK says
-  (many eval frames are clean — then no visible grain at all); mild compression; the reference's own tone curve and exposure (see EXPOSURE LOCK); slightly muted full color. Never
-  photo-sharp; no HDR, no bokeh, no cinematic grading.
+- IMAGE QUALITY: follow this source's measured locks — DETAIL LOCK (texture / edges), NOISE LOCK (grain), COLOR LOCK
+  and EXPOSURE LOCK — plus its CAMERA LOOK (lens, motion, compression); every frame of the eval set has its own look.
+  In general: printed text and faces are not readable; grain exactly as the NOISE LOCK says (many eval frames are
+  clean — then no visible grain at all); mild compression; the reference's own tone curve, exposure and color. Never
+  a studio photo; no HDR, no bokeh, no cinematic grading, and no waxy, airbrushed smoothing either.
+
   Compression shows as SMEARING of fine detail only — measured on the eval set: no visible 8×8 block grid, so never
   paint blocky / pixelated macroblocks, even where a CAMERA LOOK mentions macroblocking.
 - NO OVERLAY TEXT: no timestamp, date, camera name or any other text."""
@@ -684,17 +685,11 @@ def _motion_level(rec: dict, stats: dict[str, list[float]]) -> str:
 def _degradation_block(rec: dict, stats: dict[str, list[float]], caption: dict) -> str:
     """IMAGE QUALITY LOCK: measured blur / grain / motion / per-class drink softness, ranked within the eval set."""
     lines = []
-    sp = _pct(stats, "sharpness", rec.get("sharpness"))
-    if sp is not None:
-        if sp <= 0.33:
-            lines.append(f"Overall focus: SOFT — among the blurriest third of the eval set (pct {sp:.0%}): smeared fine "
-                         "texture, mushy background, no crisp edges anywhere.")
-        elif sp <= 0.66:
-            lines.append(f"Overall focus: MEDIUM-SOFT (pct {sp:.0%}): edges slightly smeared, fine texture (hair, fabric, "
-                         "printed text) not resolved.")
-        else:
-            lines.append(f"Overall focus: among the crisper frames of this set (pct {sp:.0%}) — still CCTV-soft, never "
-                         "photo-sharp; fine texture and printed text stay unresolved.")
+    from app.look import detail_lock_line
+
+    dl = detail_lock_line(rec.get("path"))  # absolute, measured (a within-set rank called most frames "SOFT")
+    if dl:
+        lines.append(dl)
     from app.look import noise_lock_line
 
     nl = noise_lock_line(rec.get("path"))  # absolute, measured grain (a within-set rank called clean frames "grainy")

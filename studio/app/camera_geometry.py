@@ -144,9 +144,11 @@ def camera_lock_line(g: dict | None) -> str:
     if g.get("person_h_max"):
         near = round(g["person_h_max"] * 100)
         typ = round((g.get("person_h_med") or g["person_h_max"]) * 100)
-        bits.append(f"the people nearest the camera are about {near}% of the frame height tall (typical person "
-                    f"≈ {typ}%) — keep the camera THIS close to the people"
-                    + ("; do NOT pull the camera back or widen the view" if is_closeup(g) else ""))
+        # a maximum, not only "this close": generated people came out ×1.28 bigger than the source's (2026-10-18)
+        bits.append(f"the NEAREST person is about {near}% of the frame height tall and nobody is bigger or closer to the "
+                    f"camera than that; most people are about {typ}% tall"
+                    + ("; do NOT pull the camera back or widen the view" if is_closeup(g) else
+                       "; do NOT move the camera closer or zoom in"))
     if not bits:
         return ""
     return ("CAMERA LOCK (hard, measured on the reference — keep it; only the place, layout and people are new): "

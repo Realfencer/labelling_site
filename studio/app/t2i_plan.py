@@ -440,6 +440,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
     from app.look import noise_lock_line
 
     noise = noise_lock_line(src["record"].get("path"))
+    from app.look import detail_lock_line
+
+    detail = detail_lock_line(src["record"].get("path"))
     las_txt = "; ".join(f"{x['object']} (looks a bit like a {x['resembles']}, but it is NOT a drink)" for x in las)
 
     def j(*bits: object, sep: str = "; ") -> str:  # joins only the fields the card filled
@@ -453,8 +456,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
     ppl = (j(f"{crowd['count']} people" + (f" ({crowd['density']})" if crowd.get("density") else ""),
              crowd.get("activities"), crowd.get("appearance")) if crowd.get("count") else "no people in view")
     measured = "camera ≈" in lock  # the measured height / tilt win over the card's estimate (no contradictions)
+    sized = "NEAREST person" in lock  # measured person size wins over the card's estimate
     camera = j("" if measured else cam.get("height"), "" if measured else cam.get("tilt"),
-               f"{cam['lens']} lens" if cam.get("lens") else "", cam.get("nearest_person"))
+               f"{cam['lens']} lens" if cam.get("lens") else "", "" if sized else cam.get("nearest_person"))
     drinks_head = (f"exactly {k} ({count_txt}); every one is a real, physically present object, exactly as small and as "
                    "hard to see as described, spread over the frame at the given spots; never sharpened, enlarged, lit "
                    "up or isolated")
@@ -469,9 +473,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
             f"Drinks in the frame — {drinks_head}:",
             *dl,
             f"Also in the scene, and clearly NOT drinks: {las_txt}." if las_txt else "",
-            look, exp, col, noise,
-            "Real CCTV quality: soft focus, mild compression smearing, grain only as the NOISE LOCK says, natural body "
-            "proportions, no text, no timestamp, no watermark, no boxes or outlines.",
+            look, exp, col, noise, detail,
+            "Real CCTV quality: mild compression smearing, detail as the DETAIL LOCK and grain as the NOISE LOCK say, "
+            "natural body proportions, no text, no timestamp, no watermark, no boxes or outlines.",
         ]
     else:
         parts = [
@@ -485,9 +489,9 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
             f"DRINKS — {drinks_head}:",
             *dl,
             f"NOT DRINKS (look-alikes, keep them clearly non-drinks): {las_txt}." if las_txt else "",
-            look, exp, col, noise,
-            "IMAGE QUALITY: real CCTV — soft, mild compression smearing, grain only as the NOISE LOCK says; natural "
-            "body proportions. NO text, timestamp, watermark, boxes or outlines.",
+            look, exp, col, noise, detail,
+            "IMAGE QUALITY: real CCTV — mild compression smearing; detail as the DETAIL LOCK, grain as the NOISE LOCK; "
+            "natural body proportions. NO text, timestamp, watermark, boxes or outlines.",
         ]
     return "\n".join(p.strip() for p in parts if p and p.strip())
 

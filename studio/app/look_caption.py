@@ -113,13 +113,20 @@ def camera_look_line(look: dict | None) -> str:
         return ""
     import re
 
-    # noise / grain is left to the measured NOISE LOCK: the captions call almost every frame "moderate noise", clean
-    # ones included, and generated images came out grainier than their sources (2026-10-15)
-    noisy = re.compile(r"\b(noise|noisy|grain|grainy|speckle)", re.I)
-    directive = " ".join(x for x in re.split(r"(?<=[.!?])\s+", look["directive"]) if not noisy.search(x)).strip()
-    bits = [f"{k}: {look[k]}" for k in ("sharpness", "detail", "compression", "color", "exposure", "lens", "motion")
-            if look.get(k)]
+    # Measured locks cover noise (NOISE LOCK), detail / sharpness (DETAIL LOCK), colour (COLOR LOCK) and exposure
+    # (EXPOSURE LOCK). The captions over-state all four for almost every frame ("moderate noise", "soft, waxy",
+    # "muted, desaturated") and generated images came out grainier, smoother and greyer than their sources
+    # (2026-10-15 / 10-18) — so only lens, motion and compression are taken from the caption.
+    measured = re.compile(r"\b(noise|noisy|grain\w*|speckle|sharp\w*|soft\w*|blur\w*|smear\w*|detail\w*|waxy|"
+                          r"textur\w*|colou?r\w*|saturat\w*|desaturat\w*|muted|washed|tint\w*|cast|warm|cool\w*|"
+                          r"green\w*|bright\w*|dark\w*|contrast|exposure|highlight\w*|shadow\w*|dull|"
+                          r"timestamp\w*|overlay\w*|text|date|watermark\w*)\b", re.I)  # no text: the prompt forbids it
+    directive = " ".join(x for x in re.split(r"(?<=[.!?])\s+", look["directive"]) if not measured.search(x)).strip()
+    bits = [f"{k}: {look[k]}" for k in ("lens", "motion", "compression")
+            if look.get(k) and not (k == "compression" and measured.search(str(look[k])) and
+                                    re.search(r"\b(noise|grain)", str(look[k]), re.I))]
     if not directive:
-        directive = "Reproduce this camera's rendering."
+        directive = "Reproduce this camera's lens and compression."
     return ("CAMERA LOOK (hard — described from the reference; reproduce THIS camera's rendering in the new scene, it "
-            f"matters as much as the content): {directive} Details — " + "; ".join(bits) + ". Noise / grain: see NOISE LOCK.")
+            f"matters as much as the content): {directive} Details — " + "; ".join(bits) + ". Grain, detail, colour and "
+            "exposure: see the measured NOISE / DETAIL / COLOR / EXPOSURE LOCKS.")
