@@ -1090,12 +1090,17 @@ export default function AnnotationCanvas({
       ctx.restore();
     }
 
-    // Review reasons: a dashed frame just outside the box and a tag saying what looks wrong.
+    // Review reasons: a dashed frame just outside the box and a tag saying what looks wrong. The tag goes UNDER the
+    // box (the class label sits on top of it), above only when there is no room below, and steps aside from tags
+    // already placed so neither covers the other.
     const notes = calloutsRef.current;
     if (notes?.length) {
       ctx.save();
       const fontPx = Math.max(9, 11.5 / scale);
       ctx.font = `800 ${fontPx}px Inter, Segoe UI, sans-serif`;
+      const placed: Array<[number, number, number, number]> = [];
+      const hits = (x: number, y: number, w: number, h: number) =>
+        placed.some(([px, py, pw, ph]) => x < px + pw && x + w > px && y < py + ph && y + h > py);
       for (const n of notes) {
         const pad = (n.strong ? 5 : 3) / scale;
         const x1 = Math.max(0, Math.min(n.x1, n.x2)) - pad;
@@ -1114,10 +1119,19 @@ export default function AnnotationCanvas({
         const padX = 5 / scale;
         const tw = ctx.measureText(n.text).width;
         const th = fontPx + 6 / scale;
-        let ty = y1 - th - 2 / scale;
-        if (ty < 0) ty = Math.min(y2 + 2 / scale, height - th);
+        const tagW = tw + padX * 2;
         let tx = x1;
-        if (tx + tw + padX * 2 > width) tx = Math.max(0, width - tw - padX * 2);
+        if (tx + tagW > width) tx = Math.max(0, width - tagW);
+        const below = y2 + 2 / scale;
+        const above = y1 - th - 2 / scale;
+        let ty = below + th <= height ? below : Math.max(0, above);
+        for (let k = 0; k < 6 && hits(tx, ty, tagW, th); k += 1) {
+          const step = ty >= y2 ? th + 1 / scale : -(th + 1 / scale);
+          const next = ty + step;
+          if (next < 0 || next + th > height) break;
+          ty = next;
+        }
+        placed.push([tx, ty, tagW, th]);
         ctx.fillStyle = n.color;
         ctx.fillRect(tx, ty, tw + padX * 2, th);
         ctx.fillStyle = "#0b1220";
