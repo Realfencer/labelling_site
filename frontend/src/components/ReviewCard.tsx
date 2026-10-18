@@ -4,7 +4,7 @@ import { api, type ReviewSummary } from "../api";
 import { cn } from "../lib/utils";
 
 export const KIND_LABEL: Record<string, string> = {
-  huge: "huge box",
+  huge: "big box, no drink",
   tiny: "tiny box",
   stacked: "stacked boxes",
   nested: "box in box",
@@ -72,7 +72,7 @@ export default function ReviewCard({ onOpen, busy = false }: { onOpen: () => voi
           </div>
           <div className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
             {sum?.ready
-              ? `Found automatically in ${sum.labeled.toLocaleString()} labeled images: huge, tiny or stacked boxes, and where the model sees another class or an unlabeled drink. Riskiest first.${sum.dismissed ? ` ${sum.dismissed} marked “looks right”.` : ""}`
+              ? `Found automatically in ${sum.labeled.toLocaleString()} labeled images: big boxes with no drink under them, tiny or stacked boxes, and where the model sees another class or an unlabeled drink. Riskiest first.${sum.dismissed ? ` ${sum.dismissed} marked “looks right”.` : ""}`
               : "Scoring every labeled image…"}
           </div>
           {kinds.length > 0 && (

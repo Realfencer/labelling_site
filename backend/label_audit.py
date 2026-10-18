@@ -3,7 +3,8 @@ instead of all 14k.
 
 What it looks for (each finding has a risk; an image is listed for review when its risk reaches ``LIST_RISK``):
 
-  huge     a box far bigger than a drink ever is (or than the other boxes in the same image)
+  huge     a big box (over 3% of the image, or over 1% and 8x the image's typical box) where the model sees no drink:
+           a box drawn by accident over floor / windows / people. Big boxes on real close-up drinks are not findings.
   tiny     a box only a few pixels wide
   stacked  two boxes on one object (same class, or two different classes), or one box inside another
   wrong    the model sees a different drink in that box
@@ -122,17 +123,15 @@ def evaluate(labels: np.ndarray, W: int, H: int, dets: np.ndarray | None, huge_f
 
     for i in range(n):
         c = int(cls[i])
-        huge = frac[i] > max(HUGE_MIN_FRAC, huge_frac.get(c, HUGE_MIN_FRAC))
-        if not huge and n > 1 and frac[i] > 0.01:
-            huge = frac[i] > 15.0 * median_without(float(frac[i]))
-        if huge:
-            if not known:
-                add("huge", 3, i, pct=round(float(frac[i]) * 100, 1))
-            elif not supported[i]:
-                add("huge", 5, i, pct=round(float(frac[i]) * 100, 1), detail="the model sees nothing there")
-            else:
-                add("huge", 1, i, pct=round(float(frac[i]) * 100, 1), detail="the model agrees")
-            flagged[i] = True
+        big_abs = frac[i] > max(HUGE_MIN_FRAC, huge_frac.get(c, HUGE_MIN_FRAC))
+        big_rel = n > 1 and frac[i] > 0.01 and frac[i] > 8.0 * median_without(float(frac[i]))
+        if big_abs or big_rel:
+            # Size alone is no evidence (close-up cups are big); a big box with no drink under it is.
+            if known and not supported[i]:
+                add("huge", 5, i, pct=round(float(frac[i]) * 100, 1), detail="the model sees no drink there")
+                flagged[i] = True
+            elif not known and big_abs:
+                add("huge", 2, i, pct=round(float(frac[i]) * 100, 1), detail="waiting for the model check")
             continue
         if min(w[i], h[i]) < TINY_SIDE_PX or w[i] * h[i] < TINY_AREA_PX:
             if not known:
@@ -234,6 +233,7 @@ class AuditStore:
         self._ok: dict[str, str] = self._load_ok()
         self._last_det_scan = 0.0
         self._worker: subprocess.Popen | None = None
+        self._last_auto = -1e9
 
     # ---- persistence ------------------------------------------------------------------------------------------------
 
@@ -544,6 +544,19 @@ class AuditStore:
             return b"audit_worker" in cmd
         except OSError:
             return True
+
+    def auto_model_check(self, miner_dir: Path | None) -> None:
+        """New labeled images the model has not looked at yet: run the check for them (at most every 10 minutes)."""
+        if not miner_dir or not self.ready or time.monotonic() - self._last_auto < 600:
+            return
+        missing = sum(1 for s in self.results if s not in self._det_mtime)
+        if not missing:
+            return
+        self._last_auto = time.monotonic()
+        try:
+            self.start_model_check(Path(miner_dir))
+        except Exception:
+            pass
 
     def start_model_check(self, miner_dir: Path) -> dict:
         prog = self.model_check_progress()

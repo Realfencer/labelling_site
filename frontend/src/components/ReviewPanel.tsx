@@ -20,7 +20,7 @@ function describe(issue: ReviewIssue, boxes: DetectionBox[], names: string[]): s
   const own = issue.i >= 0 ? boxes[issue.i] : undefined;
   switch (issue.kind) {
     case "huge":
-      return `Huge ${nm(own?.cls)} box · ${issue.pct ?? "?"}% of the image${issue.detail ? ` · ${issue.detail}` : ""}`;
+      return `Big ${nm(own?.cls)} box · ${issue.pct ?? "?"}% of the image${issue.detail ? ` · ${issue.detail}` : ""}`;
     case "tiny":
       return `Tiny ${nm(own?.cls)} box · ${issue.px ? issue.px.map((v) => Math.round(v)).join("×") : "?"} px${issue.detail ? ` · ${issue.detail}` : ""}`;
     case "stacked": {

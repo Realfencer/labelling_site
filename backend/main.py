@@ -1046,6 +1046,7 @@ def own_review_summary(state: AppStateDep) -> dict:
     store = state.audit_store()
     store.ensure_built(state.local_items if state.local_items else None, wait=False)
     store.pick_up_new_detections()
+    store.auto_model_check(getattr(state, "miner_folder", None))
     return store.summary()
 
 
@@ -1055,6 +1056,7 @@ def own_review_status(state: AppStateDep, since: int = -1) -> dict:
     store = state.audit_store()
     store.ensure_built(state.local_items if state.local_items else None, wait=True)
     store.pick_up_new_detections()
+    store.auto_model_check(getattr(state, "miner_folder", None))
     keys = state.review_keys() if state.own_day == label_audit.REVIEW_DAY else []
     store.refresh_if_changed(keys[:3000])
     out: dict = {"version": store.version, "summary": store.summary()}
