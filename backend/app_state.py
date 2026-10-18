@@ -26,6 +26,7 @@ from . import collab
 from . import completed_topics
 from . import person_dataset
 from . import hf_completed_datasets
+from . import label_audit
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +171,10 @@ class ReviewAppState:
         self._miner_failed: tuple[Path, float] | None = None
         self._own_reload_lock = threading.RLock()
         self._day_items_cache: tuple | None = None
+        # Own "Review" list of this tab: images stay in it once listed (shown as fixed / looks right), so the strip
+        # does not reshuffle while people work through it; newly flagged images are appended.
+        self._review_keys: list[str] = []
+        self._review_cache: tuple | None = None
         self.username = "guest"  # set per request from the auth session
         self._interactive_infer_until = 0.0
         self.setup_project_dirs()
@@ -219,10 +224,36 @@ class ReviewAppState:
                 pass
         return ReviewAppState._mtime_day_key(item.image_path)
 
+    def audit_store(self) -> label_audit.AuditStore:
+        return label_audit.store_for(self.local_image_dir.parent)
+
+    def _review_items(self) -> list[core.ChallengeRecord]:
+        store = self.audit_store()
+        store.ensure_built(self.local_items, wait=True)
+        pool = self.local_items
+        key = (store.version, id(pool), len(pool))
+        cache = self._review_cache
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        present = set(self._review_keys)
+        for stem in store.flagged():
+            if stem not in present:
+                self._review_keys.append(stem)
+                present.add(stem)
+        by_key = {str(item.item_key): item for item in pool if item.loaded}
+        items = [by_key[k] for k in self._review_keys if k in by_key]
+        self._review_cache = (key, items)
+        return items
+
+    def review_keys(self) -> list[str]:
+        return [str(item.item_key) for item in self._review_items()]
+
     def _local_items_for_day(self, day: str) -> list[core.ChallengeRecord]:
         day = str(day or "").strip()
         if not day:
             return []
+        if day == label_audit.REVIEW_DAY:
+            return self._review_items()
         # `challenges` is read dozens of times per request in Own mode. It used to stat() all
         # ~7k images each time (140-420ms per access; one image open took >1s). The result only
         # changes when the pool list is rebuilt, so cache it per (day, pool object, size).
@@ -286,11 +317,17 @@ class ReviewAppState:
             self.save_state()
             return
         day = str(date).strip()
+        if day == label_audit.REVIEW_DAY:
+            self.own_field = None
+            self._review_keys = []
+            self._review_cache = None
         # Validate YYYY-MM-DD shape lightly.
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise ValueError(f"Invalid day date: {day}")
         self.reload_own_pool(force=False, dedupe=False)
         items = self._local_items_for_day(day)
+        if not items and day == label_audit.REVIEW_DAY:
+            raise ValueError("Nothing to review right now — no labeled image looks suspicious")
         if not items:
             raise ValueError(f"No Own {self.own_field + ' ' if self.own_field else ''}images on {day}")
         self.own_day = day
@@ -312,7 +349,9 @@ class ReviewAppState:
             threading.Thread(target=self._ensure_miner_loaded, daemon=True, name="own-load-miner").start()
         n = len(items)
         done = sum(1 for it in items if it.reviewed)
-        self.status_message = f"Own · {day} ({done}/{n} done)"
+        self.status_message = (
+            f"Own · Review ({n} images to check)" if day == label_audit.REVIEW_DAY else f"Own · {day} ({done}/{n} done)"
+        )
         self.save_state()
 
     def enter_own_today(self) -> None:
@@ -3378,6 +3417,10 @@ class ReviewAppState:
                     pass
             dims.pop(str(item.item_key), None)
             removed += 1
+            try:
+                self.audit_store().refresh(str(item.item_key))  # gone from disk: drops out of the audit
+            except Exception:
+                pass
         if save_dims and len(dims) != dims_before:
             self._save_own_dims_cache(dims)
         return removed
@@ -3476,6 +3519,8 @@ class ReviewAppState:
         """Delete all New (unreviewed) Own images in the active day cluster. Keeps Done."""
         if self.review_mode != "local" or not self.own_day:
             raise ValueError("Enter an Own day cluster first")
+        if self.own_day == label_audit.REVIEW_DAY:
+            raise ValueError("Clear New works on a calendar day, not on the Review list")
         day = self.own_day
         self.reload_own_pool(force=False, dedupe=False)
         targets = []
@@ -5218,6 +5263,11 @@ class ReviewAppState:
             self.save_state()
             self.invalidate_detail_cache(idx)
         item_key = challenge.item_key
+        if challenge.source_type == "local":
+            try:
+                self.audit_store().refresh(str(item_key))
+            except Exception:
+                log.exception("label audit refresh failed for %s", item_key)
         self._bump_label_seq_local(item_key, [], bool(reviewed))
         # Only recompute checks for the image that was just saved — not the whole topic.
         self._schedule_item_label_checks(item_key)

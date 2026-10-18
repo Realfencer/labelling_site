@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronRight, CloudUpload, Loader2, Trash2 } from "lucide-react";
 import { api, type OwnDayRow, type OwnDaysResponse, type OwnField } from "../api";
 import { cn } from "../lib/utils";
+import ReviewCard from "./ReviewCard";
 
 type Props = {
   /** OpenAI / Gemini images only (null = every image). */
@@ -114,6 +115,8 @@ export default function OwnDayList({ field, onFieldChange, onEnterDay, busy = fa
           Refresh
         </button>
       </div>
+
+      {allDays.length > 0 && <ReviewCard onOpen={() => onEnterDay("review")} busy={busy} />}
 
       {allDays.length > 0 && (
         <div className="grid gap-2 sm:grid-cols-3">

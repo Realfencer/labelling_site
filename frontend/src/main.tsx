@@ -38,6 +38,7 @@ startTopicsPrefetch();
  * /t/<topic>/own                  Own workspace (as you left it)
  * /t/<topic>/own/days             Own: the day-selection page
  * /t/<topic>/own/days/2026-10-07  Own: that day (every day has its own link)
+ * /t/<topic>/own/days/review      Own: the images the label audit flagged, riskiest first
  * /t/<topic>/own/openai/days[/…]  Own: only the images OpenAI made (…/own/gemini/… for Gemini)
  * (?workspace=own|platform on /t/<topic> keeps working.) One route with a splat, so moving between these
  * does not remount the labeler.
@@ -54,7 +55,8 @@ function LabelerRoute() {
   const field = pathOwn && (parts[1] === "openai" || parts[1] === "gemini") ? parts[1] : undefined;
   const after = pathOwn ? parts.slice(field ? 2 : 1) : [];
   const dayPart = after[0] === "days" ? after[1] : undefined;
-  const day = dayPart && /^\d{4}-\d{2}-\d{2}$/.test(dayPart) ? dayPart : undefined;
+  // a calendar day, or "review" (the images the label audit flagged)
+  const day = dayPart && (/^\d{4}-\d{2}-\d{2}$/.test(dayPart) || dayPart === "review") ? dayPart : undefined;
   const daysPage = pathOwn && after[0] === "days" && !day;
   return (
     <Suspense fallback={<BrandLoader label="Opening workspace" hint="Loading the labeling tools" accent="emerald" />}>

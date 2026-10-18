@@ -47,6 +47,7 @@ from . import team
 from . import hf_models
 from .background_collector import BackgroundCollector
 from . import ultralytics_platform as ultra
+from . import label_audit
 from .deep_postproc import MIN_GT_IMAGES as DPP_MIN_GT, dpp_manager
 from .manual_merge import manual_merge_manager, require_plain_stem
 from .hf_compare import MIN_GT_IMAGES as HF_COMPARE_MIN_GT, hf_compare_manager, search_hf_models
@@ -1027,6 +1028,61 @@ def set_own_day(body: OwnDayRequest, state: AppStateDep) -> dict:
         state.set_own_day(body.date, prefer_item_key=body.prefer_item_key, field=body.field)
         return _fast_json(state.to_public_state(lite=True, boxes_window=8))
     except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class OwnReviewDismissBody(BaseModel):
+    item_key: str
+    on: bool = True
+
+
+class OwnReviewModelCheckBody(BaseModel):
+    action: str = Field(default="start", pattern="^(start|stop)$")
+
+
+@app.get("/api/own/review/summary")
+def own_review_summary(state: AppStateDep) -> dict:
+    """How many labeled Own images look suspicious (for the Review card on the day list)."""
+    store = state.audit_store()
+    store.ensure_built(state.local_items if state.local_items else None, wait=False)
+    store.pick_up_new_detections()
+    return store.summary()
+
+
+@app.get("/api/own/review/status")
+def own_review_status(state: AppStateDep, since: int = -1) -> dict:
+    """Live findings for this tab's Review list (polled while it is open): fixed / looks-right / still open."""
+    store = state.audit_store()
+    store.ensure_built(state.local_items if state.local_items else None, wait=True)
+    store.pick_up_new_detections()
+    keys = state.review_keys() if state.own_day == label_audit.REVIEW_DAY else []
+    store.refresh_if_changed(keys[:3000])
+    out: dict = {"version": store.version, "summary": store.summary()}
+    if since != store.version:
+        out["items"] = {k: store.status_of(k) for k in keys}
+    return out
+
+
+@app.post("/api/own/review/dismiss")
+def own_review_dismiss(body: OwnReviewDismissBody, state: AppStateDep) -> dict:
+    """"Looks right": these exact labels leave the Review list (a later risky change brings the image back)."""
+    store = state.audit_store()
+    store.dismiss(body.item_key, body.on)
+    return {"ok": True, "status": store.status_of(body.item_key), "version": store.version}
+
+
+@app.post("/api/own/review/model-check")
+def own_review_model_check(body: OwnReviewModelCheckBody, state: AppStateDep) -> dict:
+    """Run (or stop) the base model once over every Own image, at low priority, so the audit can use it."""
+    store = state.audit_store()
+    try:
+        if body.action == "stop":
+            return store.stop_model_check()
+        miner = getattr(state, "miner_folder", None)
+        if not miner:
+            raise ValueError("The labeler has no base model loaded — open the topic first")
+        return store.start_model_check(Path(miner))
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

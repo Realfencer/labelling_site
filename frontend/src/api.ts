@@ -22,6 +22,34 @@ export type PeekInfo = {
   class_names: string[];
 };
 
+/** One finding of the label audit. ``i`` = index of the label box it is about (-1 for a drink the model sees unlabeled). */
+export type ReviewIssue = {
+  kind: "huge" | "tiny" | "stacked" | "nested" | "wrong" | "missed";
+  risk: number;
+  i: number;
+  text: string;
+  detail?: string;
+  pct?: number;
+  px?: number[];
+  other?: number;
+  iou?: number;
+  model_cls?: number;
+  conf?: number;
+  box?: number[];
+};
+export type ReviewItemStatus = { risk: number; issues: ReviewIssue[]; model: boolean; done: boolean; dismissed: boolean; open: boolean };
+export type ReviewModelCheck = { running: boolean; done: number; total: number; miner?: string | null; error?: string | null };
+export type ReviewSummary = {
+  ready: boolean;
+  labeled: number;
+  flagged: number;
+  dismissed: number;
+  by_kind: Record<string, number>;
+  model_check: ReviewModelCheck;
+  version: number;
+};
+export type ReviewStatus = { version: number; summary: ReviewSummary; items?: Record<string, ReviewItemStatus | null> };
+
 const API = "/api";
 const REQUEST_TIMEOUT_MS = 30000;
 const DOWNLOAD_GT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -251,6 +279,17 @@ export const api = {
     api.setReviewMode(reviewModeForWorkspace(workspace), preferItemKey),
   refreshOwnPool: () =>
     request<AppState>("/own/refresh", { method: "POST", timeoutMs: ENTER_TOPIC_TIMEOUT_MS }),
+  /** Label audit: how many labeled Own images look suspicious (the Review card). */
+  ownReviewSummary: () => request<ReviewSummary>("/own/review/summary", { timeoutMs: 30000 }),
+  /** Live findings for this tab's Review list (``since`` = the version already held: items are left out when unchanged). */
+  ownReviewStatus: (since: number) => request<ReviewStatus>(`/own/review/status?since=${since}`, { timeoutMs: 30000 }),
+  ownReviewDismiss: (itemKey: string, on: boolean) =>
+    request<{ ok: boolean; status: ReviewItemStatus | null; version: number }>("/own/review/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ item_key: itemKey, on }),
+    }),
+  ownReviewModelCheck: (action: "start" | "stop") =>
+    request<ReviewModelCheck>("/own/review/model-check", { method: "POST", body: JSON.stringify({ action }), timeoutMs: 30000 }),
   listOwnDays: () =>
     request<OwnDaysResponse>("/own/days", { timeoutMs: ENTER_TOPIC_TIMEOUT_MS }),
   setOwnDay: (date: string | null, preferItemKey?: string | null, field?: OwnField | null) =>

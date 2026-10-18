@@ -21,7 +21,7 @@ import {
   Loader2,
   Send,
 } from "lucide-react";
-import { api, workspaceFromState, HttpError, type OwnField, type PeekInfo, type WorkspaceMode } from "./api";
+import { api, workspaceFromState, HttpError, type OwnField, type PeekInfo, type ReviewIssue, type WorkspaceMode } from "./api";
 import TeamBar from "./components/TeamBar";
 import ImageStatusBar from "./components/ImageStatusBar";
 import StripStatusBar, { STRIP_CODE, type StripCodes } from "./components/StripStatusBar";
@@ -30,6 +30,9 @@ import { useKeys } from "./store/useKeys";
 import { useTeamSync } from "./hooks/useTeamSync";
 import { dropPendingSave, flushOnUnload, hasPendingSaves, retrySave, setSaveConflictHandler } from "./store/saveRetry";
 import AnnotationCanvas, { type ViewShare } from "./components/AnnotationCanvas";
+import ReviewPanel from "./components/ReviewPanel";
+import { useReviewSync, syncReviewNow } from "./hooks/useReviewSync";
+import { useReview, reviewIsOpen } from "./store/useReview";
 const FindBestModal = lazy(() => import("./components/FindBestModal"));
 const ManualMergeModal = lazy(() => import("./components/ManualMergeModal"));
 import SubmitModeModal from "./components/SubmitModeModal";
@@ -561,7 +564,11 @@ function needsWorkStripIndices(app: AppState): number[] {
 
 /** N/B targets: always NEW / needs-work. Own Done filter must not empty the N/B list. */
 function needsWorkNavIndices(app: AppState, _stripFilter: StripFilter, _ownFilter: OwnFilter): number[] {
-  const all = needsWorkStripIndices(app);
+  // Own Review: N/B (and the step after M) go to the next image that is still to check.
+  const all =
+    app.review_mode === "local" && app.own_day === "review"
+      ? app.challenges.flatMap((c, i) => (c.loaded && reviewIsOpen(useReview.getState().items[c.item_key]) ? [i] : []))
+      : needsWorkStripIndices(app);
   // Avoid duplicate work: N/B and auto-advance skip images a teammate has open right now.
   const claims = useTeam.getState().claims;
   if (!Object.keys(claims).length) return all;
@@ -1035,7 +1042,7 @@ export default function App({
     ghostIdxs: number[];
   } | null>(null);
   /** Keyboard C/V box inspect — zoom + cross-pane highlight. */
-  const [boxInspect, setBoxInspect] = useState<{ idx: number; seq: number } | null>(null);
+  const [boxInspect, setBoxInspect] = useState<{ idx: number; seq: number; box?: DetectionBox } | null>(null);
   const boxInspectIdxRef = useRef<number | null>(null);
   /** Right-pane solo: wrong (W) / extra (E) / missed (R). null = all. */
   const [minerAlertFilter, setMinerAlertFilter] = useState<"wrong" | "extra" | "missed" | null>(null);
@@ -3885,6 +3892,22 @@ export default function App({
     }
   }, [teamLabels]);
 
+  /** Own Review: O = these labels look right (take the image off the list), O again = undo. */
+  const toggleReviewLooksRight = useCallback(() => {
+    const key = useLabeler.getState().detail?.challenge?.item_key;
+    if (!key) return;
+    const st = useReview.getState().items[key];
+    if (!st) return;
+    if (!st.open && !st.dismissed) return; // fixed already
+    void api
+      .ownReviewDismiss(key, !st.dismissed)
+      .then((r) => {
+        useReview.getState().patchItem(key, r.status, r.version);
+        syncReviewNow();
+      })
+      .catch((err) => setError(String(err)));
+  }, [setError]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const app = useLabeler.getState().appState;
@@ -3892,6 +3915,11 @@ export default function App({
         return;
       }
       if (modalOpenRef.current) return;
+      if ((e.key === "o" || e.key === "O") && !(e.ctrlKey || e.metaKey) && app.review_mode === "local" && app.own_day === "review") {
+        e.preventDefault();
+        if (!e.repeat) toggleReviewLooksRight();
+        return;
+      }
       const cur = detailIndexRef.current ?? app.current_index;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && (e.key === "z" || e.key === "Z")) {
@@ -4037,6 +4065,7 @@ export default function App({
     resetToWinnerOrigin,
     startHelp,
     stopWatch,
+    toggleReviewLooksRight,
     toggleWatch,
     undoBoxes,
   ]);
@@ -4419,6 +4448,43 @@ export default function App({
       ? Math.max(0, Math.min(refVariantIdx, referenceVariants.length - 1))
       : 0;
   const activeRefVariant = referenceVariants[activeRefVariantIdx] || null;
+  // ---- Own Review (label audit): live findings for the open image, highlighted on the canvas -------------
+  const isReviewDay = appState?.review_mode === "local" && appState?.own_day === "review";
+  useReviewSync(Boolean(isReviewDay));
+  const reviewItems = useReview((s) => s.items);
+  const [reviewHover, setReviewHover] = useState<ReviewIssue | null>(null);
+  const reviewKey = isReviewDay ? detail?.challenge?.item_key ?? null : null;
+  const reviewStatus = reviewKey ? reviewItems[reviewKey] : undefined;
+  // Drinks the model sees but nobody labeled: shown as dashed "missed" ghosts while the image is still to check.
+  const reviewGhosts = useMemo<DetectionBox[]>(
+    () =>
+      reviewStatus?.open
+        ? reviewStatus.issues
+            .filter((i) => i.kind === "missed" && i.box && i.risk > 0)
+            .map((i) => ({ cls: i.model_cls ?? 0, x1: i.box![0], y1: i.box![1], x2: i.box![2], y2: i.box![3], conf: i.conf ?? null }))
+        : [],
+    [reviewStatus],
+  );
+  useEffect(() => setReviewHover(null), [reviewKey]);
+  const reviewFocusIdxs =
+    reviewHover && reviewHover.i >= 0 ? [reviewHover.i, ...(reviewHover.other != null ? [reviewHover.other] : [])] : null;
+  const reviewGhostFocus =
+    reviewHover?.kind === "missed" && reviewHover.box
+      ? [reviewGhosts.findIndex((g) => g.x1 === reviewHover.box![0] && g.y1 === reviewHover.box![1])].filter((k) => k >= 0)
+      : null;
+  const focusReviewIssue = useCallback(
+    (issue: ReviewIssue) => {
+      if (issue.i >= 0 && issue.i < boxes.length) {
+        beginBoxInspect(issue.i);
+      } else if (issue.box) {
+        const [x1, y1, x2, y2] = issue.box;
+        setBoxInspect((prev) => ({ idx: -1, seq: (prev?.seq ?? 0) + 1, box: { cls: issue.model_cls ?? 0, x1, y1, x2, y2 } }));
+      }
+    },
+    [beginBoxInspect, boxes.length],
+  );
+  const inspectTarget = boxInspect ? boxInspect.box ?? boxes[boxInspect.idx] ?? null : null;
+
   if (!appState) {
     return <BrandLoader label="Opening workspace" hint={`Loading ${topicSlug}`} accent="emerald" />;
   }
@@ -4613,7 +4679,7 @@ export default function App({
       sam3Busy={sam3Busy}
       dayListMode={ownDayListMode}
       onDeleteRange={!isPlatform && !ownDayListMode ? () => setOwnDeleteOpen(true) : undefined}
-      onClearNew={!isPlatform && appState.own_day ? () => void clearOwnDayNew() : undefined}
+      onClearNew={!isPlatform && appState.own_day && appState.own_day !== "review" ? () => void clearOwnDayNew() : undefined}
       clearNewCount={!isPlatform && appState.own_day ? ownCounts.new : 0}
       clearNewBusy={modeBusy}
     />
@@ -4631,7 +4697,9 @@ export default function App({
         total={dayScope ? dayScope.total : (isPlatform ? platformMetrics : ownMetrics).total}
         reviewed={dayScope ? dayScope.done : (isPlatform ? platformMetrics : ownMetrics).done}
         scopeLabel={
-          dayScope?.day
+          dayScope?.day === "review"
+            ? "Review"
+            : dayScope?.day
             ? `Day ${dayScope.day}${appState.own_field ? ` · ${appState.own_field === "openai" ? "OpenAI" : "Gemini"}` : ""}`
             : !isPlatform
               ? ownField
@@ -4920,6 +4988,24 @@ export default function App({
                 }
                 return null;
               })()}
+              {isReviewDay &&
+                (() => {
+                  const st = reviewItems[c.item_key];
+                  if (st === undefined) return null;
+                  const open = reviewIsOpen(st);
+                  const top = st?.issues.find((i) => i.risk > 0);
+                  return (
+                    <span
+                      className={cn(
+                        "absolute bottom-3 left-1 inline-flex max-w-[100px] items-center truncate rounded px-1 py-0.5 text-[8px] font-extrabold uppercase shadow-sm",
+                        open ? "bg-amber-400 text-amber-950" : "bg-emerald-500 text-white",
+                      )}
+                      title={top ? top.text : undefined}
+                    >
+                      {open ? `⚠ ${top?.kind ?? "check"}` : st?.dismissed ? "✓ ok" : "✓ fixed"}
+                    </span>
+                  );
+                })()}
             </div>
             <span
               className={cn(
@@ -4984,7 +5070,7 @@ export default function App({
               showLabels={showBoxLabels}
               linkedFocusIdxs={linkedBoxFocus?.gtIdxs ?? null}
               onHoverFocus={onGtHoverFocus}
-              inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
+              inspectBox={inspectTarget}
               inspectSeq={boxInspect?.seq ?? 0}
               onViewChange={onMainView}
               {...peekProps}
@@ -5042,6 +5128,17 @@ export default function App({
         </div>
         ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
+          {isReviewDay && !peekView && (
+            <ReviewPanel
+              itemKey={activeDetail.challenge.item_key}
+              boxes={boxes}
+              classNames={names}
+              openCount={appState.challenges.filter((c) => c.loaded && reviewIsOpen(reviewItems[c.item_key])).length}
+              totalCount={appState.challenges.length}
+              onFocus={focusReviewIssue}
+              onHover={setReviewHover}
+            />
+          )}
           {(() => {
             const ownReviewed = Boolean(activeDetail.challenge.reviewed);
             const ownSam3 = Boolean(activeDetail.challenge.has_label) && !ownReviewed;
@@ -5112,10 +5209,13 @@ export default function App({
                       onTransformChange={setSyncTransform}
                       canvasBg={canvasBg}
                       showLabels={showBoxLabels}
-                      inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
+                      inspectBox={inspectTarget}
                       inspectSeq={boxInspect?.seq ?? 0}
                       showGuides={ownGuides}
                       onViewChange={onMainView}
+                      linkedFocusIdxs={reviewFocusIdxs}
+                      ghostBoxes={isReviewDay ? reviewGhosts : undefined}
+                      linkedGhostIdxs={reviewGhostFocus}
                       {...peekProps}
                     />
                   </Pane>
@@ -5170,10 +5270,13 @@ export default function App({
                   onTransformChange={setSyncTransform}
                   canvasBg={canvasBg}
                   showLabels={showBoxLabels}
-                  inspectBox={boxInspect && boxes[boxInspect.idx] ? boxes[boxInspect.idx] : null}
+                  inspectBox={inspectTarget}
                   inspectSeq={boxInspect?.seq ?? 0}
                   showGuides={ownGuides}
                   onViewChange={onMainView}
+                  linkedFocusIdxs={reviewFocusIdxs}
+                  ghostBoxes={isReviewDay ? reviewGhosts : undefined}
+                  linkedGhostIdxs={reviewGhostFocus}
                   {...peekProps}
                 />
               </Pane>
@@ -5309,7 +5412,7 @@ export default function App({
                   {appState.own_day}
                 </button>
               ) : null}
-              {!isPlatform && appState.own_day && ownCounts.new > 0 ? (
+              {!isPlatform && appState.own_day && appState.own_day !== "review" && ownCounts.new > 0 ? (
                 <button
                   type="button"
                   onClick={() => void clearOwnDayNew()}
