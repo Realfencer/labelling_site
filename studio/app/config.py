@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # have crisper edges than raw Gemini output), and smoothed images looked unfamiliar; the look comes from the
     # prompt (CAMERA LOOK). With it off the post-process is only the platform's 224-colour palette.
     post_match_texture: bool = False
+    # white balance (grey pixels) + saturation matched to each image's source before the palette: prompt words cannot
+    # set the generators' colour balance (2026-10-18). Colour only — no blur, no sharpening.
+    post_colour_match: bool = True
 
     # Hugging Face — one dataset repo + dated runs/ folder
     hf_token: str = ""

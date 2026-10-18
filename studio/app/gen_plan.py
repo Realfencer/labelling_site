@@ -782,28 +782,20 @@ def _color_line(rec: dict) -> str:
         pass
     level = ("near-grayscale, almost no color" if sat < 0.08 else "muted, low-saturation color" if sat < 0.14
              else "natural, moderate color" if sat < 0.22 else "colorful, well-saturated")
-    # 2026-10-18, 55-image Sunburst t2i run vs sources: grey areas +2 warmer and orange-brown pixels 6 % → 16.5 %
-    # (wood, wicker, tan floors, golden lamps) — the user saw "brown, hot" images. Every source with mean b ≥ 2 had
-    # been called "a WARM yellow-orange tint"; a one-sided "NO yellow / orange / brown" rule then over-corrected to
-    # grey-blue (b −3.7, saturation ×0.52). Now: white balance from grey pixels with gentle words, a TWO-sided
-    # no-wash rule that protects the colours, and the source's measured brown / wood share as the palette.
+    # 2026-10-18: words cannot set the generator's colour balance — "a WARM yellow-orange tint" gave brown frames, a
+    # one-sided "NO yellow / orange / brown" list and a "mostly grey, cool tones" palette gave grey-blue, drained ones
+    # (saturation ×0.52). The white balance is now matched after generation (look.colour_match); the prompt only says,
+    # plainly and positively, what the source looks like.
     if cast_b is None:
         cast = "neutral white balance"
     else:
         cast = ("warm lamp-lit white balance" if cast_b >= 6 else "slightly warm white balance" if cast_b >= 4
                 else "slightly cool white balance" if cast_b <= -2 else "neutral white balance")
-        if cast_a is not None and cast_a <= -2:
-            cast += " with a hint of green"
-    palette = ""
-    if brown is not None:
-        palette = (f" Palette: mostly grey, white, black and cool tones (concrete, glass, metal, dark clothing) — wood, "
-                   f"tan, beige or brown surfaces only as small accents (about {brown:.0%} of the frame)"
-                   if brown < 0.10 else
-                   f" Palette: wood, tan and brown tones cover about {brown:.0%} of the frame — no more")
-    return (f"COLOR LOCK (hard, measured on the reference): {level} (saturation {sat:.0%}), {cast}. No colour wash in "
-            "either direction — no sepia, brown, golden or orange filter and no grey-blue filter; skin, clothes, "
-            "plants, signs and cars keep their natural colours, exactly as vivid as stated (\"muted\" CCTV color "
-            f"means slightly less vivid than a phone photo, not grey).{palette}.")
+    palette = (f" Wood, tan and brown surfaces cover about {brown:.0%} of the frame — keep a similar share"
+               if brown is not None else "")
+    return (f"COLOR LOCK (hard, measured on the reference): {level} (saturation {sat:.0%}), {cast}; natural colours "
+            "with no colour filter — skin, clothes, plants, signs and cars keep their real colours, exactly as vivid "
+            f"as stated (\"muted\" CCTV color means slightly less vivid than a phone photo, not grey).{palette}.")
 
 
 def _source_profile_block(

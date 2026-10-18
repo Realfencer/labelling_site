@@ -131,7 +131,8 @@ def _paletted(rgb: np.ndarray) -> np.ndarray:
     return np.asarray(Image.fromarray(rgb).quantize(PALETTE_COLORS, method=Image.Quantize.MEDIANCUT).convert("RGB"))
 
 
-def match(img: Image.Image | str | Path, target: dict, texture: bool = True) -> tuple[Image.Image, dict]:
+def match(img: Image.Image | str | Path, target: dict, texture: bool = True,
+          source: Image.Image | str | Path | None = None) -> tuple[Image.Image, dict]:
     """Bring a generated image to its source's texture + edge crispness, then the platform's 224-color palette.
 
     Only texture/edges are matched: color and corner brightness depend too much on what is in the scene (a source with
@@ -140,8 +141,11 @@ def match(img: Image.Image | str | Path, target: dict, texture: bool = True) -> 
     jointly on the centre SEARCH_CROP² INCLUDING the palette step (which itself flattens fine variation), then applied to
     the whole frame."""
     rgb = _load_rgb(img)
-    before = measure_rgb(rgb)
     params: dict = {}
+    if source is not None:  # white balance + saturation of the source (colour only — see colour_match)
+        rgb, cinfo = colour_match(rgb, _load_rgb(source))
+        params.update(cinfo)
+    before = measure_rgb(rgb)
     if texture and (before["mid_texture"] > target["mid_texture"] * 1.05
                     or before["fine_texture"] > target["fine_texture"] * 1.05):
         c = (SIZE - SEARCH_CROP) // 2
@@ -194,7 +198,7 @@ def source_look(run_dir: Path, source_image: str, source_path: str | None, analy
 
 
 def match_run(run_dir: Path, analysis_dir: Path | None = None, texture: bool = False,
-              progress_cb: Callable[[int, int], None] | None = None) -> dict:
+              progress_cb: Callable[[int, int], None] | None = None, colour: bool = False) -> dict:
     """Source-match every image of a run in place (palette PNGs are already done and skipped); writes
     <run>/postprocess.json with the chosen parameters and the before / after / target numbers per image."""
     run_dir = Path(run_dir)
@@ -218,7 +222,8 @@ def match_run(run_dir: Path, analysis_dir: Path | None = None, texture: bool = F
         target = looks[src]
         if not target:
             return p, None, "no source"
-        out, info = match(p, target, texture=texture)
+        src_file = next((x for x in (run_dir / "sources" / src, Path(str(it.get("source_path") or ""))) if x.is_file()), None)
+        out, info = match(p, target, texture=texture, source=src_file if colour else None)
         out.save(p, format="PNG")
         return p, {"source": src, **info}, None
 
@@ -231,7 +236,8 @@ def match_run(run_dir: Path, analysis_dir: Path | None = None, texture: bool = F
                 skipped += 1
             if progress_cb:
                 progress_cb(i, len(paths))
-    meta = {"method": "source-matched texture + 224-colour palette" if texture else "224-colour palette (as the platform)",
+    meta = {"method": ("source-matched texture + " if texture else "") + ("source white balance + saturation + " if colour else "")
+                      + "224-colour palette" + ("" if texture or colour else " (as the platform)"),
             "images": len(paths), "processed": done, "skipped": skipped,
             "at": datetime.now(timezone.utc).isoformat(), "per_image": report}
     (run_dir / "postprocess.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
@@ -317,3 +323,48 @@ def detail_lock_line(path: str | Path | None) -> str:
             "never pixel noise or speckle: flat walls, floor and sky stay exactly as smooth as the NOISE LOCK says. "
             "Do NOT smooth surfaces, skin or clothing into a waxy, painted or airbrushed look"
             + (" — and do not sharpen or add texture beyond this either." if ft < 1.6 else "."))
+
+
+# ── colour match (white balance + saturation) ─────────────────────────────────
+# Prompt words cannot set a generator's colour balance: the same 12 recipes came out warm (grey-area b −2 vs the
+# sources, saturation ×0.93), then cold and drained (−4, ×0.52), then still cold (−3, ×0.51) as the COLOR LOCK
+# wording changed (2026-10-18). So each image's WHITE BALANCE (median of its near-grey pixels — walls, pavement,
+# white objects; content-robust, unlike the mean colour) is brought to its source's with per-channel gains, and its
+# saturation to the source's, both within limits. A global colour adjustment only: no blur, no sharpening, no texture.
+WB_GAIN = (0.85, 1.18)   # per-channel gain limits
+SAT_GAIN = (0.8, 1.45)   # chroma scale limits
+
+
+def _grey_rgb(rgb: np.ndarray) -> np.ndarray | None:
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lum, a, b = lab[..., 0] / 255 * 100, lab[..., 1] - 128, lab[..., 2] - 128
+    m = (np.hypot(a, b) < 12) & (lum > 25) & (lum < 92)
+    if m.sum() < 0.02 * m.size:
+        return None
+    return rgb[m].astype(np.float32).mean(axis=0) + 1e-3
+
+
+def _saturation(rgb: np.ndarray) -> float:
+    return float(cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)[..., 1].mean() / 255)
+
+
+def colour_match(rgb: np.ndarray, src_rgb: np.ndarray) -> tuple[np.ndarray, dict]:
+    """rgb (uint8, H×W×3) with the source's white balance and saturation; returns (new rgb, info)."""
+    info: dict = {}
+    g, gs = _grey_rgb(rgb), _grey_rgb(src_rgb)
+    out = rgb.astype(np.float32)
+    if g is not None and gs is not None:
+        # per-channel gains that turn this image's greys into the source's grey hue, luminance unchanged
+        gain = (gs / gs.mean()) / (g / g.mean())
+        gain = np.clip(gain, *WB_GAIN)
+        out = np.clip(out * gain, 0, 255)
+        info["wb_gain"] = [round(float(x), 3) for x in gain]
+    s_now, s_src = _saturation(out.astype(np.uint8)), _saturation(src_rgb)
+    if s_now > 0.01:
+        k = float(np.clip(s_src / s_now, *SAT_GAIN))
+        if abs(k - 1) > 0.03:
+            lab = cv2.cvtColor(out.astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+            lab[..., 1:] = (lab[..., 1:] - 128) * k + 128
+            out = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
+            info["sat_gain"] = round(k, 3)
+    return out.astype(np.uint8), info

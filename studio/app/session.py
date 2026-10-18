@@ -471,6 +471,7 @@ def start_generation(
 
                     pp = match_run(
                         Path(run_dir), out_dir, texture=settings.post_match_texture,
+                        colour=settings.post_colour_match,
                         progress_cb=lambda d, n: cb(d, n, f"{base_msg} · post-processing {d}/{n}…"),
                     )
                     base_msg += f" · {pp['method']} ({pp['processed']} imgs)"
