@@ -243,6 +243,9 @@ def match_run(run_dir: Path, analysis_dir: Path | None = None, texture: bool = F
 # Immerkaer noise_sigma it ignores edges / texture, so it is the grain a viewer sees. Eval frames span ~0.25 (clean
 # OpenAI frames) to ~2.2 (grainy); generated images used to land at ~1.0 whatever their source had, because every
 # prompt asked for "sensor grain" and the CAMERA LOOK captions call almost every frame "moderate noise" (2026-10-15).
+# Generated grain lands ~0.3 above what the words ask for (12-image test with the DETAIL LOCK, median +0.32,
+# 2026-10-18), so the word is chosen one bias lower.
+GRAIN_BIAS = 0.3
 GRAIN_LEVELS = ((0.45, "VERY CLEAN — no visible grain or noise; walls, floor, sky and clothing are smooth"),
                 (0.9, "LIGHT — barely visible fine grain, only in the darkest shadows; flat areas look smooth"),
                 (1.5, "MODERATE — fine luminance grain visible in flat areas and shadows"),
@@ -275,9 +278,10 @@ def noise_lock_line(path: str | Path | None) -> str:
     g = grain_of(path) if path else None
     if g is None:
         return ""
-    words = next(w for top, w in GRAIN_LEVELS if g < top)
-    return (f"NOISE LOCK (hard, measured on the reference — wins over every noise / grain word elsewhere): {words} "
-            f"(grain {g:.2f}). Do NOT add grain, noise or speckle beyond this"
+    # the level word is picked for (measured − GRAIN_BIAS): asked for a level, the generator lands ~0.3 above it
+    words = next(w for top, w in GRAIN_LEVELS if g - GRAIN_BIAS < top)
+    return (f"NOISE LOCK (hard, measured on the reference — wins over every noise / grain word elsewhere): {words}. "
+            "Do NOT add grain, noise or speckle beyond this"
             + (" — this camera's image is clean." if g < 0.45 else "."))
 
 
@@ -309,5 +313,7 @@ def detail_lock_line(path: str | Path | None) -> str:
     words = next(w for top, w in DETAIL_LEVELS if ft < top)
     edges = "edges slightly smeared" if ac < 1.55 else "edges crisp" if ac > 1.72 else "edges normal for CCTV"
     return (f"DETAIL LOCK (hard, measured on the reference — wins over every soft / blurry / smeared / waxy word "
-            f"elsewhere): {words}; {edges} (texture {ft:.1f}, acutance {ac:.2f}). Do NOT smooth surfaces, skin or "
-            "clothing into a waxy, painted or airbrushed look" + (" — and do not sharpen beyond this either." if ft < 1.6 else "."))
+            f"elsewhere): {words}; {edges}. Texture means REAL surface detail (fabric weave, tiles, hair, paving) — "
+            "never pixel noise or speckle: flat walls, floor and sky stay exactly as smooth as the NOISE LOCK says. "
+            "Do NOT smooth surfaces, skin or clothing into a waxy, painted or airbrushed look"
+            + (" — and do not sharpen or add texture beyond this either." if ft < 1.6 else "."))
