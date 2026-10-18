@@ -258,8 +258,10 @@ class ReviewAppState:
             if st is None or not st["open"]:
                 gone.add(str(k))
         if gone:
+            open_key = self._capture_selected_item_key()
             self._review_keys = [k for k in self._review_keys if k not in gone]
             self._review_cache = None
+            self._remap_current_index_by_item_key(open_key)  # same image, new position in the shorter list
         return len(gone)
 
     def _local_items_for_day(self, day: str) -> list[core.ChallengeRecord]:

@@ -3910,6 +3910,8 @@ export default function App({
   /** Own Review: the list has nothing left to check — leave it (set below). */
   const reviewFinishRef = useRef<(() => void) | null>(null);
   const lookRightTimerRef = useRef<number | null>(null);
+  /** "Looks right" calls still on their way, per image: the list drop waits for them so the server agrees. */
+  const lookRightInflightRef = useRef(new Map<string, Promise<unknown>>());
   /** Own Review: Enter = these labels look right, Enter again (or Undo) = no. Unless undone within 5 s, the next image to
    *  check opens and this one leaves the list. */
   const setReviewLooksRight = useCallback(
@@ -3933,13 +3935,17 @@ export default function App({
           else reviewFinishRef.current?.();
         }, 5000);
       }
-      void api
+      const call = api
         .ownReviewDismiss(key, on)
         .then((r) => {
           useReview.getState().patchItem(key, r.status, r.version);
           syncReviewNow();
         })
-        .catch((err) => setError(String(err)));
+        .catch((err) => setError(String(err)))
+        .finally(() => {
+          if (lookRightInflightRef.current.get(key) === call) lookRightInflightRef.current.delete(key);
+        });
+      lookRightInflightRef.current.set(key, call);
     },
     [requestNeedsWorkNav, setError],
   );
@@ -4532,13 +4538,36 @@ export default function App({
 
   // ` / Shift+` walk through the reasons of the open image; the one in focus is drawn strongest.
   const [reviewCursor, setReviewCursor] = useState(-1);
+  const prevReviewKeyRef = useRef<string | null>(null);
   useEffect(() => {
     setReviewCursor(-1);
     if (lookRightTimerRef.current != null) {
       window.clearTimeout(lookRightTimerRef.current);
       lookRightTimerRef.current = null;
     }
+    const pendingLookRight = useReview.getState().lookRight;
     useReview.getState().setLookRight(null);
+    // We just moved on (the next image is already on screen): an image marked "looks right" or fixed leaves the
+    // list right now, without waiting for the 5 s or the next poll.
+    const prev = prevReviewKeyRef.current;
+    prevReviewKeyRef.current = reviewKey;
+    if (!prev || !reviewKey || prev === reviewKey) return;
+    const st = useReview.getState().items[prev];
+    const checked = pendingLookRight?.key === prev || (st !== undefined && !reviewIsOpen(st));
+    if (!checked || prev === dirtyItemKeyRef.current || prev === saveSnapshotRef.current?.itemKey) return;
+    const app = useLabeler.getState().appState;
+    if (app?.own_day === "review" && app.challenges.some((c) => c.item_key === prev)) {
+      applyState({ ...app, challenges: app.challenges.filter((c) => c.item_key !== prev) });
+    }
+    void Promise.resolve(lookRightInflightRef.current.get(prev))
+      .then(() => api.ownReviewDrop([prev]))
+      .then((s) => {
+        if (s.own_day !== "review") return;
+        workspacePoolsRef.current.own = s;
+        applyState(s);
+        if (!s.challenges.length) reviewFinishRef.current?.();
+      })
+      .catch(() => {});
   }, [reviewKey]);
   const reviewOpenIssues = useMemo(() => (reviewStatus?.issues ?? []).filter((i) => i.risk > 0), [reviewStatus]);
   reviewCycleRef.current = (dir) => {
@@ -4598,7 +4627,7 @@ export default function App({
           if (!s.challenges.length) reviewFinishRef.current?.();
         })
         .catch(() => {});
-    }, 500);
+    }, 150);
     return () => window.clearTimeout(t);
   }, [isReviewDay, reviewItems, reviewKey, saveAt]);
   reviewFinishRef.current = () => {
