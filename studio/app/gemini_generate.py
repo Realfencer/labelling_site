@@ -86,6 +86,12 @@ BATCH_POLL_S = 20.0
 BATCH_IMAGE_SIZE = "1K"
 GEMINI_MODELS = (
     {
+        "id": "gemini-nano-banana-2.1",
+        "label": "Nano Banana 2.1",
+        "hint": "Oct 2026 · half the price of 3.1 Flash Image ($0.0168 / 1K image in batch)",
+        "provider": "gemini",
+    },
+    {
         "id": "gemini-3.1-flash-image",
         "label": "Gemini 3.1 Flash Image",
         "hint": "Nano Banana · default · Gemini Batch API",
@@ -106,7 +112,7 @@ class GeminiError(RuntimeError):
 
 def is_gemini_model(model: str | None) -> bool:
     m = (model or "").strip().lower()
-    return m.startswith("gemini") and "image" in m
+    return m.startswith("gemini") and ("image" in m or "nano-banana" in m)
 
 
 def normalize_api_key(raw: str | None) -> str:

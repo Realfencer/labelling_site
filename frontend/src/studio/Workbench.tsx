@@ -17,7 +17,9 @@ const PRICE: Record<string, [number, number, number]> = {
   "gpt-image-2.5-flare": [0.013, 0.018, 0.038],
   "gpt-image-2": [0.015, 0.038, 0.117],
 };
-const GEMINI_PRICE = 0.036; // gemini-3.1-flash-image batch, measured: $0.0358/image incl. prompt input (2026-10-10)
+/** Gemini image-to-image, $ per image in batch (instant = 2×): 3.1 Flash Image measured $0.0358 incl. prompt + reference
+ *  (2026-10-10); Nano Banana 2.1 bills $0.0168 per 1K image out + ≈ $0.003 prompt / reference in. */
+const GEMINI_PRICE: Record<string, number> = { "gemini-nano-banana-2.1": 0.02, "gemini-3.1-flash-image": 0.036, "gemini-2.5-flash-image": 0.036 };
 /** Instant (direct API calls): OpenAI and Google bill their standard rates, exactly twice the Batch rates
  *  (gpt-image-2.5-sunburst medium measured $0.0365/image instant vs $0.018 batch, 2026-10-14). */
 const INSTANT_X = 2;
@@ -476,7 +478,7 @@ export function GenerateCard({ startRef }: { startRef: React.MutableRefObject<((
     setModel((cur) => (models.some((m) => m.id === cur) ? cur : (models.find((m) => m.id === saved) || models.find((m) => m.id === h?.default_model) || models[0]).id));
   }, [models, h?.default_model]);
 
-  const batchUnit = isGemini ? GEMINI_PRICE : (PRICE[model] || PRICE["gpt-image-2.5-sunburst"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
+  const batchUnit = isGemini ? (GEMINI_PRICE[model] ?? 0.036) : (PRICE[model] || PRICE["gpt-image-2.5-sunburst"])[quality === "low" ? 0 : quality === "high" ? 2 : 1];
   const unit = batchUnit * (instant ? INSTANT_X : 1);
   const nFinal = st.nFinal;
   const nAll = Math.max(st.sources.length, st.nAllSources);

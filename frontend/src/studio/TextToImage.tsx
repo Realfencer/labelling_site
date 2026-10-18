@@ -33,7 +33,8 @@ const T2I_OUT: Record<string, [number, number, number]> = {
   "gpt-image-2": [0.0036, 0.0266, 0.1056],
 };
 const TEXT_PER_CHAR = 2.5e-6 / 3.8;
-const T2I_GEMINI = 0.034; // gemini-3.1-flash-image batch, 1K image out; the text-only prompt costs < $0.001
+/** Gemini text → image, $ per image in batch (1K image out; the text-only prompt costs < $0.001). */
+const T2I_GEMINI: Record<string, number> = { "gemini-nano-banana-2.1": 0.0175, "gemini-3.1-flash-image": 0.034, "gemini-2.5-flash-image": 0.034 };
 const INSTANT_X = 2;
 const PAGE = 24;
 
@@ -679,7 +680,7 @@ function GenerateStep({ plan }: { plan: T2iPlan }) {
   }, [models, h?.default_model]);
   const chars = plan.coverage.avg_prompt_chars ?? 6000;
   const batchUnit = isGemini
-    ? T2I_GEMINI
+    ? (T2I_GEMINI[model] ?? 0.034)
     : (T2I_OUT[model] || T2I_OUT["gpt-image-2.5-sunburst"])[
         quality === "low" ? 0 : quality === "high" ? 2 : 1
       ] +

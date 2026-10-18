@@ -133,7 +133,9 @@ def _variant_prompt_raw(base_prompt: str, variant_idx: int, total: int) -> str:
         "about the source's drink count; drinks as small, soft, partly hidden and low-contrast as in the reference — "
         "nothing made clearer or bigger to be readable, but every drink physically real (in a hand, on a surface, in a "
         "bag) and findable by an attentive annotator; FAILURE FOCUS drinks keep their reference look, orientation "
-        "included; no text, no drawn boxes."
+        "included; no text. Drinks are ordinary objects drawn INTO the scene — NO boxes, circles, rings, outlines, "
+        "arrows, highlights, labels, insets or zoomed close-up panels anywhere in the image (Nano Banana 2.1 circled a "
+        "target bottle in red, 2026-10-18)."
     )
 
 
