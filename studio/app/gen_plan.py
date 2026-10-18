@@ -762,34 +762,48 @@ def _color_line(rec: dict) -> str:
     import cv2
 
     sat = float(rec.get("saturation") or 0)
-    a_mean = b_mean = 0.0
+    cast_b = cast_a = None
+    brown = None
     try:
         from PIL import Image
 
         rgb = np.asarray(Image.open(rec["path"]).convert("RGB").resize((256, 256)))
         lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-        a_mean, b_mean = float(lab[..., 1].mean() - 128), float(lab[..., 2].mean() - 128)
-    except Exception:  # noqa: BLE001 — no cast words without the pixels
+        lum, la, lb = lab[..., 0] / 255 * 100, lab[..., 1] - 128, lab[..., 2] - 128
+        # white balance from near-grey pixels (walls, pavement, white objects) — the mean colour mostly measures the
+        # scene's content (wood, brick, plants are yellowish) and called daylit gardens "warm lamp light"
+        grey = (np.hypot(la, lb) < 12) & (lum > 25) & (lum < 92)
+        if grey.sum() > 500:
+            cast_b, cast_a = float(np.median(lb[grey])), float(np.median(la[grey]))
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        hue, s_ = hsv[..., 0].astype(int) * 2, hsv[..., 1] / 255
+        brown = float(((hue >= 15) & (hue <= 45) & (s_ > 0.25) & (lum > 15) & (lum < 70)).mean())
+    except Exception:  # noqa: BLE001 — no cast / palette words without the pixels
         pass
     level = ("near-grayscale, almost no color" if sat < 0.08 else "muted, low-saturation color" if sat < 0.14
              else "natural, moderate color" if sat < 0.22 else "colorful, well-saturated")
-    # gpt-image warms frames on its own: on a 55-image Sunburst run, generated − source was Lab b +2.7 (yellow) and
-    # a +2.8 (red) — a brown, "hot" look — and every source with b ≥ 2 had been called "a WARM yellow-orange tint"
-    # (eval frames are mostly b +2…+7). A one-sided "NO yellow / orange / brown / sepia" rule then over-corrected:
-    # b −3.7 and saturation ×0.52, grey-blue frames (12-image test, 2026-10-18). So: a small bias correction,
-    # gentle cast words, and a TWO-sided no-wash rule that also protects the colours.
-    eff_b = b_mean - WARM_BIAS_B
-    cast = ("warm lamp light (tungsten / sodium)" if eff_b >= 5.0 else "slightly warm white balance" if eff_b >= 2.0
-            else "slightly cool white balance" if eff_b <= -2.0 else "neutral white balance")
-    if a_mean <= -1.5:
-        cast += ", a hint of green"
+    # 2026-10-18, 55-image Sunburst t2i run vs sources: grey areas +2 warmer and orange-brown pixels 6 % → 16.5 %
+    # (wood, wicker, tan floors, golden lamps) — the user saw "brown, hot" images. Every source with mean b ≥ 2 had
+    # been called "a WARM yellow-orange tint"; a one-sided "NO yellow / orange / brown" rule then over-corrected to
+    # grey-blue (b −3.7, saturation ×0.52). Now: white balance from grey pixels with gentle words, a TWO-sided
+    # no-wash rule that protects the colours, and the source's measured brown / wood share as the palette.
+    if cast_b is None:
+        cast = "neutral white balance"
+    else:
+        cast = ("warm lamp-lit white balance" if cast_b >= 6 else "slightly warm white balance" if cast_b >= 4
+                else "slightly cool white balance" if cast_b <= -2 else "neutral white balance")
+        if cast_a is not None and cast_a <= -2:
+            cast += " with a hint of green"
+    palette = ""
+    if brown is not None:
+        palette = (f" Palette: mostly grey, white, black and cool tones (concrete, glass, metal, dark clothing) — wood, "
+                   f"tan, beige or brown surfaces only as small accents (about {brown:.0%} of the frame)"
+                   if brown < 0.10 else
+                   f" Palette: wood, tan and brown tones cover about {brown:.0%} of the frame — no more")
     return (f"COLOR LOCK (hard, measured on the reference): {level} (saturation {sat:.0%}), {cast}. No colour wash in "
-            "either direction — no sepia, brown or orange filter and no grey-blue filter; skin, clothes, plants, signs "
-            "and cars keep their natural colours, exactly as vivid as stated (\"muted\" CCTV color means slightly less "
-            "vivid than a phone photo, not grey).")
-
-
-WARM_BIAS_B = 1.0  # Lab b the image generators add on their own (see _color_line)
+            "either direction — no sepia, brown, golden or orange filter and no grey-blue filter; skin, clothes, "
+            "plants, signs and cars keep their natural colours, exactly as vivid as stated (\"muted\" CCTV color "
+            f"means slightly less vivid than a phone photo, not grey).{palette}.")
 
 
 def _source_profile_block(

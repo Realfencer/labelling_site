@@ -495,8 +495,8 @@ def write_prompt(rec: dict, src: dict, las: list[dict], provider: str, degr: dic
         return sep.join(str(x).strip().rstrip(".;,") for x in bits if x and str(x).strip())
 
     where = place + (f" — {variation}" if variation else "")
-    setting = (f"Invent a NEW, specific {place} with its own architecture, materials, furniture and layout — a real, "
-               f"lived-in place, not a showroom. Composition: {rec.get('layout') or T2I_LAYOUTS[0]}")
+    setting = (f"Invent a NEW, specific {place} with its own architecture, materials, furniture and layout — an "
+               f"ordinary, everyday place, not a showroom and not a cosy wood-and-warm-light interior. Composition: {rec.get('layout') or T2I_LAYOUTS[0]}")
     light = j(scene.get("light"), scene.get("time_of_day") if scene.get("time_of_day") != "unknown" else "",
               f"weather {scene['weather']}" if scene.get("weather") not in (None, "", "n/a") else "")
     ppl = (j(f"{crowd['count']} people" + (f" ({crowd['density']})" if crowd.get("density") else ""),
