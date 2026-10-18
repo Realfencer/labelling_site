@@ -5,6 +5,17 @@ import type { DetectionBox } from "../types";
 import { useReview } from "../store/useReview";
 import { cn } from "../lib/utils";
 
+/** One icon and one colour per kind of finding: the same badge is drawn on the box in the image. */
+export const REVIEW_ICON: Record<string, string> = { huge: "✕", tiny: "•", stacked: "⧉", nested: "□", wrong: "?", missed: "+" };
+export const REVIEW_COLOR: Record<string, string> = {
+  huge: "#fb7185",
+  tiny: "#fb923c",
+  stacked: "#e879f9",
+  nested: "#f0abfc",
+  wrong: "#fbbf24",
+  missed: "#22d3ee",
+};
+
 const KIND_STYLE: Record<string, string> = {
   huge: "border-rose-400 bg-rose-500/15 text-rose-700 dark:text-rose-200",
   tiny: "border-orange-400 bg-orange-500/15 text-orange-700 dark:text-orange-200",
@@ -119,6 +130,12 @@ export default function ReviewPanel({
             k === cursor && "ring-2 ring-offset-1 ring-sky-400 ring-offset-transparent",
           )}
         >
+          <span
+            className="mr-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-white align-[-3px] text-[10px] font-black text-slate-900"
+            style={{ backgroundColor: REVIEW_COLOR[issue.kind] }}
+          >
+            {REVIEW_ICON[issue.kind]}
+          </span>
           {describe(issue, boxes, classNames)}
         </button>
       ))}

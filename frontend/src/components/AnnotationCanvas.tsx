@@ -18,8 +18,8 @@ type ResizeMode = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | null;
 type Transform = { scale: number; offsetX: number; offsetY: number };
 /** A zoom window in image terms (centre in image pixels, zoom relative to "fit"): looks the same on any screen size. */
 export type ViewShare = { cx: number; cy: number; z: number };
-/** A reason drawn around a box (Own Review): dashed frame in ``color`` with a tag; ``strong`` = the one being looked at. */
-export type Callout = { x1: number; y1: number; x2: number; y2: number; text: string; color: string; strong?: boolean };
+/** A reason marked on a box (Own Review): a badge in ``color`` with a one-character icon ``text``; ``strong`` = the one in focus. */
+export type Callout = { x1: number; y1: number; x2: number; y2: number; text: string; color: string; strong?: boolean; outline?: boolean };
 
 interface Props {
   fullUrl: string;
@@ -1090,52 +1090,45 @@ export default function AnnotationCanvas({
       ctx.restore();
     }
 
-    // Review reasons: a dashed frame just outside the box and a tag saying what looks wrong. The tag goes UNDER the
-    // box (the class label sits on top of it), above only when there is no room below, and steps aside from tags
-    // already placed so neither covers the other.
+    // Review reasons: one small coloured badge with an icon on the box's lower-right corner (the class label keeps the
+    // top-left). The reason in focus gets a bigger badge with a glow. Badges never sit on top of each other.
     const notes = calloutsRef.current;
     if (notes?.length) {
       ctx.save();
-      const fontPx = Math.max(9, 11.5 / scale);
-      ctx.font = `800 ${fontPx}px Inter, Segoe UI, sans-serif`;
-      const placed: Array<[number, number, number, number]> = [];
-      const hits = (x: number, y: number, w: number, h: number) =>
-        placed.some(([px, py, pw, ph]) => x < px + pw && x + w > px && y < py + ph && y + h > py);
+      const placed: Array<[number, number, number]> = [];
       for (const n of notes) {
-        const pad = (n.strong ? 5 : 3) / scale;
-        const x1 = Math.max(0, Math.min(n.x1, n.x2)) - pad;
-        const y1 = Math.max(0, Math.min(n.y1, n.y2)) - pad;
-        const x2 = Math.min(width, Math.max(n.x1, n.x2)) + pad;
-        const y2 = Math.min(height, Math.max(n.y1, n.y2)) + pad;
-        ctx.globalAlpha = n.strong ? 1 : 0.85;
-        ctx.setLineDash([6 / scale, 4 / scale]);
-        ctx.lineWidth = (n.strong ? 3 : 2) / scale;
-        ctx.shadowColor = n.color;
-        ctx.shadowBlur = (n.strong ? 10 : 4) / scale;
-        ctx.strokeStyle = n.color;
-        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-        ctx.setLineDash([]);
-        ctx.shadowBlur = 0;
-        const padX = 5 / scale;
-        const tw = ctx.measureText(n.text).width;
-        const th = fontPx + 6 / scale;
-        const tagW = tw + padX * 2;
-        let tx = x1;
-        if (tx + tagW > width) tx = Math.max(0, width - tagW);
-        const below = y2 + 2 / scale;
-        const above = y1 - th - 2 / scale;
-        let ty = below + th <= height ? below : Math.max(0, above);
-        for (let k = 0; k < 6 && hits(tx, ty, tagW, th); k += 1) {
-          const step = ty >= y2 ? th + 1 / scale : -(th + 1 / scale);
-          const next = ty + step;
-          if (next < 0 || next + th > height) break;
-          ty = next;
+        const r = (n.strong ? 11 : 8) / scale;
+        let cx = Math.min(Math.max(n.x1, n.x2), width - r);
+        let cy = Math.min(Math.max(n.y1, n.y2), height - r);
+        cx = Math.max(r, cx);
+        cy = Math.max(r, cy);
+        for (let k = 0; k < 6 && placed.some(([px, py, pr]) => Math.hypot(px - cx, py - cy) < pr + r); k += 1) {
+          cx = Math.max(r, cx - 2 * r - 2 / scale);
         }
-        placed.push([tx, ty, tagW, th]);
+        placed.push([cx, cy, r]);
+        ctx.globalAlpha = 1;
+        if (n.outline) {
+          // A drink nobody labeled has no box of its own: a thin solid outline shows where it is.
+          ctx.lineWidth = (n.strong ? 2.5 : 1.5) / scale;
+          ctx.strokeStyle = n.color;
+          ctx.strokeRect(Math.min(n.x1, n.x2), Math.min(n.y1, n.y2), Math.abs(n.x2 - n.x1), Math.abs(n.y2 - n.y1));
+        }
+        ctx.shadowColor = n.strong ? n.color : "rgba(0,0,0,0.55)";
+        ctx.shadowBlur = (n.strong ? 12 : 4) / scale;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.fillStyle = n.color;
-        ctx.fillRect(tx, ty, tw + padX * 2, th);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = (n.strong ? 2.5 : 1.5) / scale;
+        ctx.strokeStyle = "#ffffff";
+        ctx.stroke();
+        const fontPx = r * 1.25;
+        ctx.font = `900 ${fontPx}px Inter, Segoe UI, sans-serif`;
         ctx.fillStyle = "#0b1220";
-        ctx.fillText(n.text, tx + padX, ty + fontPx + 1 / scale);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(n.text, cx, cy + fontPx * 0.05);
       }
       ctx.restore();
     }

@@ -30,7 +30,7 @@ import { useKeys } from "./store/useKeys";
 import { useTeamSync } from "./hooks/useTeamSync";
 import { dropPendingSave, flushOnUnload, hasPendingSaves, retrySave, setSaveConflictHandler } from "./store/saveRetry";
 import AnnotationCanvas, { type Callout, type ViewShare } from "./components/AnnotationCanvas";
-import ReviewPanel from "./components/ReviewPanel";
+import ReviewPanel, { REVIEW_COLOR, REVIEW_ICON } from "./components/ReviewPanel";
 import { useReviewSync, syncReviewNow } from "./hooks/useReviewSync";
 import { useReview, reviewIsOpen } from "./store/useReview";
 const FindBestModal = lazy(() => import("./components/FindBestModal"));
@@ -350,6 +350,7 @@ function filmstripIndices(
 }
 
 const LABEL_CHECK_DELTA = 0.06;
+
 /** Holding G this long turns "watch" into "ask the team for help on this spot". */
 const G_HOLD_MS = 300;
 const CURRENT_CHECKS_KIND = "r123-v9";
@@ -4513,23 +4514,9 @@ export default function App({
   const [reviewHover, setReviewHover] = useState<ReviewIssue | null>(null);
   const reviewKey = isReviewDay ? detail?.challenge?.item_key ?? null : null;
   const reviewStatus = reviewKey ? reviewItems[reviewKey] : undefined;
-  // Drinks the model sees but nobody labeled: shown as dashed "missed" ghosts while the image is still to check.
-  const reviewGhosts = useMemo<DetectionBox[]>(
-    () =>
-      reviewStatus?.open
-        ? reviewStatus.issues
-            .filter((i) => i.kind === "missed" && i.box && i.risk > 0)
-            .map((i) => ({ cls: i.model_cls ?? 0, x1: i.box![0], y1: i.box![1], x2: i.box![2], y2: i.box![3], conf: i.conf ?? null }))
-        : [],
-    [reviewStatus],
-  );
   useEffect(() => setReviewHover(null), [reviewKey]);
   const reviewFocusIdxs =
     reviewHover && reviewHover.i >= 0 ? [reviewHover.i, ...(reviewHover.other != null ? [reviewHover.other] : [])] : null;
-  const reviewGhostFocus =
-    reviewHover?.kind === "missed" && reviewHover.box
-      ? [reviewGhosts.findIndex((g) => g.x1 === reviewHover.box![0] && g.y1 === reviewHover.box![1])].filter((k) => k >= 0)
-      : null;
   const focusReviewIssue = useCallback(
     (issue: ReviewIssue) => {
       if (issue.i >= 0 && issue.i < boxes.length) {
@@ -4562,43 +4549,31 @@ export default function App({
     focusReviewIssue(reviewOpenIssues[next]);
   };
   // What looks wrong, written next to the box itself.
-  const reviewNames = detail?.class_names?.length ? detail.class_names : appState?.model_class_names ?? [];
   const reviewCallouts = useMemo<Callout[]>(() => {
     if (!reviewStatus?.open) return [];
-    const nm = (c: number | undefined) => (c != null ? reviewNames[c] ?? `class ${c}` : "?");
     const out: Callout[] = [];
     reviewOpenIssues.forEach((issue, k) => {
       const strong = k === reviewCursor || reviewHover === issue;
       const at = (i: number | undefined) => (i != null && i >= 0 ? boxes[i] : undefined);
       const b = at(issue.i);
+      // Icon + colour only (the bar above says it in words): ✕ big box, no drink · • tiny · ⧉ stacked · □ box in box ·
+      // ? other class · + unlabeled drink.
       if (issue.kind === "missed" && issue.box) {
         const [x1, y1, x2, y2] = issue.box;
-        out.push({ x1, y1, x2, y2, text: `UNLABELED ${nm(issue.model_cls).toUpperCase()}?`, color: "#22d3ee", strong });
+        out.push({ x1, y1, x2, y2, text: "+", color: REVIEW_COLOR.missed, strong, outline: true });
         return;
       }
       if (!b) return;
-      const text =
-        issue.kind === "huge"
-          ? "BIG BOX · NO DRINK HERE"
-          : issue.kind === "tiny"
-            ? "TINY BOX"
-            : issue.kind === "stacked"
-              ? "2 BOXES ON 1 OBJECT"
-              : issue.kind === "nested"
-                ? "BOX IN BOX"
-                : issue.kind === "wrong"
-                  ? `MODEL: ${nm(issue.model_cls).toUpperCase()} ${Math.round((issue.conf ?? 0) * 100)}%`
-                  : issue.text.toUpperCase();
-      const color =
-        issue.kind === "huge" ? "#fb7185" : issue.kind === "tiny" ? "#fb923c" : issue.kind === "wrong" ? "#fbbf24" : "#e879f9";
-      out.push({ x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, text, color, strong });
+      const icon = REVIEW_ICON[issue.kind] ?? "!";
+      const color = REVIEW_COLOR[issue.kind] ?? "#e879f9";
+      out.push({ x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, text: icon, color, strong });
       const o = at(issue.other);
       if ((issue.kind === "stacked" || issue.kind === "nested") && o) {
-        out.push({ x1: o.x1, y1: o.y1, x2: o.x2, y2: o.y2, text: issue.kind === "stacked" ? "2ND BOX" : "OUTER BOX", color, strong });
+        out.push({ x1: o.x1, y1: o.y1, x2: o.x2, y2: o.y2, text: icon, color, strong });
       }
     });
     return out;
-  }, [reviewStatus, reviewOpenIssues, reviewCursor, reviewHover, boxes, reviewNames]);
+  }, [reviewStatus, reviewOpenIssues, reviewCursor, reviewHover, boxes]);
 
   // Checked images (fixed, or "looks right") leave the list once you move on — the list is worked until it is empty.
   const saveAt = useTeam((s) => s.save.at);
@@ -5367,8 +5342,7 @@ export default function App({
                       showGuides={ownGuides}
                       onViewChange={onMainView}
                       linkedFocusIdxs={reviewFocusIdxs}
-                      ghostBoxes={isReviewDay ? reviewGhosts : undefined}
-                      linkedGhostIdxs={reviewGhostFocus}
+                      linkedGhostIdxs={null}
                       callouts={isReviewDay ? reviewCallouts : undefined}
                       {...peekProps}
                     />
@@ -5429,8 +5403,7 @@ export default function App({
                   showGuides={ownGuides}
                   onViewChange={onMainView}
                   linkedFocusIdxs={reviewFocusIdxs}
-                  ghostBoxes={isReviewDay ? reviewGhosts : undefined}
-                  linkedGhostIdxs={reviewGhostFocus}
+                  linkedGhostIdxs={null}
                   callouts={isReviewDay ? reviewCallouts : undefined}
                   {...peekProps}
                 />
