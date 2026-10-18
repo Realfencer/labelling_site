@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -135,13 +136,18 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
     hard_bank = [b for b in bank if b["hard"]]
     la_bank = _look_alike_bank(usable)
     hard_by_frame = Counter(b["frame"] for b in hard_bank)
-    alloc = _alloc({fn: 1.0 + hard_by_frame[fn] for fn in usable}, n)
+    # frames with hard drinks get more recipes, but at most 3 hard drinks count — crowded frames full of hard drinks
+    # (e.g. 20 cups around one bin) otherwise took 36 of 1,000 recipes each and the run averaged 8 drinks per image
+    alloc = _alloc({fn: 1.0 + min(hard_by_frame[fn], 3) for fn in usable}, n)
 
     from app.gen_plan import degradation_stats
 
     degr = degradation_stats([s["record"] for s in srcs.values()])
     mix = Mixer(usable, bank, rng, variety)
     recipes = []
+    bin_frames = {b["frame"] for b in bank if in_bin(b)}
+    bin_rate = len(bin_frames) / max(1, len(usable))  # the eval set's share of frames with drinks in / on a bin
+    bin_images = 0
 
     for fn in sorted(alloc, key=lambda k: (-alloc[k], k)):
         s = usable[fn]
@@ -152,8 +158,11 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
         rng.shuffle(layouts)  # siblings of one anchor never repeat a composition (until all 8 are used)
         donors_used: set[str] = set()
         for j in range(alloc[fn]):
+            # 0 · may this image show drinks in / on a bin? (running quota = the eval set's share)
+            allow_bin = bin_images < bin_rate * (len(recipes) + 1)
+            ok_bin = (lambda b: True) if allow_bin else (lambda b: not in_bin(b))
             # 1 · drinks: the anchor's own (easy ones too), some dropped; hard ones from other frames; a few extra
-            drinks = list(own)
+            drinks = [b for b in own if ok_bin(b)]
             rng.shuffle(drinks)
             easy = [b for b in drinks if not b["hard"]]
             for b in easy:
@@ -166,7 +175,7 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
 
             added = 0
             while hard_bank and added < MAX_ADDED_HARD and short() > 0:
-                b = mix.pick([x for x in hard_bank if x not in drinks], fn, people)
+                b = mix.pick([x for x in hard_bank if x not in drinks and ok_bin(x)], fn, people)
                 if not b:
                     break
                 drinks.append(b)
@@ -175,7 +184,7 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
             # above 50 % hard: also swap easy drinks for hard ones, but at least half of the frame's easy drinks stay
             keep_easy = (sum(not b["hard"] for b in drinks) + 1) // 2
             while hard_bank and hard_share > 0.5 and short() > 0 and sum(not b["hard"] for b in drinks) > keep_easy:
-                b = mix.pick([x for x in hard_bank if x not in drinks], fn, people)
+                b = mix.pick([x for x in hard_bank if x not in drinks and ok_bin(x)], fn, people)
                 if not b:
                     break
                 out = rng.choice([x for x in drinks if not x["hard"]])
@@ -184,22 +193,28 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
                 drinks.append(b)
                 mix.count([b])
             for _ in range(rng.randint(0, round(2 * variety))):  # count variety: extra everyday drinks
-                b = mix.pick([x for x in bank if x not in drinks and not x["hard"]], fn, people)
+                b = mix.pick([x for x in bank if x not in drinks and not x["hard"] and ok_bin(x)], fn, people)
                 if b:
                     drinks.append(b)
                     mix.count([b])
-            if not drinks and bank:
-                b = mix.pick(bank, fn, people)
+            if not drinks and bank:  # e.g. every drink of the anchor was in a bin
+                b = mix.pick([x for x in bank if ok_bin(x)] or bank, fn, people)
                 if b:
                     drinks.append(b)
                     mix.count([b])
             # 2 · scene: the anchor's place type / light / camera / look, mixed with other frames
             sc = mix.scene(fn, donors_used, j)
             indoor = bool(scene.get("indoor"))
-            specs = [mix.drink(b, people or bool(sc["crowd"].get("count")), indoor, sc["donor"]) for b in drinks]
+            specs = [mix.drink(b, people or bool(sc["crowd"].get("count")), indoor, sc["donor"], allow_bin) for b in drinks]
+            has_bin = any(in_bin(d) for d in specs)
+            bin_images += has_bin
+            if not has_bin:  # no bin in this image: size comparisons must not bring one in either
+                for d in specs:
+                    if d.get("relative_size") and BIN_RE.search(str(d["relative_size"])):
+                        d["relative_size"] = None
             las = []
             if la_bank and look_alikes:
-                pool = sorted(la_bank, key=lambda x: (mix.used["la:" + str(x["object"])], rng.random()))
+                pool = sorted([x for x in la_bank if has_bin or not BIN_RE.search(f"{x['object']} {x.get('where') or ''}")], key=lambda x: (mix.used["la:" + str(x["object"])], rng.random()))
                 las = pool[: rng.choice(range(look_alikes + 1)) if look_alikes > 1 else look_alikes]
                 for x in las:
                     mix.used["la:" + str(x["object"])] += 1
@@ -223,6 +238,17 @@ def build(analysis_dir: Path, dataset_root: Path | None, n: int, provider: str =
 
 # Drink sizes per class relative to a cup at the same distance (a class swap rescales the measured size).
 CLASS_SCALE = {"cup": 1.0, "can": 0.9, "bottle": 1.35}
+# Drinks in / on a trash or recycling bin: a scene element with a quota. Bin drinks are mostly HARD (missed), so
+# spreading every hard case over all images put a bin into 74 % of a 1,000-image run vs 23 % of the eval frames
+# (2026-10-18). Now only the eval set's share of images may contain bin drinks (look-alikes and holders included).
+BIN_RE = re.compile(r"\b(bins?|trash|rubbish|garbage|recycl\w*|waste ?(basket|bin|can|container)|dumpster|litter ?bin)\b", re.I)
+
+
+def in_bin(b: dict) -> bool:
+    c = b.get("card") or b
+    return str(c.get("placement")) == "bin" or bool(BIN_RE.search(f"{c.get('holder') or ''} {c.get('object') or ''}"))
+
+
 HELD = {"hand", "bag", "pocket"}  # carried by a person; anything else stands / lies on something
 # horizontal spots; the vertical one follows the drink's distance (the camera looks down: far = higher in the frame)
 H_SPOTS = ("left third", "centre", "right third", "left of centre", "right of centre")
@@ -301,7 +327,7 @@ class Mixer:
             self.stats["crowd_mixed"] += 1
         return {"place": place, "donor": donor, "crowd": crowd, "crowd_from": crowd_from}
 
-    def drink(self, b: dict, people: bool, indoor: bool, donor: str | None = None) -> dict:
+    def drink(self, b: dict, people: bool, indoor: bool, donor: str | None = None, allow_bin: bool = True) -> dict:
         c = b["card"]
         spec = {"key": b["key"], "cls": b["cls"], "hard": b["hard"], "status": b["status"], "h_pct": b["h_pct"],
                 "distance": str(c.get("distance") or "mid"), "object": c.get("object"), "holder": c.get("holder"),
@@ -332,7 +358,7 @@ class Mixer:
         moved = bool(donor) and not held and b["frame"] != donor
         if not b["hard"] and (moved or rnd() < 0.6 * self.v):
             def ok(x: dict, same_distance: bool) -> bool:
-                return (x["key"] != b["key"] and bool(x["card"].get("holder"))
+                return (x["key"] != b["key"] and bool(x["card"].get("holder")) and (allow_bin or not in_bin(x))
                         and (str(x["card"].get("placement")) in HELD) == held
                         and (people or str(x["card"].get("placement")) != "hand")
                         and (not same_distance or str(x["card"].get("distance") or "mid") == spec["distance"]))
@@ -367,6 +393,7 @@ def coverage(recipes: list[dict], bank: list[dict], alloc: dict[str, int], la_ba
         "crowds_mixed": sum(r.get("crowd") is not None and bool(r.get("crowd_from")) for r in recipes),
         "drinks_changed": sum(bool(d.get("changed")) for d in drinks),
         "distinct_places": len({r.get("place") for r in recipes}),
+        "bin_images": sum(any(in_bin(d) for d in r["drinks"]) for r in recipes),
         # prices the text input of a run (≈ 3.8 characters per token)
         "avg_prompt_chars": round(sum(len(r.get("prompt") or "") for r in recipes) / max(1, len(recipes))),
     }
