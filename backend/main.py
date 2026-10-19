@@ -533,6 +533,7 @@ class UltralyticsUploadBody(BaseModel):
     block_max: int | None = None
     item_keys: list[str] | None = None  # hand-picked images (replaces the block range)
     own_days: list[str] | None = None  # Own: whole calendar days (YYYY-MM-DD), e.g. several days at once
+    own_field: str | None = Field(default=None, pattern="^(openai|gemini)$")  # Own: only this generator's images
     quality: str = "all"
     train_pct: int = 80
     val_pct: int = 10
@@ -1978,6 +1979,7 @@ def ultralytics_upload(body: UltralyticsUploadBody, state: AppStateDep) -> dict:
             quality=quality,
             item_keys=body.item_keys,
             own_days=body.own_days,
+            own_field=body.own_field,
         )
         split_args = dict(
             train_pct=body.train_pct,
@@ -2003,6 +2005,7 @@ def ultralytics_upload(body: UltralyticsUploadBody, state: AppStateDep) -> dict:
                 quality=sel.get("quality", "all"),
                 item_keys=sel.get("item_keys"),
                 own_days=sel.get("own_days"),
+                own_field=sel.get("own_field"),
                 **split_args,
             )
             result = ultra.upload_archive_and_ingest(

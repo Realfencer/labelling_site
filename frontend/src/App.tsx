@@ -5802,7 +5802,7 @@ export default function App({
           onClose={() => setUltralyticsOpen(false)}
           challenges={appState.challenges}
           ownMode={!isPlatform}
-          dayMode={ownDayListMode ? { preselect: daySel } : undefined}
+          dayMode={ownDayListMode ? { preselect: daySel, field: ownField } : undefined}
         />
       </MountOnOpen>
       <MountOnOpen open={dppOpen}>

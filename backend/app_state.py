@@ -5807,8 +5807,14 @@ class ReviewAppState:
         block_max: int | None,
         item_keys: list[str] | None,
         own_days: list[str] | None,
+        own_field: str | None = None,
     ) -> list:
-        """The Done (reviewed) GT images a zip export would contain (same rules as ``build_reviewed_gt_zip``)."""
+        """The Done (reviewed) GT images a zip export would contain (same rules as ``build_reviewed_gt_zip``).
+
+        ``own_field`` (Own: "openai" | "gemini"): only that generator's images, also inside whole days (a day can
+        hold both)."""
+        from . import generator
+
         if own_mode:
             try:
                 self.reload_own_pool(force=False, dedupe=False)
@@ -5837,6 +5843,8 @@ class ReviewAppState:
                     continue
                 if block_max is not None and block > int(block_max):
                     continue
+            if own_mode and own_field and generator.of(item) != own_field:
+                continue
             candidates.append(item)
 
         if quality != "all":
@@ -5873,6 +5881,7 @@ class ReviewAppState:
         block_max: int | None = None,
         item_keys: list[str] | None = None,
         own_days: list[str] | None = None,
+        own_field: str | None = None,
         max_bytes: int,
     ) -> tuple[list[list[str]], int]:
         """Split the export into parts whose zip stays under ``max_bytes`` (the zip stores images as-is, so its size is
@@ -5888,6 +5897,7 @@ class ReviewAppState:
             block_max=block_max,
             item_keys=item_keys,
             own_days=own_days,
+            own_field=own_field,
         )
         parts: list[list[str]] = []
         cur: list[str] = []
@@ -5924,6 +5934,7 @@ class ReviewAppState:
         quality: str = "all",
         item_keys: list[str] | None = None,
         own_days: list[str] | None = None,
+        own_field: str | None = None,
         train_pct: int = 80,
         val_pct: int = 10,
         test_pct: int = 10,
@@ -5962,6 +5973,7 @@ class ReviewAppState:
             block_max=block_max,
             item_keys=item_keys,
             own_days=own_days,
+            own_field=own_field,
         )
 
         def assign_split(item: core.ChallengeRecord) -> str:

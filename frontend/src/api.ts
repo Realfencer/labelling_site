@@ -1707,6 +1707,8 @@ export type UltralyticsUploadRequest = {
   item_keys?: string[] | null;
   /** Own: whole calendar days (YYYY-MM-DD) — send several days as one dataset. */
   own_days?: string[] | null;
+  /** Own days: only this generator's images ("openai" | "gemini"); null = every image of those days. */
+  own_field?: OwnField | null;
   quality?: string;
   train_pct?: number;
   val_pct?: number;

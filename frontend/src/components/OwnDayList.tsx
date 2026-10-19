@@ -159,7 +159,7 @@ export default function OwnDayList({ field, onFieldChange, onEnterDay, busy = fa
               type="button"
               disabled={sel.length === 0 || sum(sel, "done") === 0 || busy}
               onClick={() => onSendDays(sel)}
-              title={field ? "Send the Done images of the selected days (whole days: OpenAI and Gemini) to Ultralytics as one dataset" : "Send the Done images of the selected days to Ultralytics as one dataset"}
+              title={field ? `Send the ${field === "openai" ? "OpenAI" : "Gemini"} Done images of the selected days to Ultralytics as one dataset` : "Send the Done images of the selected days to Ultralytics as one dataset"}
               className="inline-flex items-center gap-1 rounded-md bg-rose-600 px-2.5 py-1 font-bold text-white hover:bg-rose-500 disabled:opacity-40"
             >
               <CloudUpload className="h-3.5 w-3.5" /> Send {sel.length || ""} {sel.length === 1 ? "day" : "days"} to Ultralytics

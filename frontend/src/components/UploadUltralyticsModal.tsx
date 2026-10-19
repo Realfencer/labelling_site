@@ -1,7 +1,7 @@
 import { useKeys } from "../store/useKeys";
 import { useEffect, useMemo, useState } from "react";
 import { CloudUpload, Loader2, X } from "lucide-react";
-import { api, type OwnDayRow, type UltralyticsDataset } from "../api";
+import { api, type OwnDayRow, type OwnField, type UltralyticsDataset } from "../api";
 import type { ChallengeItem } from "../types";
 import { checksFailComplete, checksPassComplete } from "../labelChecks";
 import { cn } from "../lib/utils";
@@ -24,10 +24,13 @@ export default function UploadUltralyticsModal({
   onClose: () => void;
   challenges: ChallengeItem[];
   ownMode?: boolean;
-  /** Own day list page: choose whole days (several days = one dataset) instead of a range of one day. */
-  dayMode?: { preselect: string[] };
+  /** Own day list page: choose whole days (several days = one dataset) instead of a range of one day. ``field``:
+   *  the OpenAI / Gemini filter the day list is on — then only that generator's images of those days are sent. */
+  dayMode?: { preselect: string[]; field?: OwnField | null };
 }) {
   const inDays = Boolean(dayMode);
+  const dayField = dayMode?.field ?? null;
+  const fieldName = dayField === "openai" ? "OpenAI" : dayField === "gemini" ? "Gemini" : "";
   const [dayRows, setDayRows] = useState<OwnDayRow[]>([]);
   const [selDays, setSelDays] = useState<string[]>([]);
   const labeled = useMemo(
@@ -92,8 +95,12 @@ export default function UploadUltralyticsModal({
       .listOwnDays()
       .then((r) => {
         if (!alive) return;
-        setDayRows(r.days);
-        const withDone = r.days.filter((d) => d.done > 0).map((d) => d.date);
+        // A generator filter counts only its own images of each day (a day can hold both).
+        const rows = dayField
+          ? r.days.filter((d) => (d.fields?.[dayField]?.total ?? 0) > 0).map((d) => ({ ...d, ...d.fields![dayField] }))
+          : r.days;
+        setDayRows(rows);
+        const withDone = rows.filter((d) => d.done > 0).map((d) => d.date);
         const pre = (dayMode?.preselect ?? []).filter((d) => withDone.includes(d));
         setSelDays(pre.length ? pre : withDone);
       })
@@ -101,7 +108,7 @@ export default function UploadUltralyticsModal({
     return () => {
       alive = false;
     };
-  }, [open, inDays]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, inDays, dayField]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) return;
@@ -215,6 +222,7 @@ export default function UploadUltralyticsModal({
         block_max: inDays ? undefined : hi,
         item_keys: inDays ? undefined : picked ?? undefined,
         own_days: inDays ? selDays : undefined,
+        own_field: inDays ? dayField : undefined,
         quality: ownMode || picked || inDays ? "all" : quality,
         train_pct: trainPct,
         val_pct: valPct,
@@ -580,7 +588,7 @@ export default function UploadUltralyticsModal({
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Will upload</div>
             <div className="mt-0.5 text-2xl font-black tabular-nums text-slate-900 dark:text-white">{count}</div>
             <div className="text-[11px] text-slate-500">
-              {inDays ? `${selDays.length} day${selDays.length === 1 ? "" : "s"} · Done images only` : picked ? "hand-picked images" : `blocks ${lo}–${hi}`}
+              {inDays ? `${selDays.length} day${selDays.length === 1 ? "" : "s"} · ${fieldName ? `${fieldName} ` : ""}Done images only` : picked ? "hand-picked images" : `blocks ${lo}–${hi}`}
               {forceSplit
                 ? ` · all → ${forceSplit}`
                 : ` · ~${estTrain}/${estVal}/${estTest} train/val/test`}
